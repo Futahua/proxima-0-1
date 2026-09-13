@@ -274,6 +274,25 @@ body.tk-dragging { cursor: grabbing; user-select: none; }
 .tk-cd-card.invalid { border-color: var(--danger); }
 .tk-cd-card.invalid .tk-cd-name::before { content: '⚠ '; color: var(--danger); }
 
+/* A locked plan member: its weight and column are part of the frozen plan, so
+   both controls are inert. The card stays legible — it is the run, after all. */
+.card.locked-member { cursor: default; }
+.card.locked-member .stepper.frozen { opacity: .55; }
+.card.locked-member .stepper.frozen .step { cursor: not-allowed; }
+
+/* Something that reached Running after the lock. It is not in the plan, gets no
+   slice, and says so instead of being silently fed the run's elapsed time. */
+.card.not-in-plan { border-left-color: var(--danger); border-style: dashed; }
+.card.not-in-plan .kind { color: var(--danger); }
+
+/* A bar cut off by the ends of the visible range shows that it continues,
+   rather than appearing to end at the window edge. */
+.tk-tl-bar.clipped-start { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+.tk-tl-bar.clipped-end { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.tk-tl-more-before, .tk-tl-more-after { font-size: 9px; opacity: .8; flex: 0 0 auto; }
+.tk-tl-more-before { margin-right: 3px; }
+.tk-tl-more-after { margin-left: 3px; }
+
 /* Urgency bands, shared by calendar chips, timeline bars and countdown cards. */
 .tk-cal-chip.urgency-overdue, .tk-tl-bar.urgency-overdue { background: var(--u-overdue); }
 .tk-cal-chip.urgency-today, .tk-tl-bar.urgency-today { background: var(--u-today); }

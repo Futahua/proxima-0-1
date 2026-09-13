@@ -124,8 +124,33 @@ const Store = (() => {
       return true;
     },
 
-    run: () => (state.run ? { ...state.run } : null),
-    setRun(run) { state.run = run ? { ...run } : null; save(); },
+    /**
+     * The locked run, or null. A run carries the plan it was locked with:
+     * `members` is a frozen snapshot of the participating tasks in order, each
+     * with the weight and the calculated duration it was given at lock time, plus
+     * the resolved start and end instants of its slot.
+     *
+     * That snapshot is the point. Without it, every tick re-derived the allocation
+     * from whatever happened to be running, so editing a weight or dragging a task
+     * into Running retroactively rewrote a horizon that was supposed to be frozen —
+     * a task that joined halfway could show progress accrued before it took part.
+     */
+    run: () => (state.run ? { ...state.run, members: state.run.members ? state.run.members.map((m) => ({ ...m })) : null } : null),
+
+    setRun(run) {
+      if (!run) { state.run = null; save(); return null; }
+      // A locked run with no participants is not a run: there is no plan to
+      // freeze and nothing to consume. Refuse it rather than store a ghost.
+      if (Array.isArray(run.members) && run.members.length === 0) return null;
+      state.run = {
+        lockedAt: run.lockedAt,
+        target: run.target,
+        members: Array.isArray(run.members) ? run.members.map((m) => ({ ...m })) : null,
+        total: Number(run.total) || 0,
+      };
+      save();
+      return { ...state.run };
+    },
 
     /**
      * The visible composition of the Timekeeping panels, so the workspace the

@@ -132,9 +132,24 @@
     overdue: '#e06c75', today: '#e7a24b', soon: '#e7d24b', week: '#9fd04a', later: '#6fa8dc',
   };
 
-  /** Whole days from `fromMs` to a deadline, negative when past. */
+  /**
+   * The instant a date-only deadline actually expires: the END of that day.
+   *
+   * A stored deadline is a plain YYYY-MM-DD, and `dayStart` turns it into local
+   * midnight. Measuring urgency from that midnight made a task due on the 13th
+   * overdue at 00:00 on the 13th — technically consistent, and wrong for everyone
+   * who reads "due the 13th" as "you have the 13th". So deadlines are measured to
+   * the end of their day; `dayStart` stays what it is, because span geometry,
+   * calendar placement and the Gantt all legitimately mean the start of a day.
+   */
+  const dayEnd = (value) => {
+    const ms = dayStart(value);
+    return Number.isNaN(ms) ? NaN : ms + DAY_MS;
+  };
+
+  /** Whole days from `fromMs` to a deadline's expiry, negative once past. */
   function daysUntil(deadline, fromMs) {
-    const ms = dayStart(deadline);
+    const ms = dayEnd(deadline);
     if (Number.isNaN(ms)) return NaN;
     return (ms - fromMs) / DAY_MS;
   }
@@ -250,50 +265,106 @@
   }
 
   /**
-   * A locked run is consumed in order: elapsed time fills the first card to
-   * completion, then the next, and so on. Returns a ratio per task id.
+   * A locked run's frozen plan. Returns null when there is no run, and
+   * `{ legacy: true }` when a run was stored before snapshots existed — such a
+   * run has no roster, so it cannot be rendered honestly and says so instead of
+   * re-deriving membership from live state (which is the bug the snapshot fixes).
    */
-  function progressFor(runningTasks, durations, run) {
-    const ratios = new Map();
-    if (!run) return ratios;
+  function lockedPlan() {
+    const run = Store.run();
+    if (!run) return null;
+    if (!Array.isArray(run.members)) return { legacy: true, run };
+    return {
+      legacy: false,
+      run,
+      members: run.members,
+      from: new Date(run.lockedAt).getTime(),
+      target: fromLocalInput(run.target),
+      total: run.total || 0,
+    };
+  }
 
-    let remaining = Math.max(0, Date.now() - new Date(run.lockedAt).getTime());
-    runningTasks.forEach((task) => {
-      const duration = durations.get(task.id) || 0;
-      if (duration <= 0) { ratios.set(task.id, 0); return; }
-      if (remaining >= duration) {
-        ratios.set(task.id, 1);
-        remaining -= duration;
-      } else {
-        ratios.set(task.id, Math.min(1, Math.max(0, remaining / duration)));
-        remaining = 0;
-      }
-    });
-    return ratios;
+  /** The tasks an unlocked board currently has running — used for planning only. */
+  function liveRunning() {
+    return visibleTasks().filter((t) => t.status === 'running');
   }
 
   /**
-   * The allocation model for one pass: the horizon, each running task's calculated
-   * duration, and the proportional height that duration earns it.
+   * The allocation model for one pass.
+   *
+   * While a run is locked this reads the SNAPSHOT and nothing else: membership,
+   * order, weights and durations are all the ones frozen at lock time. Live task
+   * state cannot influence it, which is what makes the lock mean something.
    */
-  function allocations(runningTasks) {
-    const run = Store.run();
-    const target = run && run.target ? fromLocalInput(run.target) : fromLocalInput(targetInput.value);
-    const from = run ? new Date(run.lockedAt) : new Date();
-    const available = target ? Math.max(0, target - from) : 0;
-    const { items: durations, total } = timelineFor(runningTasks, from, target);
+  function allocations() {
+    const plan = lockedPlan();
     const H = measureRunningHeight();
 
+    if (plan && !plan.legacy) {
+      const durations = new Map(plan.members.map((m) => [m.id, m.duration]));
+      // A member whose task no longer exists is not rendered — there is no card to
+      // draw — so the remaining slots are scaled to fill the column rather than
+      // leaving a gap for something that is gone. The snapshot itself is untouched;
+      // this only decides what the surviving plan looks like.
+      const present = plan.members.filter((m) => Store.task(m.id));
+      const presentTotal = present.reduce((sum, m) => sum + m.duration, 0);
+      const heights = new Map();
+      plan.members.forEach((m) => {
+        if (!Store.task(m.id)) return;
+        heights.set(m.id, Math.max(MIN_CARD_HEIGHT, presentTotal > 0 ? (m.duration / presentTotal) * H : 0));
+      });
+      return {
+        locked: true,
+        plan,
+        members: plan.members,
+        presentMembers: present,
+        durations,
+        total: plan.total,
+        presentTotal: presentTotal,
+        available: plan.target ? Math.max(0, plan.target.getTime() - plan.from) : 0,
+        from: new Date(plan.from),
+        target: plan.target,
+        height: H,
+        heights,
+        progress: progressForPlan(plan),
+      };
+    }
+
+    const running = liveRunning();
+    const from = new Date();
+    const target = fromLocalInput(targetInput.value);
+    const available = target ? Math.max(0, target - from) : 0;
+    const { items: durations, total } = timelineFor(running, from, target);
     return {
+      locked: false,
+      plan: plan || null,
+      members: null,
       durations,
       total,
       available,
       from,
       target,
       height: H,
-      heights: heightsFor(runningTasks, durations, total, H),
-      progress: progressFor(runningTasks, durations, run),
+      heights: heightsFor(running, durations, total, H),
+      progress: new Map(),
     };
+  }
+
+  /**
+   * Progress straight off the frozen plan: each member's slot has a fixed start
+   * and end instant, so elapsed time indexes into it directly. No live task is
+   * consulted, so a task that joined late cannot inherit earlier progress.
+   */
+  function progressForPlan(plan) {
+    const ratios = new Map();
+    const now = Date.now();
+    plan.members.forEach((member) => {
+      if (!member.duration || member.duration <= 0) { ratios.set(member.id, 0); return; }
+      if (now >= member.endsAt) ratios.set(member.id, 1);
+      else if (now <= member.startsAt) ratios.set(member.id, 0);
+      else ratios.set(member.id, Math.min(1, Math.max(0, (now - member.startsAt) / member.duration)));
+    });
+    return ratios;
   }
 
   /**
@@ -302,17 +373,34 @@
    */
   function viewModel() {
     const tasks = visibleTasks();
-    const running = tasks.filter((t) => t.status === 'running');
-    return { tasks, running, allocation: allocations(running), run: Store.run() };
+    const allocation = allocations();
+
+    // The running column is the plan's members, not "whatever says running".
+    // Membership comes from the snapshot, so filtering the view cannot redefine a
+    // locked run and a reload cannot silently adopt another project's tasks.
+    const running = [];
+    const seen = new Set();
+    if (allocation.locked) {
+      allocation.members.forEach((member) => {
+        const task = Store.task(member.id);
+        if (task && !seen.has(task.id)) { seen.add(task.id); running.push(task); }
+      });
+    } else {
+      tasks.filter((t) => t.status === 'running').forEach((t) => { seen.add(t.id); running.push(t); });
+    }
+    // Anyone who reached Running after the lock is not part of the plan. They are
+    // still shown, flagged, rather than hidden or quietly given a slice.
+    const outsiders = tasks.filter((t) => t.status === 'running' && !seen.has(t.id));
+
+    return { tasks, running, outsiders, allocation, run: allocation.locked || (allocation.plan && allocation.plan.legacy) ? Store.run() : null };
   }
 
   /** What one running task owns: its slice of duration, or of weight with no target. */
   function shareFor(task, allocation) {
     const duration = allocation.durations.get(task.id);
     if (duration !== undefined) return duration;
-    const totalWeight = visibleTasks()
-      .filter((t) => t.status === 'running')
-      .reduce((sum, t) => sum + t.weight, 0) || 1;
+    if (allocation.locked) return null; // not in the plan: it owns no slice
+    const totalWeight = liveRunning().reduce((sum, t) => sum + t.weight, 0) || 1;
     return (task.weight / totalWeight) * allocation.available;
   }
 
@@ -326,14 +414,28 @@
   /** The one line under the Lock button, shared by the rebuild and the tick. */
   function runLine(view) {
     const { allocation, running, run } = view;
-    if (run) {
-      const lockedAt = new Date(run.lockedAt).getTime();
-      const target = fromLocalInput(run.target);
-      const total = target ? target.getTime() - lockedAt : 0;
-      const left = Math.max(0, total - (Date.now() - lockedAt));
+    if (run && allocation.locked) {
+      const total = allocation.available;
+      const left = Math.max(0, total - (Date.now() - allocation.from.getTime()));
+      // Count what is actually on the board, not what was frozen: a member whose
+      // task was deleted is gone, and saying "3 tasks in the plan" over two cards
+      // would be its own small lie.
+      const active = (allocation.presentMembers || []).filter((m) => {
+        const task = Store.task(m.id);
+        return task && task.status === 'running';
+      }).length;
+      const frozen = (allocation.presentMembers || []).length;
+      const dropped = frozen - active;
+      const roster = active + (active === 1 ? ' task' : ' tasks') + ' in the plan' +
+        (dropped > 0 ? ', ' + dropped + ' no longer running' : '');
       return left > 0
-        ? 'Running — ' + humanDuration(left) + ' left of ' + humanDuration(total)
-        : 'Run finished — the target has passed.';
+        ? 'Locked — ' + humanDuration(left) + ' left of ' + humanDuration(total) + ', ' + roster
+        : 'Run finished — the target has passed. ' + roster + '.';
+    }
+    if (run) {
+      // A run stored before plans were snapshotted. It cannot be rendered from a
+      // roster it never recorded, so say that rather than invent one.
+      return 'Locked, but this run was stored before plans were snapshotted — it has no frozen roster. Unlock and lock again.';
     }
     return allocation.target
       ? humanDuration(allocation.available) + ' across ' + running.length +
@@ -356,6 +458,13 @@
     const host = runningHost();
     if (!host) return;
 
+    // A run stored before plans were snapshotted has no roster to lay out. The
+    // line under the button explains it; nothing is invented here.
+    if (view.run && !view.allocation.locked) {
+      runInfo.textContent = runLine(view);
+      return;
+    }
+
     host.style.height = view.allocation.height + 'px';
 
     // Heights are placed by hand because the cards are absolute: stacking them
@@ -369,8 +478,21 @@
       card.style.height = height + 'px';
       // A floor-height card has no room for its footer; hide it rather than spill.
       card.classList.toggle('tight', height < 132);
-      paintWipe(card, view.run ? view.allocation.progress.get(task.id) || 0 : 0);
+      paintWipe(card, view.allocation.progress.get(task.id) || 0);
       top += height + CARD_GAP;
+    });
+
+    // Anything that reached Running after the lock sits below the plan at floor
+    // height, flagged. It has no slice and no progress, and it never will have
+    // had any: the plan was frozen before it arrived.
+    view.outsiders.forEach((task) => {
+      const card = host.querySelector('.card[data-id="' + task.id + '"]');
+      if (!card) return;
+      card.style.top = Math.round(top) + 'px';
+      card.style.height = MIN_CARD_HEIGHT + 'px';
+      card.classList.add('tight');
+      paintWipe(card, 0);
+      top += MIN_CARD_HEIGHT + CARD_GAP;
     });
 
     runInfo.textContent = runLine(view);
@@ -391,7 +513,7 @@
   }
 
   function render() {
-    const { tasks, running, allocation, run } = viewModel();
+    const { tasks, running, outsiders, allocation, run } = viewModel();
 
     // A rebuild replaces every column's children, so any drop highlight left on
     // the previous nodes would survive as a stale tint on the column.
@@ -402,8 +524,14 @@
     $('#scopeLabel').textContent = active ? active.name.toUpperCase() : 'ALL PROJECTS';
 
     ['backlog', 'running', 'finished'].forEach((status) => {
-      const list = tasks.filter((t) => t.status === status);
       const host = $('.cards[data-drop="' + status + '"]');
+      // Backlog and Finished are the filtered view. Running is not: while a run is
+      // locked its roster is the plan, so a member stays on the board even when the
+      // project filter excludes it. Otherwise filtering would look like the plan
+      // changing, and a reload under a different filter would look like it too.
+      const list = status === 'running'
+        ? running.concat(outsiders)
+        : tasks.filter((t) => t.status === status);
       $('[data-count="' + status + '"]').textContent = String(list.length);
       host.replaceChildren();
       if (list.length === 0) {
@@ -433,19 +561,30 @@
     paint();
   }
 
-  /** Inline plus/minus stepper, clamped at a minimum of one. */
-  function stepperFor(task) {
+  /**
+   * Inline plus/minus stepper, clamped at a minimum of one.
+   *
+   * While a run is locked the stepper is rendered but disabled for participating
+   * tasks: their weight is part of the frozen plan, and letting it move would
+   * either silently re-plan the run or show a number the plan is ignoring. Both
+   * are lies, so the control is inert and says why.
+   */
+  function stepperFor(task, frozen) {
     const group = document.createElement('span');
     group.className = 'stepper';
-    group.title = 'Weight';
+    group.title = frozen
+      ? 'Weight is part of the locked plan. Unlock to change it.'
+      : 'Weight';
+    if (frozen) group.classList.add('frozen');
 
     const down = document.createElement('button');
     down.type = 'button';
     down.className = 'step';
     down.textContent = '−';
-    down.disabled = task.weight <= 1;
+    down.disabled = frozen || task.weight <= 1;
     down.addEventListener('click', (event) => {
       event.stopPropagation();
+      if (frozen) return;
       Store.updateTask(task.id, { weight: Math.max(1, task.weight - 1) });
       render();
     });
@@ -458,8 +597,10 @@
     up.type = 'button';
     up.className = 'step';
     up.textContent = '+';
+    up.disabled = frozen;
     up.addEventListener('click', (event) => {
       event.stopPropagation();
+      if (frozen) return;
       Store.updateTask(task.id, { weight: task.weight + 1 });
       render();
     });
@@ -471,13 +612,21 @@
   function cardFor(task, allocatedMs, run, from, allocation) {
     const card = document.createElement('article');
     card.className = 'card ' + task.status;
-    card.draggable = true;
     card.dataset.id = task.id;
 
     const isRunning = task.status === 'running';
     const locked = isRunning && Boolean(run);
+    const inPlan = locked && Boolean(allocation && allocation.locked && allocation.durations.has(task.id));
+    const outsider = locked && !inPlan;
 
-    if (locked) {
+    // A participating task is part of a frozen plan: it must not be draggable
+    // into another column, because that would rewrite the run's roster after the
+    // fact. Its weight stepper is disabled for the same reason.
+    card.draggable = !inPlan;
+    if (inPlan) card.classList.add('locked-member');
+    if (outsider) card.classList.add('not-in-plan');
+
+    if (locked && allocation && allocation.locked) {
       // Same path the tick uses, so a rebuild and a restyle agree on the wipe.
       paintWipe(card, allocation.progress.get(task.id) || 0);
     }
@@ -488,7 +637,7 @@
 
     const kind = document.createElement('p');
     kind.className = 'kind';
-    kind.textContent = task.status.toUpperCase();
+    kind.textContent = outsider ? 'RUNNING — NOT IN THE LOCKED PLAN' : task.status.toUpperCase();
     body.append(kind);
 
     const title = document.createElement('h4');
@@ -521,7 +670,7 @@
 
     const acts = document.createElement('div');
     acts.className = 'acts';
-    if (isRunning) acts.append(stepperFor(task));
+    if (isRunning) acts.append(stepperFor(task, inPlan));
 
     const del = document.createElement('button');
     del.className = 'del';
@@ -529,7 +678,10 @@
     del.textContent = '×';
     del.addEventListener('click', (event) => {
       event.stopPropagation();
-      if (Store.deleteTask(task.id)) render();
+      // Deleting a plan member is allowed: it is a data operation, not a re-plan,
+      // and the run ends honestly rather than keeping a slot for a task that is
+      // gone. See endRunIfEmpty().
+      if (Store.deleteTask(task.id)) { render(); endRunIfEmpty(); }
     });
     acts.append(del);
     card.append(acts);
@@ -544,6 +696,13 @@
   columns.addEventListener('dragstart', (event) => {
     const card = event.target.closest('.card');
     if (!card) return;
+    // A plan member is not draggable — the card is built with draggable=false, and
+    // this is the belt to that braces: a drag must never be able to rewrite the
+    // roster of a locked run.
+    if (card.classList.contains('locked-member')) {
+      event.preventDefault();
+      return;
+    }
     dragId = card.dataset.id;
     card.classList.add('dragging');
     placeholder = document.createElement('div');
@@ -589,10 +748,23 @@
     const host = event.target.closest('.cards');
     if (!host || !dragId) return;
     event.preventDefault();
+    // Dropping into Running while locked would add a task to a roster that is
+    // supposed to be frozen. Refuse it and say so, rather than admit a task the
+    // plan cannot give a slice to.
+    if (host.dataset.drop === 'running' && lockedPlan()) {
+      if (placeholder) placeholder.remove();
+      dragId = null;
+      $$('.cards').forEach((c) => c.classList.remove('over'));
+      render();
+      runInfo.textContent = 'The running column is a locked plan — unlock to change who is in the run.';
+      return;
+    }
     const next = placeholder ? placeholder.nextElementSibling : null;
     const beforeId = next && next.classList.contains('card') ? next.dataset.id : null;
     Store.moveTask(dragId, host.dataset.drop, beforeId);
+    dragId = null;
     render();
+    endRunIfEmpty();
   });
 
   function cardAfter(host, y) {
@@ -700,6 +872,9 @@
     else Store.addTask(fields);
     taskDialog.close();
     queueMicrotask(renderEverything);
+    // Editing a plan member's status is how it leaves the run. If that was the
+    // last one, the run is over and says so rather than ticking against nobody.
+    queueMicrotask(endRunIfEmpty);
   });
 
   projectForm.addEventListener('submit', (event) => {
@@ -722,6 +897,62 @@
     paint();
   });
 
+  /**
+   * Freeze the current running set into a plan: the participating task ids, their
+   * order, their weights, and the duration each is given over the horizon — plus
+   * the resolved start and end instant of every slot, so progress can be read off
+   * the plan without consulting live tasks at all.
+   */
+  function snapshotPlan(targetValue) {
+    const lockedAt = new Date();
+    const target = fromLocalInput(targetValue);
+    const running = liveRunning();
+    if (running.length === 0) return null;
+    if (!target || target <= lockedAt) return null;
+
+    const totalMs = target.getTime() - lockedAt.getTime();
+    const totalWeight = running.reduce((sum, t) => sum + t.weight, 0) || 1;
+    let cursor = lockedAt.getTime();
+    let total = 0;
+    const members = running.map((task) => {
+      const duration = (task.weight / totalWeight) * totalMs;
+      const startsAt = cursor;
+      const endsAt = cursor + duration;
+      cursor = endsAt;
+      total += duration;
+      return {
+        id: task.id,
+        name: task.name,
+        weight: task.weight,
+        duration,
+        startsAt,
+        endsAt,
+      };
+    });
+    return { lockedAt: lockedAt.toISOString(), target: targetValue, members: members, total: total };
+  }
+
+  /**
+   * A locked run whose members have all left — finished, dragged out or deleted —
+   * is over. End it and say so, rather than leaving a live run that is consuming
+   * time for nobody and would hand that elapsed time to the next task to arrive.
+   */
+  function endRunIfEmpty() {
+    const plan = lockedPlan();
+    if (!plan || plan.legacy) return false;
+    const remaining = plan.members.filter((m) => {
+      const task = Store.task(m.id);
+      return task && task.status === 'running';
+    });
+    if (remaining.length > 0) return false;
+    Store.setRun(null);
+    clearInterval(ticker);
+    ticker = null;
+    render();
+    runInfo.textContent = 'The run ended: none of its planned tasks are still in the running column.';
+    return true;
+  }
+
   lockBtn.addEventListener('click', () => {
     if (Store.run()) {
       Store.setRun(null);
@@ -733,7 +964,18 @@
         runInfo.textContent = 'Pick a target in the future before locking.';
         return;
       }
-      Store.setRun({ lockedAt: new Date().toISOString(), target: targetInput.value });
+      // Locking nothing is not a run: there is no plan to freeze and no one to
+      // consume the horizon. Refuse it instead of storing a run with no members.
+      if (liveRunning().length === 0) {
+        runInfo.textContent = 'Nothing to lock — no tasks are in the running column.';
+        return;
+      }
+      const plan = snapshotPlan(targetInput.value);
+      if (!plan) {
+        runInfo.textContent = 'Pick a target in the future before locking.';
+        return;
+      }
+      Store.setRun(plan);
       ticker = setInterval(tick, 1000);
     }
     render();
@@ -1015,15 +1257,30 @@
    * it days away from its own deadline, which hides the contradiction the marker
    * exists to expose. The data is still reported untouched; only the drawn
    * geometry is made presentable, and it is drawn where the user was told to look.
+   *
+   * The window is finite, so the span is CLIPPED to it — both ends. Clipping only
+   * the left edge was a lie: a task that began before the window kept its full
+   * width, so a 60-day task ending today appeared to run a month into the future.
+   * Clipped ends are reported so the bar can show that it continues off-screen.
    */
   function barGeometry(task, win) {
     const span = spanOf(task);
     if (!span) return null;
     const from = Math.min(span.start, span.end);
     const to = Math.max(span.start, span.end);
-    const left = tlLeftInWindow(from, win);
-    const right = tlLeftInWindow(to, win);
-    return { left: Math.max(0, left), width: Math.max(right - left, 24) };
+    // Width stays exclusive of the end day, as reviewed: a one-day task is one
+    // column, a two-day task two. Only the clip is new.
+    const rawLeft = tlLeftInWindow(from, win);
+    const rawRight = tlLeftInWindow(to, win);
+    const windowEnd = tlLeftInWindow(win.max, win);
+    const left = Math.max(0, rawLeft);
+    const right = Math.min(windowEnd, rawRight);
+    return {
+      left: left,
+      width: Math.max(right - left, 24),
+      clippedStart: rawLeft < 0,
+      clippedEnd: rawRight > windowEnd,
+    };
   }
 
   function placeBar(bar, task, win) {
@@ -1031,6 +1288,31 @@
     if (!geometry) return;
     bar.style.transform = 'translateX(' + Math.round(geometry.left) + 'px)';
     bar.style.width = Math.round(geometry.width) + 'px';
+    bar.classList.toggle('clipped-start', geometry.clippedStart);
+    bar.classList.toggle('clipped-end', geometry.clippedEnd);
+    paintBarClips(bar, geometry);
+  }
+
+  /** The arrow that says a bar continues past the window rather than ending here. */
+  function paintBarClips(bar, geometry) {
+    let head = bar.querySelector('.tk-tl-more-before');
+    let tail = bar.querySelector('.tk-tl-more-after');
+    if (geometry.clippedStart && !head) {
+      head = document.createElement('span');
+      head.className = 'tk-tl-more-before';
+      head.textContent = '◀';
+      bar.prepend(head);
+    } else if (!geometry.clippedStart && head) {
+      head.remove();
+    }
+    if (geometry.clippedEnd && !tail) {
+      tail = document.createElement('span');
+      tail.className = 'tk-tl-more-after';
+      tail.textContent = '▶';
+      bar.append(tail);
+    } else if (!geometry.clippedEnd && tail) {
+      tail.remove();
+    }
   }
 
   function renderTimeline(tasks) {
@@ -1103,6 +1385,16 @@
             ' — the start is after the deadline. Drawn at its real deadline.';
         }
         placeBar(bar, task, win);
+        // Say so in words too: a clipped bar must not read as a task that simply
+        // ends at the window edge.
+        const geometry = barGeometry(task, win);
+        if (geometry && (geometry.clippedStart || geometry.clippedEnd)) {
+          const windowNote = (geometry.clippedStart ? 'Starts before ' + readableDay(dayString(new Date(win.min))) + '. ' : '') +
+            (geometry.clippedEnd ? 'Ends after ' + readableDay(dayString(new Date(win.max))) + '. ' : '') +
+            'The bar is cut off at the edge of the visible range; its stored dates are ' +
+            readableDay(dayString(new Date(span.start))) + ' → ' + readableDay(dayString(new Date(span.end))) + '.';
+          bar.title = bar.title ? bar.title + ' ' + windowNote : windowNote;
+        }
       }
 
       // Press and release without movement opens the editor; movement moves the
@@ -1323,6 +1615,9 @@
         if (!geometry) return;
         bar.style.transform = 'translateX(' + Math.round(geometry.left) + 'px)';
         bar.style.width = Math.round(geometry.width) + 'px';
+        bar.classList.toggle('clipped-start', geometry.clippedStart);
+        bar.classList.toggle('clipped-end', geometry.clippedEnd);
+        paintBarClips(bar, geometry);
         const mark = row.querySelector('.tk-tl-today-line');
         if (mark) mark.style.transform = 'translateX(' + Math.round(tlLeftInWindow(startOfToday(), win) + tlZoom / 2) + 'px)';
       });
@@ -1343,15 +1638,17 @@
       $$('.tk-cd-card').forEach((card) => {
         const task = Store.task(card.dataset.id);
         if (!task) return;
-        const deadlineMs = dayStart(task.deadline);
+        // Expiry is the end of the deadline day, so a task due today is not
+        // overdue at one second past midnight.
+        const deadlineMs = dayEnd(task.deadline);
         const diff = deadlineMs - now;
         card.__timer.textContent = formatCountdown(diff);
-        // Progress runs from the day the task was created to its deadline, as the
-        // original does, whatever start the task may also carry. That is why
-        // createdAt must stay immutable: this measurement would otherwise change
-        // under a scheduling gesture. `start` governs where the bar is drawn, not
-        // this clock.
-        const createdMs = new Date(task.createdAt).getTime();
+        // Progress runs from the start of the creation day to the deadline's
+        // expiry, as the original does, whatever start the task may also carry.
+        // That is why createdAt must stay immutable: this measurement would
+        // otherwise change under a scheduling gesture. `start` governs where the
+        // bar is drawn, not this clock.
+        const createdMs = dayStart(String(task.createdAt || '').slice(0, 10));
         const total = deadlineMs - createdMs;
         const elapsed = now - createdMs;
         const progress = total > 0 ? Math.min(1, Math.max(0, elapsed / total)) : 1;
