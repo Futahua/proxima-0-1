@@ -167,22 +167,29 @@ main { padding: 16px; max-width: 1200px; }
 .tk-panel-body::-webkit-scrollbar-thumb { background: #465063; border-radius: 999px;
   border: 2px solid transparent; background-clip: content-box; }
 
-/* ── Panel 1: Deadline Calendar ── */
+/* ── Panel 1: Deadline Calendar ──
+   Day numbers stay a plain 7-column grid; task SPANS are projected over the week
+   as absolutely placed bars, so a task covers the part of the week it occupies. */
 .tk-weekdays { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 6px; }
 .tk-weekday { text-align: center; font-size: 10px; letter-spacing: .08em; color: var(--dim); }
 .tk-weekday.weekend { color: #6d7686; }
-.tk-cal { display: flex; flex-direction: column; gap: 6px; }
-.tk-cal-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
-.tk-cal-cell { min-height: 62px; background: var(--panel-2); border: 1px solid var(--line);
-  border-radius: 6px; padding: 4px; display: flex; flex-direction: column; gap: 3px; overflow: hidden; }
+.tk-cal { display: flex; flex-direction: column; gap: 8px; }
+.tk-cal-week { display: flex; flex-direction: column; gap: 2px; }
+.tk-cal-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.tk-cal-cell { min-height: 24px; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 6px; padding: 2px 5px; display: flex; align-items: flex-start; }
 .tk-cal-cell.other-month { opacity: .42; }
 .tk-cal-cell.weekend { background: #2a3039; }
 .tk-cal-cell.today { border-color: var(--accent); box-shadow: inset 0 0 0 1px rgba(184, 208, 74, .35); }
 .tk-cal-num { font-size: 10px; color: var(--dim); }
 .tk-cal-cell.today .tk-cal-num { color: var(--accent); font-weight: 700; }
-.tk-cal-chip { display: block; width: 100%; text-align: left; border: none; border-radius: 4px;
-  padding: 2px 5px; font-size: 11px; cursor: pointer; color: #1b1f26; font-weight: 600;
+.tk-cal-bars { position: relative; }
+.tk-cal-chip { position: absolute; height: 16px; line-height: 16px; text-align: left; border: none;
+  border-radius: 3px; padding: 0 5px; font-size: 11px; cursor: pointer; color: #1b1f26; font-weight: 600;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Square off the ends that run past the week, as the original does. */
+.tk-cal-chip.is-start { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+.tk-cal-chip.is-end { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .tk-cal-chip:hover { filter: brightness(1.12); }
 
 /* ── Panel 2: Timeline ── */
@@ -222,15 +229,11 @@ body.tk-dragging { cursor: grabbing; user-select: none; }
 /* ── Panel 3: Countdowns ── */
 .tk-groups { display: flex; flex-direction: column; gap: 10px; }
 .tk-group { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--panel-2); }
-.tk-group-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px;
-  background: transparent; border: none; cursor: pointer; text-align: left; font-size: 11px;
-  letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
-.tk-group-head:hover { color: var(--ink); }
+/* Informational, not a control: a label and a count. */
+.tk-group-head { display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
 .tk-group-count { margin-left: auto; background: var(--panel); border: 1px solid var(--line);
   border-radius: 999px; padding: 0 7px; font-size: 10px; color: var(--ink); }
-.tk-group-chevron { transition: transform .12s ease; font-size: 10px; }
-.tk-group.collapsed .tk-group-chevron { transform: rotate(-90deg); }
-.tk-group.collapsed .tk-group-items { display: none; }
 .tk-group-items { display: flex; flex-direction: column; gap: 6px; padding: 0 8px 8px; }
 .tk-cd-card { display: flex; align-items: center; gap: 10px; background: var(--panel);
   border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 6px;

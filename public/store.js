@@ -8,7 +8,10 @@
  */
 const Store = (() => {
   const KEY = 'proxima.store.v1';
-  const EMPTY = { version: 1, projects: [], tasks: [], run: null };
+  const EMPTY = { version: 1, projects: [], tasks: [], run: null, views: null };
+
+  /** Default composition of the Timekeeping cockpit. Its own save path, as ever. */
+  const DEFAULT_VIEWS = { calendar: false, timeline: true, countdown: false };
 
   let state = load();
 
@@ -23,6 +26,7 @@ const Store = (() => {
         projects: Array.isArray(parsed.projects) ? parsed.projects : [],
         tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
         run: parsed.run ?? null,
+        views: parsed.views && typeof parsed.views === 'object' ? parsed.views : null,
       };
     } catch {
       return structuredClone(EMPTY);
@@ -82,6 +86,14 @@ const Store = (() => {
       if ('weight' in fields) task.weight = clampWeight(fields.weight);
       if ('start' in fields) task.start = clampDay(fields.start, task.start || today());
       if ('deadline' in fields) task.deadline = clampDay(fields.deadline, '');
+      // Only ever moved by the timeline, and only for a task that never had an
+      // explicit start: there its creation day is what the bar is drawn from, so
+      // it has to travel with the deadline. A task with a real start is never
+      // given a creation day rewrite, because the timeline does not send one.
+      if ('createdAt' in fields) {
+        const when = new Date(fields.createdAt);
+        if (!Number.isNaN(when.getTime())) task.createdAt = when.toISOString();
+      }
       save();
       return task;
     },
@@ -110,6 +122,32 @@ const Store = (() => {
 
     run: () => (state.run ? { ...state.run } : null),
     setRun(run) { state.run = run ? { ...run } : null; save(); },
+
+    /**
+     * The visible composition of the Timekeeping panels, so the workspace the
+     * reader builds survives a reload. View state, but it is state the app owns,
+     * so it takes the same single save path as everything else.
+     */
+    views() {
+      return {
+        calendar: state.views ? Boolean(state.views.calendar) : DEFAULT_VIEWS.calendar,
+        timeline: state.views && typeof state.views.timeline === 'boolean' ? state.views.timeline : DEFAULT_VIEWS.timeline,
+        countdown: state.views ? Boolean(state.views.countdown) : DEFAULT_VIEWS.countdown,
+      };
+    },
+    setViews(views) {
+      const next = {
+        calendar: Boolean(views && views.calendar),
+        timeline: Boolean(views && views.timeline),
+        countdown: Boolean(views && views.countdown),
+      };
+      // All three off is not a composition the cockpit supports: fall back to the
+      // timeline, exactly as the original does when the last panel is switched off.
+      if (!next.calendar && !next.timeline && !next.countdown) next.timeline = true;
+      state.views = next;
+      save();
+      return { ...next };
+    },
   };
 
   function clampWeight(value) {

@@ -88,9 +88,10 @@
 
   // ── Urgency ───────────────────────────────────────────────────────────────
   /**
-   * The five urgency bands, measured in whole calendar days so a task changes
-   * band exactly when the date rolls over. Ordered most urgent first, and each
-   * band holds everything below its own upper bound.
+   * The five urgency bands. These are rollings durations measured from this
+   * instant, not calendar-day steps: a deadline sixteen hours away is "within a
+   * day" even though its date is tomorrow. Each band holds everything below its
+   * own upper bound in days.
    */
   const URGENCY_GROUPS = [
     { key: 'overdue', label: 'Overdue', bound: 0, hue: 0 },
@@ -100,10 +101,23 @@
     { key: 'later', label: 'Later', bound: Infinity, hue: 205 },
   ];
 
-  function urgencyOf(deadline) {
+  // Placeholder band colours, used until the original's configurable colorRules
+  // system exists here. The hues above are only labels: do not read them as the
+  // rule engine.
+  const URGENCY_COLOR = {
+    overdue: '#e06c75', today: '#e7a24b', soon: '#e7d24b', week: '#9fd04a', later: '#6fa8dc',
+  };
+
+  /** Whole days from `fromMs` to a deadline, negative when past. */
+  function daysUntil(deadline, fromMs) {
     const ms = dayStart(deadline);
-    if (Number.isNaN(ms)) return 'later';
-    const days = daysBetween(todayDay(), deadline);
+    if (Number.isNaN(ms)) return NaN;
+    return (ms - fromMs) / DAY_MS;
+  }
+
+  function urgencyOf(deadline, fromMs) {
+    const days = daysUntil(deadline, fromMs);
+    if (Number.isNaN(days)) return 'later';
     if (days < 0) return 'overdue';
     if (days < 1) return 'today';
     if (days < 3) return 'soon';
@@ -128,11 +142,10 @@
 
   // ── Timekeeping view state ────────────────────────────────────────────────
   // Which panels are on screen is a composition the reader chooses, not a mode:
-  // any combination is allowed, including all three at once. Collapsed countdown
-  // groups are remembered for the session. None of this is task data, so none of
-  // it goes near Store.
+  // any combination is allowed, including all three at once, but never none. The
+  // composition is persisted through Store so it survives a reload; zoom is a
+  // session detail and is not task data either.
   const panels = { calendar: false, timeline: true, countdown: false };
-  const collapsedGroups = new Set();
   const calCursor = { y: new Date().getFullYear(), m: new Date().getMonth() };
   let tlZoom = 44;
   let tlCentered = false;
@@ -681,13 +694,15 @@
   // included. Only the timeline flexes; the others keep a fixed width.
 
   /**
-   * Tasks that carry a deadline, in calendar order, honouring the project filter.
+   * Tasks that carry a deadline and are still open, in calendar order, honouring
+   * the project filter. Finished work is excluded from every Timekeeping panel —
+   * a deadline board is about what is still owed, not what is already done.
    * A task is included on the strength of its deadline alone: `spanOf` resolves a
    * missing start, so tasks written before that field existed still appear.
    */
   function deadlineTasks() {
     return visibleTasks()
-      .filter((t) => t.deadline)
+      .filter((t) => t.deadline && t.status !== 'finished')
       .sort((a, b) => dayStart(a.deadline) - dayStart(b.deadline) || a.order - b.order);
   }
 
@@ -716,10 +731,14 @@
   }
 
   // ── Panel 1: Deadline Calendar ────────────────────────────────────────────
-  // A projection of task DEADLINES onto a month. Navigation re-projects the same
-  // tasks against another month and writes nothing at all.
+  // A projection of task SPANS onto a month. A task is a horizontal bar across
+  // the part of each week it occupies, from its effective start to its deadline,
+  // so work that began Monday and is due Friday covers the whole run rather than
+  // only its last day. Navigation re-projects the same tasks against another
+  // month and writes nothing at all.
 
   const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const CAL_WEEK_MS = 7 * DAY_MS;
   if ($('#calWeekdays').childElementCount === 0) {
     WEEKDAYS.forEach((name, i) => {
       const cell = document.createElement('span');
@@ -729,17 +748,47 @@
     });
   }
 
+  /**
+   * The bars a week carries: every task whose span overlaps it, clipped to the
+   * week, given a percentage left/width and packed into the first free row so two
+   * bars never draw over each other.
+   */
+  function weekBars(tasks, weekStartMs) {
+    const weekEndMs = weekStartMs + CAL_WEEK_MS;
+    const overlapping = tasks
+      .map((task) => ({ task, span: spanOf(task) }))
+      .filter((entry) => entry.span && entry.span.start < weekEndMs && entry.span.end + DAY_MS > weekStartMs)
+      .sort((a, b) => a.span.start - b.span.start);
+
+    const placed = [];
+    overlapping.forEach((entry) => {
+      const { task, span } = entry;
+      const clampedStart = Math.max(span.start, weekStartMs);
+      const clampedEnd = Math.min(span.end + DAY_MS, weekEndMs);
+      const leftPct = ((clampedStart - weekStartMs) / CAL_WEEK_MS) * 100;
+      let widthPct = ((clampedEnd - clampedStart) / CAL_WEEK_MS) * 100;
+      if (widthPct < 5) widthPct = 5; // keep a short task visible
+
+      let row = 0;
+      while (placed.some((p) => p.row === row && !(leftPct >= p.rightPct || leftPct + widthPct <= p.leftPct))) row++;
+
+      placed.push({
+        task,
+        row,
+        leftPct,
+        widthPct,
+        rightPct: leftPct + widthPct,
+        isStart: span.start >= weekStartMs,
+        isEnd: span.end + DAY_MS <= weekEndMs,
+      });
+    });
+    return placed;
+  }
+
   function renderCalendar(tasks) {
     const y = calCursor.y;
     const m = calCursor.m;
     $('#calMonthLabel').textContent = new Date(y, m, 1).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
-
-    const byDay = new Map();
-    tasks.forEach((task) => {
-      const list = byDay.get(task.deadline) || [];
-      list.push(task);
-      byDay.set(task.deadline, list);
-    });
 
     const grid = $('#calGrid');
     grid.replaceChildren();
@@ -750,10 +799,16 @@
     const today = todayDay();
 
     for (let r = 0; r < rows; r++) {
+      const weekStart = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + r * 7);
+      const weekStartMs = dayStart(dayString(weekStart));
       const week = document.createElement('div');
       week.className = 'tk-cal-week';
+
+      // The day numbers stay a plain grid; the bars are projected over the row.
+      const days = document.createElement('div');
+      days.className = 'tk-cal-days';
       for (let c = 0; c < 7; c++) {
-        const date = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + r * 7 + c);
+        const date = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() + c);
         const dayStr = dayString(date);
         const cell = document.createElement('div');
         cell.className = 'tk-cal-cell';
@@ -765,26 +820,39 @@
         num.className = 'tk-cal-num';
         num.textContent = String(date.getDate());
         cell.append(num);
-
-        (byDay.get(dayStr) || []).forEach((task) => {
-          const chip = document.createElement('button');
-          chip.type = 'button';
-          chip.className = 'tk-cal-chip urgency-' + urgencyOf(task.deadline);
-          chip.dataset.id = task.id;
-          chip.dataset.deadline = task.deadline;
-          chip.title = task.name;
-          chip.textContent = task.name;
-          chip.addEventListener('click', (event) => {
-            event.stopPropagation();
-            openTask(task.id);
-          });
-          cell.append(chip);
-        });
-
-        // Empty space stays inert on purpose: this is a deadline projection, not
-        // a schedule grid, so clicking a day must never create anything.
-        week.append(cell);
+        days.append(cell);
       }
+      week.append(days);
+
+      const bars = weekBars(tasks, weekStartMs);
+      const track = document.createElement('div');
+      track.className = 'tk-cal-bars';
+      const maxRow = bars.reduce((max, bar) => Math.max(max, bar.row), -1);
+      track.style.height = (maxRow < 0 ? 6 : (maxRow + 1) * 20 + 6) + 'px';
+
+      bars.forEach((bar) => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'tk-cal-chip urgency-' + urgencyOf(bar.task.deadline, Date.now());
+        if (bar.isStart) chip.classList.add('is-start');
+        if (bar.isEnd) chip.classList.add('is-end');
+        chip.dataset.id = bar.task.id;
+        chip.dataset.deadline = bar.task.deadline;
+        chip.style.left = bar.leftPct + '%';
+        chip.style.width = bar.widthPct + '%';
+        chip.style.top = (bar.row * 20 + 3) + 'px';
+        chip.title = bar.task.name + ' — ' + shortDay(bar.task.start || todayDay()) + ' → ' + shortDay(bar.task.deadline);
+        chip.textContent = bar.task.name;
+        chip.addEventListener('click', (event) => {
+          event.stopPropagation();
+          openTask(bar.task.id);
+        });
+        track.append(chip);
+      });
+
+      week.append(track);
+      // Empty space stays inert on purpose: this is a deadline projection, not a
+      // schedule grid, so clicking a day must never create anything.
       grid.append(week);
     }
   }
@@ -814,14 +882,25 @@
     return ((ms - win.min) / DAY_MS) * tlZoom;
   }
 
-  /** The single place a bar's geometry is decided, shared by build and tick. */
-  function placeBar(bar, task, win) {
+  /**
+   * The single place a bar's geometry is decided, shared by build and tick.
+   * Width is deadline minus start, with no extra inclusive day: a same-day task
+   * spans zero days and is held open only by the visual 24px floor, and a
+   * two-day task covers exactly two columns.
+   */
+  function barGeometry(task, win) {
     const span = spanOf(task);
-    if (!span) return;
+    if (!span) return null;
     const left = tlLeftInWindow(span.start, win);
-    const right = tlLeftInWindow(span.end + DAY_MS, win);
-    bar.style.transform = 'translateX(' + Math.round(left) + 'px)';
-    bar.style.width = Math.max(24, Math.round(right - left)) + 'px';
+    const right = tlLeftInWindow(span.end, win);
+    return { left: Math.max(0, left), width: Math.max(right - left, 24) };
+  }
+
+  function placeBar(bar, task, win) {
+    const geometry = barGeometry(task, win);
+    if (!geometry) return;
+    bar.style.transform = 'translateX(' + Math.round(geometry.left) + 'px)';
+    bar.style.width = Math.round(geometry.width) + 'px';
   }
 
   function renderTimeline(tasks) {
@@ -870,7 +949,7 @@
       row.append(mark);
 
       const bar = document.createElement('div');
-      bar.className = 'tk-tl-bar urgency-' + urgencyOf(task.deadline);
+      bar.className = 'tk-tl-bar urgency-' + urgencyOf(task.deadline, Date.now());
       bar.dataset.id = task.id;
       const label = document.createElement('span');
       label.className = 'tk-tl-bar-label';
@@ -893,6 +972,10 @@
       let grabX = 0;
       let originStartDay = '';
       let originEndDay = '';
+      // A task that never had an explicit start must not acquire one by being
+      // dragged. Its span is anchored on its creation day instead, and that is
+      // what the move travels with.
+      let originCreatedDay = '';
 
       const onMove = (event) => {
         if (!armed) return;
@@ -901,7 +984,7 @@
         moved = true;
         document.body.classList.add('tk-dragging');
         const shiftDays = Math.round(dx / tlZoom);
-        bar.style.transform = 'translateX(' + Math.round(tlLeftInView(dayStart(originStartDay), win) + shiftDays * tlZoom) + 'px)';
+        bar.style.transform = 'translateX(' + Math.round(tlLeftInWindow(dayStart(originStartDay), win) + shiftDays * tlZoom) + 'px)';
       };
 
       const onUp = (event) => {
@@ -914,9 +997,12 @@
 
         const shiftDays = Math.round((event.clientX - grabX) / tlZoom);
         if (shiftDays === 0) { renderTimekeeping(); return; }
-        // The one real write in this panel: both dates shift by the same whole
-        // number of days, then both surfaces re-read the store.
-        Store.updateTask(task.id, { start: shiftDay(originStartDay, shiftDays), deadline: shiftDay(originEndDay, shiftDays) });
+        // The one real write in this panel: the deadline moves, the duration is
+        // preserved, and the start travels only if the task actually had one.
+        const fields = { deadline: shiftDay(originEndDay, shiftDays) };
+        if (task.start) fields.start = shiftDay(originStartDay, shiftDays);
+        else fields.createdAt = shiftDay(originCreatedDay, shiftDays);
+        Store.updateTask(task.id, fields);
         refreshAfterWrite();
       };
 
@@ -930,6 +1016,7 @@
         // still its creation fallback is not snapped to today when nudged.
         originStartDay = dayString(new Date((span ? span.start : startOfToday())));
         originEndDay = dayString(new Date((span ? span.end : startOfToday())));
+        originCreatedDay = dayString(new Date(task.createdAt));
         window.addEventListener('mousemove', onMove);
         window.addEventListener('mouseup', onUp);
       });
@@ -1002,8 +1089,9 @@
   function renderCountdowns(tasks) {
     const host = $('#cdGroups');
     host.replaceChildren();
+    const now = Date.now();
     const byGroup = new Map(URGENCY_GROUPS.map((g) => [g.key, []]));
-    tasks.forEach((task) => byGroup.get(urgencyOf(task.deadline)).push(task));
+    tasks.forEach((task) => byGroup.get(urgencyOf(task.deadline, now)).push(task));
 
     URGENCY_GROUPS.forEach((group) => {
       const list = byGroup.get(group.key);
@@ -1011,26 +1099,19 @@
 
       const section = document.createElement('section');
       section.className = 'tk-group urgency-' + group.key;
-      const head = document.createElement('button');
-      head.type = 'button';
+
+      // Informational header, exactly as the original: a label and a count, not
+      // a control. There is nothing to collapse.
+      const head = document.createElement('div');
       head.className = 'tk-group-head';
       head.dataset.group = group.key;
-      if (collapsedGroups.has(group.key)) section.classList.add('collapsed');
       const title = document.createElement('span');
       title.className = 'tk-group-title';
       title.textContent = group.label;
       const count = document.createElement('span');
       count.className = 'tk-group-count';
       count.textContent = String(list.length);
-      const chevron = document.createElement('span');
-      chevron.className = 'tk-group-chevron';
-      chevron.textContent = '▾';
-      head.append(title, count, chevron);
-      head.addEventListener('click', () => {
-        const collapsed = collapsedGroups.has(group.key);
-        if (collapsed) collapsedGroups.delete(group.key); else collapsedGroups.add(group.key);
-        section.classList.toggle('collapsed', !collapsed);
-      });
+      head.append(title, count);
 
       const items = document.createElement('div');
       items.className = 'tk-group-items';
@@ -1065,12 +1146,10 @@
         const task = Store.task(row.dataset.id);
         const bar = row.querySelector('.tk-tl-bar');
         if (!task || !bar) return;
-        const span = spanOf(task);
-        if (!span) return;
-        const left = tlLeftInWindow(span.start, win);
-        const right = tlLeftInWindow(span.end + DAY_MS, win);
-        bar.style.transform = 'translateX(' + Math.round(left) + 'px)';
-        bar.style.width = Math.max(24, Math.round(right - left)) + 'px';
+        const geometry = barGeometry(task, win);
+        if (!geometry) return;
+        bar.style.transform = 'translateX(' + Math.round(geometry.left) + 'px)';
+        bar.style.width = Math.round(geometry.width) + 'px';
         const mark = row.querySelector('.tk-tl-today-line');
         if (mark) mark.style.transform = 'translateX(' + Math.round(tlLeftInWindow(startOfToday(), win) + tlZoom / 2) + 'px)';
       });
@@ -1082,7 +1161,7 @@
 
     if (panels.countdown) {
       const groups = new Map(URGENCY_GROUPS.map((g) => [g.key, []]));
-      deadlineTasks().forEach((task) => groups.get(urgencyOf(task.deadline)).push(task));
+      deadlineTasks().forEach((task) => groups.get(urgencyOf(task.deadline, now)).push(task));
       if (countdownSignatureOf(groups) !== countdownSignature) {
         // The clock moved tasks between bands: only now is a rebuild warranted.
         renderCountdowns(deadlineTasks());
@@ -1091,24 +1170,34 @@
       $$('.tk-cd-card').forEach((card) => {
         const task = Store.task(card.dataset.id);
         if (!task) return;
-        const days = daysBetween(todayDay(), task.deadline);
-        card.__timer.textContent = days === 0 ? 'due today' : formatCountdown(dayStart(task.deadline) - startOfToday());
-        const span = spanOf(task);
-        const total = span ? span.end - span.start + DAY_MS : 0;
-        const elapsed = span ? Math.min(total, Math.max(0, now - span.start)) : total;
-        card.__fill.style.width = (total > 0 ? Math.round((elapsed / total) * 100) : 100) + '%';
-        card.style.background = urgencyTint(days);
+        const deadlineMs = dayStart(task.deadline);
+        const diff = deadlineMs - now;
+        card.__timer.textContent = formatCountdown(diff);
+        // Progress always runs from the day the task was created to its deadline,
+        // as the original does, whatever start the task may also carry.
+        const createdMs = new Date(task.createdAt).getTime();
+        const total = deadlineMs - createdMs;
+        const elapsed = now - createdMs;
+        const progress = total > 0 ? Math.min(1, Math.max(0, elapsed / total)) : 1;
+        card.__fill.style.width = Math.round(progress * 100) + '%';
+        card.style.background = urgencyTint(diff);
       });
     }
   }
 
-  function urgencyTint(days) {
-    const hue = days < 0 ? 0 : days < 1 ? 32 : days < 3 ? 52 : days < 7 ? 92 : 205;
-    return 'linear-gradient(90deg, hsla(' + hue + ', 70%, 55%, .16), transparent 60%)';
+  function urgencyTint(diffMs) {
+    return 'linear-gradient(90deg, ' + urgencyTintColor(diffMs) + ', transparent 60%)';
+  }
+
+  /** A very light wash of the band colour, so cards read at a glance. */
+  function urgencyTintColor(diffMs) {
+    const days = diffMs / DAY_MS;
+    const key = days < 0 ? 'overdue' : days < 1 ? 'today' : days < 3 ? 'soon' : days < 7 ? 'week' : 'later';
+    return URGENCY_COLOR[key] + '29';
   }
 
   function retuneChip(chip, now) {
-    const urgency = urgencyOf(chip.dataset.deadline);
+    const urgency = urgencyOf(chip.dataset.deadline, now);
     ['overdue', 'today', 'soon', 'week', 'later'].forEach((key) => chip.classList.toggle('urgency-' + key, key === urgency));
   }
 
@@ -1152,9 +1241,11 @@
   $$('.tk-toggle').forEach((btn) => {
     btn.addEventListener('click', () => {
       const key = btn.dataset.panel;
-      // Every panel toggles on its own; there is no "one at a time" rule here,
-      // and switching the last one off is allowed too.
-      panels[key] = !panels[key];
+      // Every panel toggles on its own and any combination is allowed — but not
+      // none. Switching the last one off puts the timeline back, which is what
+      // the original does; Store.setViews enforces the same rule on the way in.
+      const next = { ...panels, [key]: !panels[key] };
+      Object.assign(panels, Store.setViews(next));
       syncPanelVisibility();
       renderTimekeeping();
       if (key === 'timeline' && panels.timeline && !tlCentered) scrollTimelineToToday(false);
@@ -1191,6 +1282,9 @@
   // Panning is view state only: it moves the bars' projection, never a task.
   tlViewport.addEventListener('scroll', () => tickTimekeeping());
 
+  // The composition the reader last built comes back from the store; a fresh
+  // store yields the default (timeline only), and all-off can never be loaded.
+  Object.assign(panels, Store.setViews(Store.views()));
   syncPanelVisibility();
   ensureTarget();
   refreshProjectOptions();
