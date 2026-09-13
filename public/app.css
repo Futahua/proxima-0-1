@@ -186,6 +186,10 @@ main { padding: 16px; max-width: 1200px; }
   box-shadow: 0 6px 18px rgba(0, 0, 0, .35); pointer-events: none;
   animation: flash-in .12s ease-out; }
 .flash.warn { border-color: var(--u-overdue, #e06c75); }
+/* A condition that is still true after you have read it — a store that could not
+   be read, a write that is still failing — must not evaporate on a timer. */
+.flash.sticky { max-width: 460px; padding: 10px 13px; pointer-events: auto;
+  border-width: 2px; box-shadow: 0 10px 26px rgba(0, 0, 0, .45); }
 @keyframes flash-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 
 .tk-toggles { display: flex; gap: 8px; flex-wrap: wrap; }

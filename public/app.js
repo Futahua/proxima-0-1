@@ -1075,16 +1075,23 @@
   let flashTimer = 0;
 
   /**
-   * Say why an action was refused. `anchor` is the element the reader touched, so
-   * the message appears where their attention already is; without one it appears
-   * under the top bar. Transient by design — nothing has to be dismissed, and
-   * nothing lingers to be mistaken for live state.
+   * Say something to the reader. `anchor` is the element they touched, so the
+   * message appears where their attention already is; without one it appears under
+   * the top bar.
+   *
+   * Transient by default — nothing to dismiss, nothing lingering to be mistaken
+   * for live state. `sticky` is for conditions that are still true after you have
+   * read them (a store that could not be read, a write that is still failing):
+   * those must not evaporate, or the reader is back to not being told.
    */
-  function flash(text, anchor) {
+  function flash(text, anchor, options) {
     const el = $('#flash');
     if (!el) return;
+    const opts = options || {};
     el.textContent = text;
     el.hidden = false;
+    el.classList.toggle('warn', Boolean(opts.warn));
+    el.classList.toggle('sticky', Boolean(opts.sticky));
     // Measure only after it has content, so the placement is right first time.
     const box = el.getBoundingClientRect();
     let left = Math.round((window.innerWidth - box.width) / 2);
@@ -1098,9 +1105,46 @@
     }
     el.style.left = Math.max(8, Math.min(left, window.innerWidth - box.width - 8)) + 'px';
     el.style.top = Math.max(8, Math.min(top, window.innerHeight - box.height - 8)) + 'px';
-    el.classList.remove('warn');
     window.clearTimeout(flashTimer);
-    flashTimer = window.setTimeout(() => { el.hidden = true; }, 5000);
+    if (!opts.sticky) flashTimer = window.setTimeout(() => { el.hidden = true; }, opts.hold || 5000);
+  }
+
+  // ── Store integrity ───────────────────────────────────────────────────────
+  // Every mutation goes through the store's commit(), which rolls the whole state
+  // back when the write fails. So a failed write can no longer leave the board
+  // showing work that is not saved — but silence would be just as bad in the other
+  // direction, so the failure is announced here, once, from one place.
+  Store.onWriteFailure((failure) => {
+    flash('Not saved — the browser refused the write (' + failure.reason +
+      '). The change has been undone so nothing on screen is unsaved. Free some storage or check site permissions, then try again.',
+      null, { sticky: true, warn: true });
+  });
+
+  /** Report a store that could not be read, instead of showing an empty app. */
+  function reportLoadStatus() {
+    const status = Store.loadStatus();
+    if (status.kind === 'corrupt') {
+      flash('Your saved data could not be read, so this is an empty board — nothing has been deleted. ' +
+        (status.rescued
+          ? 'The original bytes were copied to localStorage key "proxima.store.unreadable" before anything could overwrite them.'
+          : 'The original bytes are still under "proxima.store.v1"; the rescue copy already existed, so it was left alone.') +
+        ' ' + status.detail, null, { sticky: true, warn: true });
+      return;
+    }
+    if (status.kind === 'wrong-version') {
+      flash('This board was written by a different version of Proxima, so it has been left untouched rather than shown wrongly. ' +
+        (status.rescued ? 'A copy of the original is under "proxima.store.unreadable". ' : '') +
+        status.detail, null, { sticky: true, warn: true });
+      return;
+    }
+    if (status.kind === 'ok' && status.notes) {
+      const notes = status.notes;
+      const parts = [];
+      if (notes.unknownStatus) parts.push(notes.unknownStatus + (notes.unknownStatus === 1 ? ' task had a status this board has no column for and was filed under Backlog' : ' tasks had a status this board has no column for and were filed under Backlog'));
+      if (notes.droppedTasks) parts.push(notes.droppedTasks + (notes.droppedTasks === 1 ? ' unreadable task record was skipped' : ' unreadable task records were skipped'));
+      if (notes.droppedProjects) parts.push(notes.droppedProjects + (notes.droppedProjects === 1 ? ' unreadable project record was skipped' : ' unreadable project records were skipped'));
+      if (parts.length) flash(parts.join('; ') + '. Your other data loaded normally.', null, { warn: true, hold: 9000 });
+    }
   }
 
   function syncPanelVisibility() {
@@ -2015,6 +2059,9 @@
   refreshProjectOptions();
   if (Store.run()) ticker = setInterval(tick, 1000);
   renderEverything();
+  // Said after the board is drawn, so the reader sees the app and the explanation
+  // together rather than a notice over a blank page.
+  reportLoadStatus();
   // One clock for the whole page. Nothing about a tick writes or rebuilds.
   setInterval(tickTimekeeping, 1000);
 })();
