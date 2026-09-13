@@ -68,6 +68,10 @@ const Store = (() => {
         weight: clampWeight(fields.weight),
         start: clampDay(fields.start, today()),
         deadline: clampDay(fields.deadline, ''),
+        // No row yet: the timeline packs a fresh task into the first row where it
+        // does not overlap anything and writes the result back. A row is a
+        // scheduling decision, so it lives on the task like any other field.
+        ganttRow: null,
         order: state.tasks.length,
         createdAt: new Date().toISOString(),
       };
@@ -86,6 +90,9 @@ const Store = (() => {
       if ('weight' in fields) task.weight = clampWeight(fields.weight);
       if ('start' in fields) task.start = clampDay(fields.start, task.start || today());
       if ('deadline' in fields) task.deadline = clampDay(fields.deadline, '');
+      // A timeline row: a small non-negative integer, or null for "not placed
+      // yet" — which is what a task written before rows existed carries.
+      if ('ganttRow' in fields) task.ganttRow = clampRow(fields.ganttRow);
       // DELIBERATE DIVERGENCE from the original, do not "restore fidelity" here.
       //
       // The original moves a startless task's whole bar by rewriting createdAt
@@ -196,6 +203,18 @@ const Store = (() => {
     const n = Math.round(Number(value));
     if (!Number.isFinite(n)) return 1;
     return Math.min(100, Math.max(1, n));
+  }
+
+  /**
+   * A timeline row. Anything that is not a usable row number becomes null, which
+   * the timeline reads as "pack me" — so a missing or corrupt value results in a
+   * placement rather than an invented one.
+   */
+  function clampRow(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const n = Math.round(Number(value));
+    if (!Number.isFinite(n) || n < 0) return null;
+    return Math.min(10000, n);
   }
 
   /**

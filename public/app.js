@@ -189,6 +189,10 @@
   let tlZoom = 44;
   let tlCentered = false;
   let countdownSignature = '';
+  /** Packed row per visible task, refreshed by every timeline render. */
+  let timelineRows = new Map();
+  /** The task whose bar is under the hand, so a tick leaves its position alone. */
+  let tlDraggingId = null;
 
   const tlViewport = $('#tlViewport');
   const tlInner = $('#tlInner');
@@ -1272,6 +1276,152 @@
     return ((ms - win.min) / DAY_MS) * tlZoom;
   }
 
+  // ── Row packing ───────────────────────────────────────────────────────────
+  // The timeline is a spatial surface, not a list: a task occupies a row, and two
+  // tasks may share one only while their spans do not overlap. A row is stored on
+  // the task, so it is a scheduling decision that survives filtering and reloads
+  // rather than a position recomputed from whatever happens to be on screen.
+
+  const ROW_HEIGHT = 40;
+
+  /** The day span a task occupies, in milliseconds, for overlap tests only. */
+  function rowSpanOf(task) {
+    const span = spanOf(task);
+    if (!span) return null;
+    // Reversed spans are compared on the interval they actually cover, so a
+    // contradictory task blocks a row for the days it claims rather than
+    // vanishing from the collision test.
+    return { start: Math.min(span.start, span.end), end: Math.max(span.start, span.end) };
+  }
+
+  /**
+   * The overlap rule, taken from the original: any touch collides, including a
+   * shared endpoint (`start <= item.end && end >= item.start`).
+   */
+  function rowsCollide(a, b) {
+    return a.start <= b.end && a.end >= b.start;
+  }
+
+  /**
+   * Pack a task into rows without disturbing rows that did not have to move.
+   *
+   * A task with a stored row keeps it unless something already placed there
+   * overlaps it; only then is that task — the one being placed — sent down to the
+   * next free row. Tasks are therefore visited in row order, so the ones holding
+   * their positions are placed first and the one that has to give way is the one
+   * that changed. A task with no row yet (a new one, or one written before rows
+   * existed) starts at row 0 and takes the first row that is free.
+   *
+   * `placed` is the mutable accumulator; pass the same object across a pass to
+   * pack a whole set. It records the span each placed task occupies per row, so
+   * overlap is tested against what is really there.
+   */
+  function packTask(task, placed, origin) {
+    const span = rowSpanOf(task);
+    if (!span) return null;
+    const stored = typeof task.ganttRow === 'number' ? task.ganttRow : null;
+    let row = stored === null ? 0 : Math.max(0, stored);
+    while (true) {
+      const occupants = placed.get(row);
+      if (!occupants || !occupants.some((other) => other.id !== task.id && rowsCollide(span, other.span))) break;
+      row++;
+    }
+    const list = placed.get(row) || [];
+    list.push({ id: task.id, span: span });
+    placed.set(row, list);
+    if (origin) origin.set(task.id, span);
+    return row;
+  }
+
+  /**
+   * Resolve rows for a whole visible set and persist any that changed.
+   *
+   * Returns the settled rows, including the highest one in use, without touching
+   * the store unless something actually moved — so a re-render with an unchanged
+   * layout writes nothing and no bar jumps.
+   */
+  function resolveRows(tasks) {
+    const placed = new Map();
+    const order = tasks.slice().sort((a, b) => {
+      const ra = typeof a.ganttRow === 'number' ? a.ganttRow : Infinity;
+      const rb = typeof b.ganttRow === 'number' ? b.ganttRow : Infinity;
+      if (ra !== rb) return ra - rb;
+      const sa = rowSpanOf(a);
+      const sb = rowSpanOf(b);
+      if (sa && sb && sa.start !== sb.start) return sa.start - sb.start;
+      return a.order - b.order;
+    });
+
+    const rows = new Map();
+    const updates = [];
+    let maxRow = 0;
+    order.forEach((task) => {
+      const row = packTask(task, placed);
+      if (row === null) return;
+      rows.set(task.id, row);
+      maxRow = Math.max(maxRow, row);
+      if (row !== task.ganttRow) updates.push({ id: task.id, row: row });
+    });
+
+    // Persist placements so they survive a filter change or a reload. Kept
+    // outside the render pass's own writes, through the one Store path.
+    updates.forEach((u) => Store.updateTask(u.id, { ganttRow: u.row }));
+    return { rows: rows, maxRow: maxRow, moved: updates.length };
+  }
+
+  /**
+   * The row a dropped task should end up in: the row the drag asked for, walked
+   * down while anything already settled there overlaps it. This is the original's
+   * collision rule, applied at drop time rather than invented.
+   *
+   * `occupied` maps row number to the spans already placed there, and
+   * `pendingIds` are the visible tasks not yet placed — a task cannot be dropped
+   * on top of either.
+   */
+  function resolveDroppedRow(taskId, wantedRow, occupied, pendingIds, pending) {
+    const me = rowSpanOf(Store.task(taskId));
+    if (!me) return Math.max(0, wantedRow);
+    let row = Math.max(0, wantedRow);
+    while (true) {
+      const settled = (occupied.get(row) || []).some((other) => other.id !== taskId && rowsCollide(me, other.span));
+      if (settled) { row++; continue; }
+      const waiting = pendingIds.some((id) => {
+        if (id === taskId) return false;
+        const task = pending.get(id);
+        const span = task ? rowSpanOf(task) : null;
+        return span ? rowsCollide(me, span) : false;
+      });
+      if (!waiting) return row;
+      row++;
+    }
+  }
+
+  /**
+   * What is already settled, for the drop-time collision check: the spans each
+   * stored row holds, plus the tasks that have no row yet and so could take any
+   * of them. A dropped task must clear both, or it would land on top of a task
+   * that is about to be packed.
+   */
+  function buildPackContext(tasks, movingId) {
+    const occupied = new Map();
+    const pendingIds = [];
+    const pending = new Map();
+    tasks.forEach((task) => {
+      if (task.id === movingId) return;
+      const span = rowSpanOf(task);
+      if (!span) return;
+      if (typeof task.ganttRow === 'number') {
+        const list = occupied.get(task.ganttRow) || [];
+        list.push({ id: task.id, span: span });
+        occupied.set(task.ganttRow, list);
+      } else {
+        pendingIds.push(task.id);
+        pending.set(task.id, task);
+      }
+    });
+    return { occupied: occupied, pendingIds: pendingIds, pending: pending };
+  }
+
   /**
    * The single place a bar's geometry is decided, shared by build and tick.
    * Width is deadline minus start, with no extra inclusive day: a same-day task
@@ -1347,11 +1497,18 @@
     const viewportWidth = tlViewport.clientWidth || 600;
     const gridWidth = Math.max(viewportWidth, Math.round(((win.max - win.min) / DAY_MS) * tlZoom));
 
+    // Rows first: the pack is the layout, and it may write placements back.
+    const layout = resolveRows(tasks);
+    timelineRows = layout.rows;
+
     tlInner.style.width = gridWidth + 'px';
     tlDates.style.width = gridWidth + 'px';
     tlDates.replaceChildren();
     tlRows.replaceChildren();
-    tlRows.style.height = '0px';
+    // Only the rows in use, not the original's flat 300. An idle row that is not
+    // the last one still occupies its place in the grid, so row identity is kept
+    // without rendering hundreds of empty tracks.
+    tlRows.style.height = Math.max(ROW_HEIGHT, (layout.maxRow + 1) * ROW_HEIGHT) + 'px';
 
     // Date ruler
     const today = startOfToday();
@@ -1375,12 +1532,16 @@
       tlDates.append(col);
     }
 
-    // One track per task: no row packing, so a bar can never hide behind another
-    // and every deadline stays readable.
+    // One track per task, placed at its packed row. Rows are absolute so a task's
+    // vertical position is its row number rather than its index in this list,
+    // which is what lets a row survive filtering and reloading.
     tasks.forEach((task) => {
       const row = document.createElement('div');
       row.className = 'tk-tl-row';
       row.dataset.id = task.id;
+      const rowIndex = layout.rows.get(task.id) || 0;
+      row.style.top = rowIndex * ROW_HEIGHT + 'px';
+      if (rowIndex % 2 === 1) row.classList.add('alt');
 
       const mark = document.createElement('div');
       mark.className = 'tk-tl-today-line';
@@ -1424,11 +1585,12 @@
         }
       }
 
-      // The gesture follows the pointer in continuous pixels while it is held;
-      // whole days are a COMMIT-time decision, never a gesture-time one. Snapping
-      // during the gesture was the worst of it: between 3px and half a day the bar
-      // had stopped tracking the hand, so releasing there moved nothing and the bar
-      // sprang back — a dead zone that widened with every zoom step.
+      // The gesture follows the pointer in continuous pixels on BOTH axes while it
+      // is held; whole days and whole rows are COMMIT-time decisions, never
+      // gesture-time ones. Snapping during the gesture was the worst of it: between
+      // 3px and half a day the bar had stopped tracking the hand, so releasing
+      // there moved nothing and the bar sprang back — a dead zone that widened with
+      // every zoom step.
       //
       // Click versus drag is decided on FINAL displacement, in either axis, at
       // release. So a wobble that comes back to where it started is still a click,
@@ -1441,6 +1603,7 @@
       let originLeftPx = 0;
       let originStartDay = '';
       let originEndDay = '';
+      let originRow = 0;
 
       const onMove = (event) => {
         if (!armed) return;
@@ -1449,16 +1612,19 @@
         if (!dragging) {
           if (Math.abs(dx) < DRAG_SLOP && Math.abs(dy) < DRAG_SLOP) return;
           dragging = true;
+          tlDraggingId = task.id;
           document.body.classList.add('tk-dragging');
         }
-        // Continuous: the bar's left edge sits exactly where the pointer puts it.
-        bar.style.transform = 'translateX(' + Math.round(originLeftPx + dx) + 'px)';
+        // Continuous on both axes: the bar sits where the pointer puts it, and the
+        // row it will land in is decided at release at ROW_HEIGHT per row.
+        bar.style.transform = 'translate(' + Math.round(originLeftPx + dx) + 'px, ' + Math.round(dy) + 'px)';
       };
 
       const onUp = (event) => {
         window.removeEventListener('mousemove', onMove);
         window.removeEventListener('mouseup', onUp);
         document.body.classList.remove('tk-dragging');
+        tlDraggingId = null;
         if (!armed) return;
         armed = false;
 
@@ -1468,12 +1634,14 @@
 
         if (!travelled) { openTask(task.id); return; }
 
-        // Commit: pixels become whole days here, once, at the end.
+        // Commit, both axes, once.
         const shiftDays = Math.round(dx / tlZoom);
-        if (shiftDays === 0) { renderTimekeeping(); return; }
+        const rowShift = Math.round(dy / ROW_HEIGHT);
 
-        // The one real write in this panel. A whole-bar drag means "move this
-        // interval, keep its duration", so both ends travel together.
+        // The one real write in this panel, and it happens only when the gesture
+        // actually asked for a change: the original also leaves the dates alone
+        // when there is no horizontal displacement, so a purely vertical drag
+        // moves a task to another row without also sliding it sideways.
         //
         // DELIBERATE DIVERGENCE from the original, do not "restore fidelity" here.
         // The original leaves a startless task startless and moves it by rewriting
@@ -1483,28 +1651,45 @@
         // Scheduling intent is what `start` means, so this first deliberate drag
         // materialises a real start at the shifted effective start it was drawn
         // from. It stays startless until the user actually moves it.
-        const nextStart = shiftDay(originStartDay, shiftDays);
-        const nextDeadline = shiftDay(originEndDay, shiftDays);
+        const fields = {};
 
-        // A whole-bar drag shifts both ends by the same whole number of days, and
-        // that is order-preserving: a valid task cannot become reversed, and a
-        // reversed one cannot be repaired by dragging (only the dialog can change
-        // the relationship between the two dates). So a drag cannot invent the
-        // contradiction the dialog refuses to save.
-        //
-        // This check therefore only fires if the dates are re-read late on a
-        // different day from the one the drag started on, which can happen around
-        // midnight. It refuses there rather than clamping one date onto the other.
-        if (dayStart(nextDeadline) < dayStart(nextStart)) {
-          // Render first, then post the notice: a pass clears the notice, so the
-          // order matters or the explanation would erase itself.
-          renderTimekeeping();
-          showNotice('Not moved: that would put the deadline (' + readableDay(nextDeadline) +
-            ') before the start (' + readableDay(nextStart) + '). A task cannot be due before it begins.');
-          return;
+        if (shiftDays !== 0) {
+          const nextStart = shiftDay(originStartDay, shiftDays);
+          const nextDeadline = shiftDay(originEndDay, shiftDays);
+
+          // A whole-bar drag shifts both ends by the same whole number of days, and
+          // that is order-preserving: a valid task cannot become reversed, and a
+          // reversed one cannot be repaired by dragging (only the dialog can change
+          // the relationship between the two dates). So a drag cannot invent the
+          // contradiction the dialog refuses to save.
+          //
+          // This check therefore only fires if the dates are re-read late on a
+          // different day from the one the drag started on, which can happen around
+          // midnight. It refuses there rather than clamping one date onto the other.
+          if (dayStart(nextDeadline) < dayStart(nextStart)) {
+            // Render first, then post the notice: a pass clears the notice, so the
+            // order matters or the explanation would erase itself.
+            renderTimekeeping();
+            showNotice('Not moved: that would put the deadline (' + readableDay(nextDeadline) +
+              ') before the start (' + readableDay(nextStart) + '). A task cannot be due before it begins.');
+            return;
+          }
+          fields.start = nextStart;
+          fields.deadline = nextDeadline;
         }
 
-        Store.updateTask(task.id, { start: nextStart, deadline: nextDeadline });
+        if (shiftDays !== 0) Store.updateTask(task.id, fields);
+
+        if (rowShift !== 0) {
+          // Ask for the row the gesture pointed at, then walk down while anything
+          // already there overlaps — the original's collision resolution.
+          const visible = deadlineTasks();
+          const wanted = Math.max(0, originRow + rowShift);
+          const context = buildPackContext(visible, task.id);
+          const settled = resolveDroppedRow(task.id, wanted, context.occupied, context.pendingIds, context.pending);
+          Store.updateTask(task.id, { ganttRow: settled });
+        }
+
         refreshAfterWrite();
       };
 
@@ -1518,7 +1703,9 @@
         // Anchor on the geometry that is actually drawn, so the interval the user
         // grabbed is the interval that moves, and a startless task's materialised
         // start lands exactly where its bar already was.
-        originLeftPx = barGeometry(task, win) ? barGeometry(task, win).left : 0;
+        const geometry = barGeometry(task, win);
+        originLeftPx = geometry ? geometry.left : 0;
+        originRow = timelineRows.get(task.id) || 0;
         originStartDay = dayString(new Date((span ? span.start : startOfToday())));
         originEndDay = dayString(new Date((span ? span.end : startOfToday())));
         window.addEventListener('mousemove', onMove);
@@ -1528,8 +1715,6 @@
       row.append(bar);
       tlRows.append(row);
     });
-
-    tlRows.style.height = tasks.length * 34 + 'px';
 
     if (!tlCentered) {
       tlCentered = true;
@@ -1659,13 +1844,22 @@
         const task = Store.task(row.dataset.id);
         const bar = row.querySelector('.tk-tl-bar');
         if (!task || !bar) return;
+        // The bar under the hand is being positioned by the gesture, in both axes.
+        // A tick that reset it would fight the pointer mid-drag.
+        if (task.id === tlDraggingId) return;
         const geometry = barGeometry(task, win);
         if (!geometry) return;
-        bar.style.transform = 'translateX(' + Math.round(geometry.left) + 'px)';
+        bar.style.transform = 'translate(' + Math.round(geometry.left) + 'px, 0px)';
         bar.style.width = Math.round(geometry.width) + 'px';
         bar.classList.toggle('clipped-start', geometry.clippedStart);
         bar.classList.toggle('clipped-end', geometry.clippedEnd);
         paintBarClips(bar, geometry);
+        // The row is part of the layout, so it is kept current here too: a row
+        // only changes when something writes one, but the tick must not leave a
+        // bar sitting in the row it has just left.
+        const rowIndex = typeof task.ganttRow === 'number' ? task.ganttRow : 0;
+        const top = rowIndex * ROW_HEIGHT;
+        if (row.style.top !== top + 'px') row.style.top = top + 'px';
         const mark = row.querySelector('.tk-tl-today-line');
         if (mark) mark.style.transform = 'translateX(' + Math.round(tlLeftInWindow(startOfToday(), win) + tlZoom / 2) + 'px)';
       });

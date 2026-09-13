@@ -252,11 +252,13 @@ main { padding: 16px; max-width: 1200px; }
 .tk-tl-num { font-size: 10px; font-weight: 600; }
 .tk-tl-dates-pad { position: absolute; inset: 0; }
 .tk-tl-rows { position: relative; }
-.tk-tl-row { position: relative; height: 34px; border-bottom: 1px solid #31384500; }
-.tk-tl-row:nth-child(even) { background: rgba(255, 255, 255, .018); }
+/* A track is absolutely placed at its packed row, so a task's vertical position
+   is the row it holds rather than its index in the visible list. */
+.tk-tl-row { position: absolute; left: 0; right: 0; height: 40px; }
+.tk-tl-row.alt { background: rgba(255, 255, 255, .018); }
 .tk-tl-today-line { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(184, 208, 74, .5);
   pointer-events: none; }
-.tk-tl-bar { position: absolute; top: 5px; height: 24px; border-radius: 5px; cursor: grab;
+.tk-tl-bar { position: absolute; top: 8px; height: 24px; border-radius: 5px; cursor: grab;
   display: flex; align-items: center; padding: 0 8px; overflow: hidden; color: #1b1f26;
   font-size: 11px; font-weight: 600; will-change: transform; }
 .tk-tl-bar:active { cursor: grabbing; }
