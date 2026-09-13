@@ -148,6 +148,9 @@ main { padding: 16px; max-width: 1200px; }
 .tk-bar .eyebrow { margin: 0; }
 .tk-count { font-size: 12px; color: var(--dim); white-space: nowrap; }
 
+.tk-notice { margin: 0 0 12px; padding: 9px 12px; border-radius: 6px; font-size: 12px;
+  color: var(--ink); background: rgba(224, 108, 117, .12); border: 1px solid var(--danger); }
+
 .tk-toggles { display: flex; gap: 8px; flex-wrap: wrap; }
 .tk-toggle::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 7px;
   border-radius: 50%; background: var(--line); vertical-align: middle; }
@@ -262,6 +265,15 @@ body.tk-dragging { cursor: grabbing; user-select: none; }
 .tk-cd-track { width: 92px; height: 4px; margin-top: 5px; background: #384051; border-radius: 2px; overflow: hidden; }
 .tk-cd-fill { height: 100%; background: var(--running); }
 
+/* Contradictory stored data is shown as wrong, never smoothed into something
+   plausible: a reversed task keeps its real deadline position and is flagged. */
+.tk-cal-chip.invalid, .tk-tl-bar.invalid {
+  background: repeating-linear-gradient(45deg, var(--danger), var(--danger) 5px, #a8555c 5px, #a8555c 10px);
+  color: #fff; box-shadow: 0 0 0 1px var(--danger);
+}
+.tk-cd-card.invalid { border-color: var(--danger); }
+.tk-cd-card.invalid .tk-cd-name::before { content: '⚠ '; color: var(--danger); }
+
 /* Urgency bands, shared by calendar chips, timeline bars and countdown cards. */
 .tk-cal-chip.urgency-overdue, .tk-tl-bar.urgency-overdue { background: var(--u-overdue); }
 .tk-cal-chip.urgency-today, .tk-tl-bar.urgency-today { background: var(--u-today); }
@@ -288,3 +300,7 @@ dialog input, dialog select, dialog textarea { width: 100%; margin-top: 4px; bac
   border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
 dialog small { display: block; margin-top: 4px; color: var(--dim); }
 dialog menu { display: flex; gap: 8px; padding: 0; margin: 18px 0 0; }
+
+/* A refused save says what is wrong, in words, next to the fields it concerns. */
+.field-error { margin: 0 0 12px; padding: 9px 11px; border-radius: 6px; font-size: 12px;
+  color: var(--ink); background: rgba(224, 108, 117, .12); border: 1px solid var(--danger); }

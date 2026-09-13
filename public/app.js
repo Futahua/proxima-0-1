@@ -80,6 +80,13 @@
    * The creation day is only ever a fallback for a task that has no start. The
    * first whole-bar drag of such a task writes a real start, after which this
    * fallback is no longer consulted for it — createdAt itself never moves.
+   *
+   * The stored dates are reported AS THEY ARE. There used to be a
+   * `Math.max(start, end)` here, which silently dragged a reversed deadline up to
+   * equal the start: a task that cannot exist was drawn as a plausible block,
+   * nowhere near the deadline it claimed. Contradictory data is now flagged by
+   * `reversed` and rendered as visibly wrong instead of being normalised away.
+   * Only the RENDERED width is clamped, never the data.
    */
   function spanOf(task) {
     const end = dayStart(task.deadline);
@@ -87,8 +94,21 @@
     let start = dayStart(task.start);
     if (Number.isNaN(start)) start = dayStart(String(task.createdAt || '').slice(0, 10));
     if (Number.isNaN(start)) start = startOfToday();
-    return { start, end: Math.max(start, end) };
+    return { start, end, reversed: end < start };
   }
+
+  /** Short, unambiguous date for a message: "15 Sep 2026". */
+  const readableDay = (value) => {
+    const ms = dayStart(value);
+    if (Number.isNaN(ms)) return String(value || '—');
+    return new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  };
+
+  /** True when a task's stored dates contradict each other. */
+  const isReversed = (task) => {
+    const span = spanOf(task);
+    return Boolean(span && span.reversed);
+  };
 
   // ── Urgency ───────────────────────────────────────────────────────────────
   /**
@@ -620,17 +640,53 @@
     // New tasks start today; existing ones show the start the store resolved for
     // them, including tasks written before the field existed.
     taskForm.elements.start.value = task ? (task.start || todayDay()) : todayDay();
+    // An existing reversed task opens showing its contradiction, rather than
+    // hiding it behind a tidy value the user never entered.
+    validateTaskDates();
     taskDialog.showModal();
   }
 
+  /**
+   * A task cannot be due before it starts, and the dialog says so in words rather
+   * than reverting or coercing either date. Returns true when the form is sane.
+   */
+  function validateTaskDates() {
+    const start = taskForm.elements.start.value;
+    const deadline = taskForm.elements.deadline.value;
+    const error = $('#taskDateError');
+    if (!start || !deadline) { error.hidden = true; return true; }
+    if (dayStart(deadline) < dayStart(start)) {
+      error.textContent = 'The deadline (' + readableDay(deadline) + ') is before the start (' +
+        readableDay(start) + '). A task cannot be due before it begins — move one of the dates.';
+      error.hidden = false;
+      return false;
+    }
+    error.hidden = true;
+    return true;
+  }
+
+  // Live, so the contradiction is named before the user tries to save.
+  taskForm.elements.start.addEventListener('change', validateTaskDates);
+  taskForm.elements.deadline.addEventListener('change', validateTaskDates);
+
   taskForm.addEventListener('submit', (event) => {
     const action = event.submitter ? event.submitter.value : 'save';
-    if (action === 'cancel') return;
-    if (action === 'delete') {
-      if (editingId) Store.deleteTask(editingId);
-      queueMicrotask(renderEverything);
+    // Cancel and Delete keep the form's own dialog behaviour.
+    if (action === 'cancel' || action === 'delete') {
+      if (action === 'delete') {
+        if (editingId) Store.deleteTask(editingId);
+        queueMicrotask(renderEverything);
+      }
       return;
     }
+
+    // A save is ours to complete. The form is `method="dialog"`, so letting the
+    // submit through would close the dialog even when the save is refused, taking
+    // the explanation with it. Hold the dialog open and close it ourselves once
+    // the write has actually happened.
+    event.preventDefault();
+    if (!validateTaskDates()) return;
+
     const fields = {
       name: taskForm.elements.name.value,
       note: taskForm.elements.note.value,
@@ -642,6 +698,7 @@
     };
     if (editingId) Store.updateTask(editingId, fields);
     else Store.addTask(fields);
+    taskDialog.close();
     queueMicrotask(renderEverything);
   });
 
@@ -726,12 +783,23 @@
     $('#tkEmpty').hidden = anyDeadline;
     $('#tkPanels').hidden = !anyDeadline;
 
+    // A notice explains a refused action, so it is cleared by the next full pass
+    // rather than lingering as stale advice.
+    $('#tkNotice').hidden = true;
+
     if (panels.calendar) renderCalendar(tasks);
     if (panels.timeline) renderTimeline(tasks);
     if (panels.countdown) renderCountdowns(tasks);
 
     // Paint the live layer once so the panels never show a stale second.
     tickTimekeeping();
+  }
+
+  /** Say why an action was refused, in words, next to the thing it concerns. */
+  function showNotice(text) {
+    const notice = $('#tkNotice');
+    notice.textContent = text;
+    notice.hidden = false;
   }
 
   function syncPanelVisibility() {
@@ -796,8 +864,15 @@
     const placed = [];
     overlapping.forEach((entry) => {
       const { task, span } = entry;
-      const clampedStart = Math.max(span.start, weekStartMs);
-      const clampedEnd = Math.min(span.end, weekEndMs);
+      // Draw between the earlier and later of the two dates, so a reversed span's
+      // marker lands on the deadline the task claims instead of being anchored to
+      // a start that is days away from it. Only the drawn geometry is normalised;
+      // `span` carries the stored values through untouched, and the chip is marked
+      // invalid so nothing about the contradiction is hidden.
+      const from = Math.min(span.start, span.end);
+      const to = Math.max(span.start, span.end);
+      const clampedStart = Math.max(from, weekStartMs);
+      const clampedEnd = Math.min(to, weekEndMs);
       const leftPct = ((clampedStart - weekStartMs) / CAL_WEEK_MS) * 100;
       let widthPct = ((clampedEnd - clampedStart) / CAL_WEEK_MS) * 100;
       if (widthPct < 5) widthPct = 5; // keep a short task visible
@@ -875,11 +950,20 @@
         chip.style.left = bar.leftPct + '%';
         chip.style.width = bar.widthPct + '%';
         chip.style.top = (bar.row * 20 + 3) + 'px';
-        // The tooltip names the same span the bar is drawn from, so a task whose
-        // start is resolved through its creation day does not claim to start today.
-        chip.title = bar.task.name + ' — ' + shortDay(dayString(new Date(bar.span.start))) +
-          ' → ' + shortDay(dayString(new Date(bar.span.end)));
-        chip.textContent = bar.task.name;
+        if (bar.span.reversed) {
+          // Contradictory data: say so, and show it where the deadline actually is.
+          chip.classList.add('invalid');
+          chip.title = 'Invalid dates: starts ' + readableDay(dayString(new Date(bar.span.start))) +
+            ' but is due ' + readableDay(dayString(new Date(bar.span.end))) +
+            ' — the start is after the deadline.';
+          chip.textContent = '⚠ ' + bar.task.name;
+        } else {
+          // The tooltip names the same span the bar is drawn from, so a task whose
+          // start is resolved through its creation day does not claim to start today.
+          chip.title = bar.task.name + ' — ' + shortDay(dayString(new Date(bar.span.start))) +
+            ' → ' + shortDay(dayString(new Date(bar.span.end)));
+          chip.textContent = bar.task.name;
+        }
         chip.addEventListener('click', (event) => {
           event.stopPropagation();
           openTask(bar.task.id);
@@ -924,12 +1008,21 @@
    * Width is deadline minus start, with no extra inclusive day: a same-day task
    * spans zero days and is held open only by the visual 24px floor, and a
    * two-day task covers exactly two columns.
+   *
+   * A reversed span yields a negative width, which the floor turns into a 24px
+   * marker. That marker is anchored on the EARLIER of the two dates so it lands on
+   * the deadline the task claims — the alternative, anchoring on the start, draws
+   * it days away from its own deadline, which hides the contradiction the marker
+   * exists to expose. The data is still reported untouched; only the drawn
+   * geometry is made presentable, and it is drawn where the user was told to look.
    */
   function barGeometry(task, win) {
     const span = spanOf(task);
     if (!span) return null;
-    const left = tlLeftInWindow(span.start, win);
-    const right = tlLeftInWindow(span.end, win);
+    const from = Math.min(span.start, span.end);
+    const to = Math.max(span.start, span.end);
+    const left = tlLeftInWindow(from, win);
+    const right = tlLeftInWindow(to, win);
     return { left: Math.max(0, left), width: Math.max(right - left, 24) };
   }
 
@@ -999,6 +1092,16 @@
         bar.style.transform = 'translateX(0px)';
         bar.style.width = '24px';
       } else {
+        // A reversed task is drawn at its REAL deadline and marked invalid. It is
+        // never dragged up to meet its start, and it never disappears: it degrades
+        // visibly where the user would expect to find it.
+        if (span.reversed) {
+          bar.classList.add('invalid');
+          label.textContent = '⚠ ' + task.name;
+          bar.title = 'Invalid dates: starts ' + readableDay(dayString(new Date(span.start))) +
+            ' but is due ' + readableDay(dayString(new Date(span.end))) +
+            ' — the start is after the deadline. Drawn at its real deadline.';
+        }
         placeBar(bar, task, win);
       }
 
@@ -1042,10 +1145,28 @@
         // Scheduling intent is what `start` means, so this first deliberate drag
         // materialises a real start at the shifted effective start it was drawn
         // from. It stays startless until the user actually moves it.
-        Store.updateTask(task.id, {
-          start: shiftDay(originStartDay, shiftDays),
-          deadline: shiftDay(originEndDay, shiftDays),
-        });
+        const nextStart = shiftDay(originStartDay, shiftDays);
+        const nextDeadline = shiftDay(originEndDay, shiftDays);
+
+        // A whole-bar drag shifts both ends by the same whole number of days, and
+        // that is order-preserving: a valid task cannot become reversed, and a
+        // reversed one cannot be repaired by dragging (only the dialog can change
+        // the relationship between the two dates). So a drag cannot invent the
+        // contradiction the dialog refuses to save.
+        //
+        // This check therefore only fires if the dates are re-read late on a
+        // different day from the one the drag started on, which can happen around
+        // midnight. It refuses there rather than clamping one date onto the other.
+        if (dayStart(nextDeadline) < dayStart(nextStart)) {
+          // Render first, then post the notice: a pass clears the notice, so the
+          // order matters or the explanation would erase itself.
+          renderTimekeeping();
+          showNotice('Not moved: that would put the deadline (' + readableDay(nextDeadline) +
+            ') before the start (' + readableDay(nextStart) + '). A task cannot be due before it begins.');
+          return;
+        }
+
+        Store.updateTask(task.id, { start: nextStart, deadline: nextDeadline });
         refreshAfterWrite();
       };
 
@@ -1099,6 +1220,15 @@
     const card = document.createElement('div');
     card.className = 'tk-cd-card';
     card.dataset.id = task.id;
+    if (isReversed(task)) {
+      // The timer counts to the real deadline, so it stays truthful; the card
+      // says the stored dates contradict each other rather than hiding it.
+      card.classList.add('invalid');
+      const span = spanOf(task);
+      card.title = 'Invalid dates: starts ' + readableDay(dayString(new Date(span.start))) +
+        ' but is due ' + readableDay(dayString(new Date(span.end))) +
+        ' — the start is after the deadline.';
+    }
 
     const info = document.createElement('div');
     info.className = 'tk-cd-info';

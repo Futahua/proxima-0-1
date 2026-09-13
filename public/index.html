@@ -72,6 +72,7 @@
     </div>
 
     <p class="tk-empty" id="tkEmpty" hidden>No tasks with deadlines yet. Give a task a deadline and it appears here.</p>
+    <p class="tk-notice" id="tkNotice" hidden role="alert"></p>
 
     <div class="tk-panels" id="tkPanels" hidden>
       <section class="tk-panel" data-panel="calendar" hidden>
@@ -140,6 +141,7 @@
     <label>Start <input name="start" type="date">
       <small>When work begins. Where the Timeline bar starts; deadline is where it ends.</small>
     </label>
+    <p class="field-error" id="taskDateError" hidden role="alert"></p>
     <menu>
       <button value="delete" id="deleteTaskBtn" class="danger" type="submit" formnovalidate>Delete</button>
       <span class="spacer"></span>
