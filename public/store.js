@@ -122,9 +122,24 @@ const Store = (() => {
     if (!raw || typeof raw !== 'object') return null;
     if (typeof raw.id !== 'string' || !raw.id) return null;
     return {
+      // Unknown fields survive; every field the Hub reads is brought into shape.
+      ...raw,
       id: raw.id,
       name: typeof raw.name === 'string' && raw.name ? raw.name : 'Untitled project',
+      description: typeof raw.description === 'string' ? raw.description : '',
+      // Age is read from this, so it has to be a real instant. A project written
+      // before the field existed is dated from now rather than left unusable.
+      createdAt: validInstant(raw.createdAt) ? raw.createdAt : new Date().toISOString(),
+      // Archive state has ONE source of truth: this instant. `archivedAt` set
+      // means archived, absent means active — there is no separate status flag to
+      // fall out of step with it, and the Hub's "show archived" toggle only
+      // decides what is listed.
+      archivedAt: validInstant(raw.archivedAt) ? raw.archivedAt : null,
     };
+  }
+
+  function validInstant(value) {
+    return typeof value === 'string' && value !== '' && !Number.isNaN(new Date(value).getTime());
   }
 
   /**
@@ -224,9 +239,46 @@ const Store = (() => {
     onWriteFailure(handler) { failureHandler = typeof handler === 'function' ? handler : null; },
 
     projects: () => state.projects.slice(),
-    addProject(name) {
-      const project = { id: id('prj'), name: String(name).trim().slice(0, 120) || 'Untitled project' };
+
+    project: (projectId) => state.projects.find((p) => p.id === projectId) ?? null,
+
+    addProject(name, description) {
+      const project = {
+        id: id('prj'),
+        name: String(name).trim().slice(0, 120) || 'Untitled project',
+        description: String(description || '').trim().slice(0, 500),
+        createdAt: new Date().toISOString(),
+        archivedAt: null,
+      };
       return commit(() => { state.projects.push(project); return project; });
+    },
+
+    /** Archive state is this one field; there is no second flag to disagree with it. */
+    setArchived(projectId, archived) {
+      const project = state.projects.find((p) => p.id === projectId);
+      if (!project) return null;
+      return commit(() => {
+        project.archivedAt = archived ? new Date().toISOString() : null;
+        return project;
+      });
+    },
+
+    /**
+     * Delete a project. Its tasks are NOT deleted — they keep their text, dates and
+     * history and become uncategorised. Deleting a container should not quietly
+     * destroy the work inside it, and the confirmation says how many tasks are
+     * affected before the reader agrees.
+     */
+    deleteProject(projectId) {
+      const project = state.projects.find((p) => p.id === projectId);
+      if (!project) return null;
+      return commit(() => {
+        const orphaned = state.tasks.filter((t) => t.project === projectId).length;
+        state.tasks.forEach((t) => { if (t.project === projectId) t.project = ''; });
+        state.projects = state.projects.filter((p) => p.id !== projectId);
+        // A run's frozen plan references tasks, not projects, so it is untouched.
+        return { orphaned: orphaned };
+      });
     },
 
     tasks: () => state.tasks.slice(),

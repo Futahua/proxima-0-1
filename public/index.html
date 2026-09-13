@@ -12,10 +12,8 @@
 <div class="flash" id="flash" role="status" aria-live="polite" hidden></div>
 <header class="topbar">
   <div class="brand"><span class="badge">P</span><div><h1>Proxima</h1><p id="storeLine">local store</p></div></div>
-  <nav class="surfaces">
-    <button class="seg active" data-surface="tasks">Tasks</button>
-    <button class="seg" data-surface="schedule" disabled title="next page">Schedule</button>
-    <button class="seg" data-surface="projects" disabled title="next page">Projects Hub</button>
+  <nav class="surfaces" aria-label="Sections of this page">
+    <span class="segnote">Board · Timekeeping · Projects Hub</span>
   </nav>
   <label class="projpick">Project
     <select id="projectFilter"><option value="">-- All Projects --</option></select>
@@ -119,6 +117,26 @@
       </section>
     </div>
   </section>
+
+  <section class="hub" id="projectsHub">
+    <div class="tk-bar">
+      <div>
+        <p class="eyebrow">PROJECTS</p>
+        <h2>Projects Hub</h2>
+      </div>
+      <span class="spacer"></span>
+      <span class="tk-count" id="hubCount"></span>
+      <label class="hub-archived">
+        <input type="checkbox" id="hubShowArchived">
+        <span>Show archived</span>
+      </label>
+      <button class="primary" id="hubNewProject">+ New project</button>
+    </div>
+
+    <p class="tk-empty" id="hubEmpty" hidden>No projects yet. Create one and its tasks will gather here.</p>
+
+    <div class="hub-grid" id="hubGrid" hidden></div>
+  </section>
 </main>
 
 <dialog id="taskDialog">
@@ -156,11 +174,25 @@
 <dialog id="projectDialog">
   <form method="dialog" id="projectForm">
     <h3>New project</h3>
-    <label>Name <input name="name" required maxlength="120" autocomplete="off"></label>
+    <label>Name <input name="name" maxlength="120" autocomplete="off" placeholder="e.g. Dyson Sphere Alpha"></label>
+    <label>Description <textarea name="description" rows="2" maxlength="500" placeholder="What this project is for (optional)"></textarea></label>
+    <p class="field-error" id="projectError" hidden role="alert"></p>
     <menu>
       <span class="spacer"></span>
       <button value="cancel" type="submit" formnovalidate class="ghost">Cancel</button>
       <button value="save" class="primary">Create</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="confirmDialog">
+  <form method="dialog" id="confirmForm">
+    <h3 id="confirmTitle">Are you sure?</h3>
+    <p class="confirm-body" id="confirmBody"></p>
+    <menu>
+      <span class="spacer"></span>
+      <button value="cancel" class="ghost" formnovalidate>Cancel</button>
+      <button value="ok" id="confirmOk" class="danger">Confirm</button>
     </menu>
   </form>
 </dialog>

@@ -336,6 +336,49 @@ body.tk-dragging { cursor: grabbing; user-select: none; }
 .tk-tl-more-before { margin-right: 3px; }
 .tk-tl-more-after { margin-left: 3px; }
 
+/* ══ Projects Hub ══════════════════════════════════════════════════════════
+   A portfolio view under the board and Timekeeping. Each card carries a
+   project's identity and its pressure — the numbers are read at a glance, so
+   the grid is calm and the trouble colours stand out against it. */
+.hub-archived { display: flex; align-items: center; gap: 7px; font-size: 12px;
+  color: var(--dim); cursor: pointer; white-space: nowrap; }
+.hub-archived input { accent-color: var(--accent); }
+
+.hub-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+
+.hub-card { position: relative; display: flex; flex-direction: column; gap: 10px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  border-top: 3px solid hsl(var(--hue, 90), 45%, 52%); padding: 14px; }
+.hub-card.archived { opacity: .72; border-top-color: var(--line); }
+.hub-card.scoped { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(184, 208, 74, .3); }
+
+.hub-head { display: flex; align-items: center; gap: 10px; }
+.hub-mark { width: 34px; height: 34px; flex: 0 0 34px; border-radius: 8px; display: grid;
+  place-items: center; font-weight: 800; font-size: 16px; color: #14181f;
+  background: hsl(var(--hue, 90), 55%, 62%); }
+.hub-title { min-width: 0; flex: 1; }
+.hub-title h3 { margin: 0; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-meta { margin: 2px 0 0; font-size: 11px; color: var(--dim); }
+.hub-badge { font-size: 9px; letter-spacing: .08em; padding: 2px 6px; border-radius: 4px;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--dim); }
+
+.hub-desc { margin: 0; font-size: 12px; color: var(--dim); line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+
+.hub-pressure { display: flex; flex-wrap: wrap; gap: 6px; }
+.hub-stat { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 999px;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--ink); }
+.hub-stat.bad { color: var(--u-overdue); border-color: var(--u-overdue); }
+.hub-stat.hot { color: var(--u-today); border-color: var(--u-today); }
+.hub-warn { margin: 0; font-size: 11px; color: var(--u-overdue); }
+
+.hub-acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; padding-top: 4px; }
+.hub-acts button { font-size: 12px; padding: 5px 11px; }
+.hub-acts button[disabled] { opacity: .6; cursor: default; border-color: var(--accent); color: var(--accent); }
+
+.confirm-body { margin: 0 0 4px; font-size: 13px; color: var(--dim); line-height: 1.5; }
+.segnote { font-size: 11px; color: var(--dim); letter-spacing: .04em; }
+
 /* Urgency bands, shared by calendar chips, timeline bars and countdown cards. */
 .tk-cal-chip.urgency-overdue, .tk-tl-bar.urgency-overdue { background: var(--u-overdue); }
 .tk-cal-chip.urgency-today, .tk-tl-bar.urgency-today { background: var(--u-today); }

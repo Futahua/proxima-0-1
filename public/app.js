@@ -23,6 +23,7 @@
   const taskForm = $('#taskForm');
   const projectDialog = $('#projectDialog');
   const projectForm = $('#projectForm');
+  const confirmDialog = $('#confirmDialog');
 
   /** Floor height for one running card, and the baseline horizon of the board. */
   const MIN_CARD_HEIGHT = 125;
@@ -819,7 +820,10 @@
       projects.forEach((p) => {
         const option = document.createElement('option');
         option.value = p.id;
-        option.textContent = p.name;
+        // Archived projects stay selectable: the Hub's "show archived" toggle is a
+        // view choice, and a scope must not silently break because the project it
+        // points at is not currently listed.
+        option.textContent = p.archivedAt ? p.name + ' (archived)' : p.name;
         select.append(option);
       });
       select.value = current;
@@ -908,16 +912,64 @@
     queueMicrotask(endRunIfEmpty);
   });
 
+  // New Project, through a modal the way task creation works. A save is ours to
+  // complete: the form is method="dialog", so letting the submit through would
+  // close the dialog even when the create is refused, taking the reason with it.
+  //
+  // The name field deliberately has no `required`: browser validation would block
+  // the submit entirely, so the refusal would have no way to say why.
   projectForm.addEventListener('submit', (event) => {
-    if (!event.submitter || event.submitter.value !== 'save') return;
-    Store.addProject(projectForm.elements.name.value);
+    const action = event.submitter ? event.submitter.value : 'save';
+    if (action !== 'save') return;
+    event.preventDefault();
+    const name = projectForm.elements.name.value.trim();
+    const error = $('#projectError');
+    if (!name) {
+      error.textContent = 'A project needs a name before it can be created.';
+      error.hidden = false;
+      projectForm.elements.name.focus();
+      return;
+    }
+    const created = Store.addProject(name, projectForm.elements.description.value);
     projectForm.reset();
+    error.hidden = true;
+    projectDialog.close();
+    if (!created) return; // the store refused the write and has already said so
     queueMicrotask(() => { refreshProjectOptions(); renderEverything(); });
+  });
+
+  // A cancelled, dismissed or completed create leaves nothing behind — no stored
+  // text, and no message from an attempt that was abandoned.
+  projectDialog.addEventListener('close', () => {
+    projectForm.reset();
+    $('#projectError').hidden = true;
+  });
+
+  /**
+   * One confirmation dialog for destructive actions. Cancelling does nothing at
+   * all — no write, no state change — because the work lives in the OK handler and
+   * the handler is only attached when the dialog is opened.
+   */
+  confirmDialog.addEventListener('close', () => { confirmDialog.__onOk = null; });
+  $('#confirmForm').addEventListener('submit', (event) => {
+    const action = event.submitter ? event.submitter.value : 'cancel';
+    confirmDialog.close();
+    if (action !== 'ok') return;
+    const run = confirmDialog.__onOk;
+    confirmDialog.__onOk = null;
+    if (run) run();
   });
 
   $('#newTaskBtn').addEventListener('click', () => openTask(null));
   $('#newProjectBtn').addEventListener('click', () => projectDialog.showModal());
-  // The project filter scopes the whole page, board and panels alike.
+  $('#hubNewProject').addEventListener('click', () => projectDialog.showModal());
+  $('#hubShowArchived').addEventListener('change', (event) => {
+    // Which projects are listed is presentation only; nothing is written.
+    showArchived = event.currentTarget.checked;
+    renderHub();
+  });
+  // The project filter scopes the whole page, board, Timekeeping and Hub alike.
+  // Nothing else caches the scope, so all three always agree on it.
   projectFilter.addEventListener('change', renderEverything);
   // A new target is a new horizon: every proportional share changes with it.
   targetInput.addEventListener('change', render);
@@ -2001,7 +2053,277 @@
   function renderEverything() {
     render();
     renderTimekeeping();
+    renderHub();
   }
+
+  // ══ Projects Hub ═══════════════════════════════════════════════════════════
+  // A portfolio view: a project's identity and its PRESSURE, legible before you
+  // open anything. Every number on a card is derived from the tasks in the store
+  // at render time — nothing here is stored, so nothing here can go stale or
+  // disagree with the board it summarises.
+
+  /**
+   * A project's pressure, counted the same way the rest of the app counts it.
+   * "Overdue" matches Timekeeping's band exactly: an open task whose deadline day
+   * has passed, using end-of-day expiry so a task due today is not overdue.
+   */
+  function projectStats(project, tasks, now) {
+    const own = tasks.filter((t) => t.project === project.id);
+    const open = own.filter((t) => t.status !== 'finished');
+    const overdue = open.filter((t) => t.deadline && dayEnd(t.deadline) < now).length;
+    const p1 = open.filter((t) => t.weight >= P1_WEIGHT).length;
+    const upcoming = open
+      .filter((t) => t.deadline && dayEnd(t.deadline) >= now)
+      .map((t) => dayStart(t.deadline));
+    const nextDeadline = upcoming.length ? Math.min.apply(null, upcoming) : null;
+    const reversed = own.filter((t) => isReversed(t)).length;
+    return {
+      total: own.length,
+      open: open.length,
+      finished: own.length - open.length,
+      running: own.filter((t) => t.status === 'running').length,
+      overdue: overdue,
+      p1: p1,
+      nextDeadline: nextDeadline,
+      reversed: reversed,
+      unplaced: open.filter((t) => !t.deadline).length,
+    };
+  }
+
+  /**
+   * A stable visual identity per project. The original tints a card by the
+   * project's age relative to the others; we do not store an icon or a colour, so
+   * identity is derived from the id — the same project always wears the same
+   * colour, and no two projects in a Hub are likely to collide. Age is shown as
+   * text instead, where it can be read rather than inferred from a shade.
+   */
+  function projectHue(project) {
+    let hash = 0;
+    const key = String(project.id || project.name || '');
+    for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) % 360;
+    return hash;
+  }
+
+  /** "3w ago", "2mo ago" — derived from an instant, never stored. */
+  function ageLabel(iso, now) {
+    const ms = new Date(iso).getTime();
+    if (!Number.isFinite(ms)) return 'unknown age';
+    const mins = Math.floor((now - ms) / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return hours + 'h ago';
+    const days = Math.floor(hours / 24);
+    if (days < 30) return days + (days === 1 ? 'd' : 'd') + ' ago';
+    const months = Math.floor(days / 30);
+    if (months < 12) return months + 'mo ago';
+    return Math.floor(months / 12) + 'y ago';
+  }
+
+  let showArchived = false;
+
+  /**
+   * What "P1" means here. We have no priority field — the store keeps weight, a
+   * task's share of the run — so the Hub reads the closest thing it has rather
+   * than inventing a field and leaving it empty. Weight 5+ is the heaviest fifth
+   * of the scale, i.e. the work that dominates a horizon. Says so on hover.
+   */
+  const P1_WEIGHT = 5;
+
+  /**
+   * The project the page is currently scoped to. Derived from the filter itself
+   * rather than mirrored in a second variable — a copy is a second source of truth
+   * and will eventually disagree with the control the reader is actually using.
+   */
+  const scopedProjectId = () => projectFilter.value;
+
+  function renderHub() {
+    const tasks = Store.tasks();
+    const now = Date.now();
+    const projects = Store.projects().slice().sort((a, b) =>
+      String(a.name).localeCompare(String(b.name)));
+    const listed = projects.filter((p) => Boolean(p.archivedAt) === showArchived);
+
+    const archivedCount = projects.filter((p) => p.archivedAt).length;
+    $('#hubCount').textContent = projects.length === 0
+      ? 'No projects'
+      : showArchived
+        ? archivedCount + (archivedCount === 1 ? ' archived project' : ' archived projects')
+        : (projects.length - archivedCount) + ' active of ' + projects.length;
+
+    const grid = $('#hubGrid');
+    grid.replaceChildren();
+    const none = listed.length === 0;
+    $('#hubEmpty').hidden = !none;
+    grid.hidden = none;
+    if (none) {
+      $('#hubEmpty').textContent = showArchived
+        ? 'No archived projects.'
+        : 'No projects yet. Create one and its tasks will gather here.';
+      return;
+    }
+
+    listed.forEach((project) => grid.append(hubCardFor(project, projectStats(project, tasks, now), now)));
+  }
+
+  function hubCardFor(project, stats, now) {
+    const card = document.createElement('article');
+    card.className = 'hub-card' + (project.archivedAt ? ' archived' : '');
+    card.dataset.id = project.id;
+    if (scopedProjectId() === project.id) card.classList.add('scoped');
+    card.style.setProperty('--hue', String(projectHue(project)));
+
+    // Identity: a monogram block in the project's own colour, then name, then the
+    // description the modal collects.
+    const head = document.createElement('div');
+    head.className = 'hub-head';
+    const mark = document.createElement('span');
+    mark.className = 'hub-mark';
+    mark.textContent = (project.name || '?').trim().charAt(0).toUpperCase() || '?';
+    mark.setAttribute('aria-hidden', 'true');
+    const title = document.createElement('div');
+    title.className = 'hub-title';
+    const name = document.createElement('h3');
+    name.textContent = project.name;
+    title.append(name);
+    const meta = document.createElement('p');
+    meta.className = 'hub-meta';
+    meta.textContent = project.archivedAt
+      ? 'Archived ' + new Date(project.archivedAt).toLocaleDateString() + ' · age ' + ageLabel(project.createdAt, now)
+      : 'Age ' + ageLabel(project.createdAt, now);
+    title.append(meta);
+    head.append(mark, title);
+    if (project.archivedAt) {
+      const badge = document.createElement('span');
+      badge.className = 'hub-badge';
+      badge.textContent = 'ARCHIVED';
+      head.append(badge);
+    }
+    card.append(head);
+
+    if (project.description) {
+      const desc = document.createElement('p');
+      desc.className = 'hub-desc';
+      desc.textContent = project.description;
+      card.append(desc);
+    }
+
+    // Pressure. The same numbers the board and Timekeeping will show once this
+    // project is scoped, because they are counted from the same tasks.
+    const pressure = document.createElement('div');
+    pressure.className = 'hub-pressure';
+    pressure.append(hubStat(String(stats.total) + (stats.total === 1 ? ' task' : ' tasks'), stats.total === 0 ? 'No tasks in this project yet' : stats.running + ' running, ' + stats.finished + ' finished'));
+    pressure.append(hubStat(stats.overdue + ' overdue', stats.overdue === 0 ? 'Nothing past its deadline' : 'Deadlines that have passed', stats.overdue > 0 ? 'bad' : ''));
+    pressure.append(hubStat(stats.p1 + ' P1', 'Tasks at weight ' + P1_WEIGHT + ' or above', stats.p1 > 0 ? 'hot' : ''));
+    pressure.append(hubStat(
+      stats.nextDeadline === null ? 'No next deadline' : 'Next ' + new Date(stats.nextDeadline).toLocaleDateString(),
+      stats.nextDeadline === null ? 'No open task has a deadline' : 'The soonest deadline among open tasks',
+      ''));
+    card.append(pressure);
+
+    // Anything the card knows is wrong with its own data says so, rather than
+    // being averaged into a healthy-looking total.
+    if (stats.reversed > 0) {
+      const warn = document.createElement('p');
+      warn.className = 'hub-warn';
+      warn.textContent = '⚠ ' + stats.reversed + (stats.reversed === 1 ? ' task has' : ' tasks have') + ' reversed dates — open the project to fix';
+      card.append(warn);
+    }
+
+    const acts = document.createElement('div');
+    acts.className = 'hub-acts';
+
+    const open = document.createElement('button');
+    open.className = 'primary';
+    open.textContent = scopedProjectId() === project.id ? 'Showing this project' : 'Open project';
+    open.title = 'Scope the board and Timekeeping to this project';
+    open.disabled = scopedProjectId() === project.id;
+    open.addEventListener('click', () => scopeToProject(project.id));
+    acts.append(open);
+
+    if (project.archivedAt) {
+      acts.append(hubAction('Restore', 'Return this project to the active list', () => {
+        Store.setArchived(project.id, false);
+        // The scope dropdown labels archived projects, so it is rebuilt with them.
+        refreshProjectOptions();
+        refreshAfterWrite();
+      }));
+    } else {
+      acts.append(hubAction('Archive', 'Hide from the Hub without touching its tasks', () => {
+        Store.setArchived(project.id, true);
+        // Archiving the project you are scoped to would leave the page scoped to
+        // something the Hub no longer lists, so the scope is released with it.
+        if (scopedProjectId() === project.id) scopeToProject('');
+        refreshProjectOptions();
+        refreshAfterWrite();
+      }));
+    }
+
+    acts.append(hubAction('Delete', 'Delete this project', () => confirmDeleteProject(project, stats)));
+    card.append(acts);
+    return card;
+  }
+
+  function hubStat(value, title, tone) {
+    const span = document.createElement('span');
+    span.className = 'hub-stat' + (tone ? ' ' + tone : '');
+    span.textContent = value;
+    span.title = title;
+    return span;
+  }
+
+  function hubAction(label, title, onClick) {
+    const btn = document.createElement('button');
+    btn.className = 'ghost';
+    btn.textContent = label;
+    btn.title = title;
+    btn.addEventListener('click', onClick);
+    return btn;
+  }
+
+  /**
+   * Deleting a project does not delete its tasks. The dialog says exactly how many
+   * will become uncategorised, because that number is the whole consequence and
+   * the reader is entitled to it before agreeing.
+   */
+  function confirmDeleteProject(project, stats) {
+    const taskWord = stats.total === 1 ? 'task' : 'tasks';
+    const consequence = stats.total === 0
+      ? 'It has no tasks.'
+      : 'Its ' + stats.total + ' ' + taskWord + ' will not be deleted — they become uncategorised and stay on the board.';
+    $('#confirmTitle').textContent = 'Delete “' + project.name + '”?';
+    $('#confirmBody').textContent = consequence + ' This cannot be undone.';
+    $('#confirmOk').textContent = stats.total === 0 ? 'Delete project' : 'Delete project, keep ' + stats.total + ' ' + taskWord;
+    confirmDialog.__onOk = () => {
+      const result = Store.deleteProject(project.id);
+      if (scopedProjectId() === project.id) scopeToProject('');
+      refreshAfterWrite();
+      if (result) {
+        flash('Deleted “' + project.name + '”. ' + (result.orphaned
+          ? result.orphaned + ' ' + (result.orphaned === 1 ? 'task is' : 'tasks are') + ' now uncategorised.'
+          : 'It had no tasks.'), null, {});
+      }
+    };
+    confirmDialog.showModal();
+  }
+
+  /**
+   * Scope the whole page to one project — the destination a card leads to. This
+   * reuses the existing project filter rather than inventing a second scoping
+   * mechanism, so the board, Timekeeping and the Hub always agree on what is being
+   * looked at, and clearing it is the ordinary "All Projects" choice.
+   */
+  function scopeToProject(projectId) {
+    const select = projectFilter;
+    if (select.value === projectId) return;
+    select.value = projectId;
+    renderEverything();
+    const project = projectId ? Store.project(projectId) : null;
+    flash(project
+      ? 'Showing “' + project.name + '” only. Set Project back to All Projects to see everything again.'
+      : 'Showing all projects again.', projectId ? $('#boardHead') : select, {});
+  }
+
 
   /** A write landed: re-read it everywhere it can show up. */
   const refreshAfterWrite = renderEverything;
