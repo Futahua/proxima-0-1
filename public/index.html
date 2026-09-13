@@ -22,11 +22,6 @@
 </header>
 
 <main>
-  <div class="subtabs">
-    <button class="seg small active" data-sub="elastic">Elastic Boards</button>
-    <button class="seg small" data-sub="timekeeping">Timekeeping</button>
-  </div>
-
   <section class="boardhead" id="boardHead">
     <div>
       <p class="eyebrow" id="scopeLabel">ALL PROJECTS</p>
@@ -61,25 +56,24 @@
     </div>
   </section>
 
-  <section class="boardhead" id="tkHead" hidden>
-    <div>
-      <p class="eyebrow">TIMEKEEPING</p>
-      <h2>Deadlines</h2>
-      <p class="sub">Calendar, timeline and countdowns. Compose the workspace from as many panels as you want — they are not alternatives.</p>
-    </div>
-    <div class="counts"><span id="tkCount">0 deadlines</span></div>
-  </section>
-
-  <section class="tk" id="timekeeping" hidden>
-    <div class="tk-toggles">
-      <button class="seg small tk-toggle" data-panel="calendar" aria-pressed="false">Deadline Calendar</button>
-      <button class="seg small tk-toggle active" data-panel="timeline" aria-pressed="true">Timeline</button>
-      <button class="seg small tk-toggle" data-panel="countdown" aria-pressed="false">Countdowns</button>
+  <section class="tk" id="timekeeping">
+    <div class="tk-bar">
+      <div>
+        <p class="eyebrow">TIMEKEEPING</p>
+        <h2>Deadlines</h2>
+      </div>
+      <span class="spacer"></span>
+      <span class="tk-count" id="tkCount"></span>
+      <div class="tk-toggles">
+        <button class="seg small tk-toggle" data-panel="calendar" aria-pressed="false">Deadline Calendar</button>
+        <button class="seg small tk-toggle active" data-panel="timeline" aria-pressed="true">Timeline</button>
+        <button class="seg small tk-toggle" data-panel="countdown" aria-pressed="false">Countdowns</button>
+      </div>
     </div>
 
     <p class="tk-empty" id="tkEmpty" hidden>No tasks with deadlines yet. Give a task a deadline and it appears here.</p>
 
-    <div class="tk-panels" id="tkPanels">
+    <div class="tk-panels" id="tkPanels" hidden>
       <section class="tk-panel" data-panel="calendar" hidden>
         <header class="tk-panel-head">
           <span class="tk-panel-title">Deadline Calendar — <span id="calMonthLabel"></span></span>

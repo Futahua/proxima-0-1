@@ -628,7 +628,7 @@
     if (action === 'cancel') return;
     if (action === 'delete') {
       if (editingId) Store.deleteTask(editingId);
-      queueMicrotask(() => { render(); refreshTimekeeping(); });
+      queueMicrotask(renderEverything);
       return;
     }
     const fields = {
@@ -642,20 +642,20 @@
     };
     if (editingId) Store.updateTask(editingId, fields);
     else Store.addTask(fields);
-    queueMicrotask(() => { render(); refreshTimekeeping(); });
+    queueMicrotask(renderEverything);
   });
 
   projectForm.addEventListener('submit', (event) => {
     if (!event.submitter || event.submitter.value !== 'save') return;
     Store.addProject(projectForm.elements.name.value);
     projectForm.reset();
-    queueMicrotask(() => { refreshProjectOptions(); render(); refreshTimekeeping(); });
+    queueMicrotask(() => { refreshProjectOptions(); renderEverything(); });
   });
 
   $('#newTaskBtn').addEventListener('click', () => openTask(null));
   $('#newProjectBtn').addEventListener('click', () => projectDialog.showModal());
-  // The project filter scopes both surfaces, so it re-reads both.
-  projectFilter.addEventListener('change', () => { render(); refreshTimekeeping(); });
+  // The project filter scopes the whole page, board and panels alike.
+  projectFilter.addEventListener('change', renderEverything);
   // A new target is a new horizon: every proportional share changes with it.
   targetInput.addEventListener('change', render);
   // A resize only changes how tall the running column is, so restyle rather than
@@ -712,7 +712,16 @@
 
   function renderTimekeeping() {
     const tasks = deadlineTasks();
-    $('#tkCount').textContent = tasks.length + (tasks.length === 1 ? ' deadline' : ' deadlines');
+    // What this counts is exactly what the panels can show: open tasks carrying a
+    // deadline. Finished work is excluded (as the original excludes it), so the
+    // board above can legitimately show more tasks than this number — the label
+    // says which, rather than claiming to count the board.
+    $('#tkCount').textContent = tasks.length === 0
+      ? 'No open tasks with deadlines'
+      : tasks.length + (tasks.length === 1 ? ' task with a deadline' : ' tasks with deadlines');
+
+    // The message and the panels are mutually exclusive: one or the other, never
+    // both. `hidden` is set on both, every pass.
     const anyDeadline = tasks.length > 0;
     $('#tkEmpty').hidden = anyDeadline;
     $('#tkPanels').hidden = !anyDeadline;
@@ -1238,42 +1247,20 @@
     ['overdue', 'today', 'soon', 'week', 'later'].forEach((key) => chip.classList.toggle('urgency-' + key, key === urgency));
   }
 
-  /** Full pass over both surfaces; used after any change to the task set. */
-  function refreshTimekeeping() {
-    if (isTimekeeping()) renderTimekeeping();
+  // ── One page ──────────────────────────────────────────────────────────────
+  // The board and Timekeeping are a single scroll, not two surfaces: there is no
+  // switcher and no surface state to keep. Both are on screen at once, so a pass
+  // renders both and every change to the task set goes through renderEverything.
+  //
+  // `hidden` is honoured throughout — see the [hidden] rule in app.css, which is
+  // what stops an element that sets its own `display` from ignoring the attribute.
+  function renderEverything() {
+    render();
+    renderTimekeeping();
   }
 
   /** A write landed: re-read it everywhere it can show up. */
-  function refreshAfterWrite() {
-    render();
-    if (isTimekeeping()) renderTimekeeping();
-  }
-
-  const isTimekeeping = () => $('[data-sub="timekeeping"]').classList.contains('active');
-
-  // ── Sub-tab wiring ────────────────────────────────────────────────────────
-  function showSurface(surface) {
-    $$('.seg[data-sub]').forEach((tab) => tab.classList.toggle('active', tab.dataset.sub === surface));
-    const elastic = surface === 'elastic';
-    columns.hidden = !elastic;
-    $('#boardHead').hidden = !elastic;
-    $('#runbar').hidden = !elastic;
-    $('#tkHead').hidden = elastic;
-    $('#timekeeping').hidden = elastic;
-    if (elastic) {
-      $('#boardTitle').textContent = 'Elastic Boards';
-      $('#boardSub').textContent = 'Backlog, live execution and finished work.';
-      paint();
-    } else {
-      $('#boardTitle').textContent = 'Deadlines';
-      $('#boardSub').textContent = 'Calendar, timeline and countdowns, in any combination.';
-      renderTimekeeping();
-    }
-  }
-
-  $$('.seg[data-sub]').forEach((tab) => {
-    tab.addEventListener('click', () => showSurface(tab.dataset.sub));
-  });
+  const refreshAfterWrite = renderEverything;
 
   $$('.tk-toggle').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -1327,10 +1314,7 @@
   ensureTarget();
   refreshProjectOptions();
   if (Store.run()) ticker = setInterval(tick, 1000);
-  showSurface('elastic');
-  render();
-  // Both surfaces share one clock. Nothing about a tick writes or rebuilds.
-  setInterval(() => {
-    if (isTimekeeping()) tickTimekeeping();
-  }, 1000);
+  renderEverything();
+  // One clock for the whole page. Nothing about a tick writes or rebuilds.
+  setInterval(tickTimekeeping, 1000);
 })();

@@ -4,6 +4,11 @@
   --finished: #e7b24b; --danger: #e06c75; --radius: 8px;
 }
 * { box-sizing: border-box; }
+/* The `hidden` attribute must win over any component that sets its own display.
+   Without this an element styled `display: flex`/`grid`/`block` ignores `hidden`
+   entirely and stays on screen — which is how a hidden header and an empty-state
+   message once rendered alongside live panels. */
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--ink);
   font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
 button, input, select, textarea { font: inherit; color: inherit; }
@@ -125,15 +130,25 @@ main { padding: 16px; max-width: 1200px; }
 .empty { color: var(--dim); font-size: 13px; text-align: center; padding: 18px 0; }
 
 /* ══ Timekeeping ═══════════════════════════════════════════════════════════
-   Three panels over one task set. They are independent: any combination can be
-   on screen at once, so the row lays them out side by side and only the timeline
-   flexes. Urgency bands drive the colour of every deadline-marked element. */
+   Below the board on one page, not a separate surface. Three panels over one
+   task set: they are independent, any combination can be on screen at once, so
+   the row lays them out side by side and only the timeline flexes. Urgency bands
+   drive the colour of every deadline-marked element. */
 :root {
   --u-overdue: #e06c75; --u-today: #e7a24b; --u-soon: #e7d24b;
   --u-week: #9fd04a; --u-later: #6fa8dc;
 }
 
-.tk-toggles { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+/* Sticky so the composition controls and the scope stay reachable while the
+   panels below scroll. */
+.tk-bar { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap;
+  margin: 22px 0 12px; padding: 12px 0 10px; border-top: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 5; background: var(--bg); }
+.tk-bar h2 { margin: 2px 0 0; font-size: 22px; }
+.tk-bar .eyebrow { margin: 0; }
+.tk-count { font-size: 12px; color: var(--dim); white-space: nowrap; }
+
+.tk-toggles { display: flex; gap: 8px; flex-wrap: wrap; }
 .tk-toggle::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 7px;
   border-radius: 50%; background: var(--line); vertical-align: middle; }
 .tk-toggle.active::before { background: var(--accent); }
