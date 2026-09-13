@@ -39,6 +39,19 @@ commit; it is in the working tree on top of it.
 
 ---
 
+## Open — from the drag-feel review
+
+| # | Finding | Original | State here |
+| --- | --- | --- | --- |
+| 9 | **No custom drag image, so there is no grab point.** The original clones the card at its true size, pins it under the cursor at the exact offset the user grabbed (`e.clientX - rect.left`), and outlines it. Ours lets Chromium snapshot the element, which centres the ghost under the pointer and picks its own scale and transparency. On a 540px card the thing under the hand does not correspond to the thing that was grabbed. | `ElasticView.svelte:333-349` | Open. Note the ghost keeps the card's full height; the 90px cap is the placeholder's, not the ghost's. |
+| 10 | **The whole card is both draggable and a click target.** The original drags `.pos-card` but attaches the open-editor click only to the inner content div, so a press anywhere on the card body can still be read as a click after a wobble. Ours puts both on the card, so a near-miss drag opens the editor. | `ElasticView.svelte:504-519` | Open. |
+| 11 | **No `dropEffect = 'none'` on a forbidden target.** The original sets it so the cursor itself says the drop will be refused. Ours returns silently, so a locked running column looks just as inviting as an open one right up until release. | `ElasticView.svelte:383-386` | Open. Related to the locked-plan refusal, which currently explains itself only *after* the drop. |
+| 12 | **`dragend` always rebuilds.** Ours calls a full `render()` on every dragend, including an aborted one that changed nothing. The original only clears its local drag state. | `ElasticView.svelte:358-362` | Open. Cheap to fix; correctness is unaffected. |
+| 13 | **The Gantt has no vertical axis.** No row packing, no drag between rows, no persisted `ganttRow`, and no shift-resize of either bar edge. | `ProjectDeadlines.svelte:16-57`, `460-463`, `505-510`, `561-566` | Open, and already recorded as #1/#2 — repeated here because the same review raised it. |
+| 14 | **The Timeline header does not pan.** The original is grab-to-pan; ours is zoom and Today buttons only. | `ProjectDeadlines.svelte:652-678` | Open. |
+
+---
+
 ## Closed
 
 | Finding | How |
@@ -63,4 +76,8 @@ commit; it is in the working tree on top of it.
 | Locking with nothing running, and a run whose members all leave | Empty lock refused; the run ends with a stated reason when its last member leaves |
 | A date-only deadline went overdue at 00:00 on its due date | Expiry is the end of the deadline day (`dayEnd`); urgency, the countdown timer and its progress all measure to it |
 | Timeline clipped only the left edge, so a bar starting before the window kept its full width and appeared to end in the future | Width is clipped to the window alongside the edge, with a continuation arrow and a tooltip naming the real dates |
+| **The Timeline bar snapped to whole days during the gesture**, leaving a dead zone from 3px to half a day where the bar had stopped tracking the hand; a wobble back to the origin counted as nothing; vertical movement was ignored | The bar follows the pointer in continuous pixels; pixels become days once, at commit; click-vs-drag is decided on final displacement in either axis |
+| **The running column could not open a slot.** Its cards were `position: absolute`, so the in-flow drop placeholder could not push them and the column visibly refused the drop | Cards are ordinary flow items. Their inline heights are still written from `max(125, (w/totalWeight)H)` — `flex-grow` was tried and rejected because each item's 125px floor skews its share (weights 6/3/1 over 900px gave 416/271/174 where the formula wants 540/270/125) — while the column's own height is definite and independent, so H stays stable. The placeholder also needed `flex: 0 0 auto` or the overflowing column crushed it from 90px to 2px |
+| Drop placeholder sized to the card's full height, tearing a 250-540px cavity into the destination list | Capped at 90px, as the original caps it |
+| No edge autoscroll, so a column taller than the viewport stopped coming to meet the hand | 8px per dragover within 60px of the top or bottom edge, applied before the insertion index is resolved |
 

@@ -212,15 +212,26 @@
   }
 
   /**
-   * Read the running column's real client height. Never measure mid-layout with a
-   * stale number: if the host collapsed, fall back to the last good reading, and
-   * otherwise to the 300px baseline the original uses when it has none.
+   * Read the running column's real client height, and give it back to the column
+   * as a definite height.
+   *
+   * The write matters. The cards are in flow now, so if the column sized itself to
+   * them H would depend on the current allocation — the loop that produced the
+   * original feedback bug — AND the flex algorithm would have no free space left
+   * to distribute, collapsing every card onto its floor. Pinning the measured
+   * height keeps H independent of the cards, which is what makes the ratios apply.
+   *
+   * Never measure mid-layout with a stale number: if the host collapsed, fall back
+   * to the last good reading, and otherwise to the 300px baseline the original
+   * uses when it has none.
    */
   function measureRunningHeight() {
     const host = runningHost();
     const measured = host ? host.clientHeight : 0;
     if (measured > 0) runningHeight = measured;
-    return runningHeight > 0 ? runningHeight : MIN_CONTAINER_HEIGHT;
+    const H = runningHeight > 0 ? runningHeight : MIN_CONTAINER_HEIGHT;
+    if (host && Math.abs((parseFloat(host.style.height) || 0) - H) > 0.5) host.style.height = H + 'px';
+    return H;
   }
 
   function timelineFor(runningTasks, from, target) {
@@ -465,34 +476,28 @@
       return;
     }
 
-    host.style.height = view.allocation.height + 'px';
-
-    // Heights are placed by hand because the cards are absolute: stacking them
-    // from the top keeps the gaps equal no matter how the ratios fall.
-    let top = 0;
+    // Heights are written, but the cards stay IN FLOW with no `top` — that is the
+    // point of the change. An absolute card cannot be pushed aside by the drop
+    // placeholder, so the column had to look like it was refusing the drop.
     view.running.forEach((task) => {
       const card = host.querySelector('.card[data-id="' + task.id + '"]');
       if (!card) return;
       const height = Math.round(view.allocation.heights.get(task.id) || MIN_CARD_HEIGHT);
-      card.style.top = Math.round(top) + 'px';
       card.style.height = height + 'px';
       // A floor-height card has no room for its footer; hide it rather than spill.
       card.classList.toggle('tight', height < 132);
       paintWipe(card, view.allocation.progress.get(task.id) || 0);
-      top += height + CARD_GAP;
     });
 
-    // Anything that reached Running after the lock sits below the plan at floor
-    // height, flagged. It has no slice and no progress, and it never will have
-    // had any: the plan was frozen before it arrived.
+    // Anything that reached Running after the lock is not in the plan: it has no
+    // slice and no progress, and it never will have had any. It still occupies a
+    // normal slot, flagged, so it is never hidden.
     view.outsiders.forEach((task) => {
       const card = host.querySelector('.card[data-id="' + task.id + '"]');
       if (!card) return;
-      card.style.top = Math.round(top) + 'px';
       card.style.height = MIN_CARD_HEIGHT + 'px';
       card.classList.add('tight');
       paintWipe(card, 0);
-      top += MIN_CARD_HEIGHT + CARD_GAP;
     });
 
     runInfo.textContent = runLine(view);
@@ -693,6 +698,23 @@
   let dragId = null;
   let placeholder = null;
 
+  /** The gap a drop opens: capped, so a tall card cannot tear the list apart. */
+  const PLACEHOLDER_MAX = 90;
+  const AUTOSCROLL_EDGE = 60;
+  const AUTOSCROLL_STEP = 8;
+
+  /**
+   * Scroll a list while the pointer is held near its top or bottom edge, so a
+   * column taller than the viewport keeps coming to meet the hand. Called before
+   * the insertion point is resolved, so the index is computed against the position
+   * the list is moving to rather than the one it is leaving.
+   */
+  function autoScrollVert(event, host) {
+    const rect = host.getBoundingClientRect();
+    if (event.clientY > rect.bottom - AUTOSCROLL_EDGE) host.scrollTop += AUTOSCROLL_STEP;
+    else if (event.clientY < rect.top + AUTOSCROLL_EDGE) host.scrollTop -= AUTOSCROLL_STEP;
+  }
+
   columns.addEventListener('dragstart', (event) => {
     const card = event.target.closest('.card');
     if (!card) return;
@@ -707,7 +729,11 @@
     card.classList.add('dragging');
     placeholder = document.createElement('div');
     placeholder.className = 'placeholder';
-    placeholder.style.height = card.offsetHeight + 'px';
+    // Capped at 90px rather than the card's full height. Running cards are
+    // hundreds of pixels tall because height encodes allocation, so an uncapped
+    // placeholder tore a 250-400px cavity into the destination list and threw
+    // everything away from the pointer.
+    placeholder.style.height = Math.min(PLACEHOLDER_MAX, card.getBoundingClientRect().height) + 'px';
     event.dataTransfer.effectAllowed = 'move';
     event.dataTransfer.setData('text/plain', dragId);
   });
@@ -729,6 +755,7 @@
     if (!host || !placeholder) return;
     event.preventDefault();
     host.classList.add('over');
+    autoScrollVert(event, host);
     const after = cardAfter(host, event.clientY);
     if (after) host.insertBefore(placeholder, after);
     else host.append(placeholder);
@@ -1397,22 +1424,35 @@
         }
       }
 
-      // Press and release without movement opens the editor; movement moves the
-      // dates. The decision is only made on mouseup, so a click stays a click.
+      // The gesture follows the pointer in continuous pixels while it is held;
+      // whole days are a COMMIT-time decision, never a gesture-time one. Snapping
+      // during the gesture was the worst of it: between 3px and half a day the bar
+      // had stopped tracking the hand, so releasing there moved nothing and the bar
+      // sprang back — a dead zone that widened with every zoom step.
+      //
+      // Click versus drag is decided on FINAL displacement, in either axis, at
+      // release. So a wobble that comes back to where it started is still a click,
+      // and a purely vertical pull is still a drag.
+      const DRAG_SLOP = 3;
       let armed = false;
-      let moved = false;
+      let dragging = false;
       let grabX = 0;
+      let grabY = 0;
+      let originLeftPx = 0;
       let originStartDay = '';
       let originEndDay = '';
 
       const onMove = (event) => {
         if (!armed) return;
         const dx = event.clientX - grabX;
-        if (!moved && Math.abs(dx) < 3) return;
-        moved = true;
-        document.body.classList.add('tk-dragging');
-        const shiftDays = Math.round(dx / tlZoom);
-        bar.style.transform = 'translateX(' + Math.round(tlLeftInWindow(dayStart(originStartDay), win) + shiftDays * tlZoom) + 'px)';
+        const dy = event.clientY - grabY;
+        if (!dragging) {
+          if (Math.abs(dx) < DRAG_SLOP && Math.abs(dy) < DRAG_SLOP) return;
+          dragging = true;
+          document.body.classList.add('tk-dragging');
+        }
+        // Continuous: the bar's left edge sits exactly where the pointer puts it.
+        bar.style.transform = 'translateX(' + Math.round(originLeftPx + dx) + 'px)';
       };
 
       const onUp = (event) => {
@@ -1421,9 +1461,15 @@
         document.body.classList.remove('tk-dragging');
         if (!armed) return;
         armed = false;
-        if (!moved) { openTask(task.id); return; }
 
-        const shiftDays = Math.round((event.clientX - grabX) / tlZoom);
+        const dx = event.clientX - grabX;
+        const dy = event.clientY - grabY;
+        const travelled = Math.abs(dx) >= DRAG_SLOP || Math.abs(dy) >= DRAG_SLOP;
+
+        if (!travelled) { openTask(task.id); return; }
+
+        // Commit: pixels become whole days here, once, at the end.
+        const shiftDays = Math.round(dx / tlZoom);
         if (shiftDays === 0) { renderTimekeeping(); return; }
 
         // The one real write in this panel. A whole-bar drag means "move this
@@ -1466,11 +1512,13 @@
         if (event.button !== 0) return;
         event.preventDefault();
         armed = true;
-        moved = false;
+        dragging = false;
         grabX = event.clientX;
-        // Anchor on the span that is actually drawn, so the interval the user
+        grabY = event.clientY;
+        // Anchor on the geometry that is actually drawn, so the interval the user
         // grabbed is the interval that moves, and a startless task's materialised
         // start lands exactly where its bar already was.
+        originLeftPx = barGeometry(task, win) ? barGeometry(task, win).left : 0;
         originStartDay = dayString(new Date((span ? span.start : startOfToday())));
         originEndDay = dayString(new Date((span ? span.end : startOfToday())));
         window.addEventListener('mousemove', onMove);

@@ -55,6 +55,10 @@ main { padding: 16px; max-width: 1200px; }
 
 .columns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; align-items: start; }
 .col { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+/* Grid items do not stretch under `align-items: start`, so the running column
+   asks for the row height explicitly — it needs a definite H — while the other
+   two stay content-sized. */
+.col[data-status="running"] { align-self: stretch; }
 .colhead { display: flex; justify-content: space-between; padding: 12px 14px;
   border-bottom: 1px solid var(--line); font-size: 12px; letter-spacing: .06em; color: var(--dim); }
 .colhead .running { color: var(--running); }
@@ -79,15 +83,29 @@ main { padding: 16px; max-width: 1200px; }
 .cards::-webkit-scrollbar-corner { background: transparent; }
 
 /* The running column is a measured box: its clientHeight is the H that every
-   card's proportional height is computed against. Only the running cards leave
-   the flow — the other columns stay plain lists.
-   The height must stay definite: a stretching flex rule would silently win over
-   the measured inline height and desync H from the rendered box. */
-.col[data-status="running"] { display: block; }
+   card's proportional height is computed against. It stretches to the board's
+   row, and the cards are ORDINARY FLOW items — not absolute — so a drag
+   placeholder between them really pushes them apart, the way it already does in
+   Backlog and Finished.
+
+   The height is DEFINITE (`height`, not `min-height`) and kept independent of the
+   cards. When the cards drove the height they filled it exactly and H depended on
+   the allocation, which is the loop that once made cards balloon.
+
+   Heights stay hand-written on purpose. `flex-grow: weight` looks like it should
+   express the ratio, but each item's 125px floor is part of its base size and
+   skews its share: weights 6/3/1 over 900px gave 416/271/174 where the formula
+   wants 540/270/125. So the cards are in flow for interaction, and the arithmetic
+   — max(125, (w/totalWeight)H) — is still applied explicitly. Flow and weighted
+   heights are both kept; only the positioning had to go. */
+.col[data-status="running"] { display: flex; flex-direction: column; align-self: stretch; }
 .cards[data-drop="running"] {
-  position: relative; display: block; min-height: 300px; overflow-y: auto;
+  position: relative; display: flex; flex-direction: column; gap: 8px;
+  height: 300px; overflow-y: auto;
 }
-.cards[data-drop="running"] > .card { position: absolute; left: 0; right: 0; }
+/* Flex must not resize a card: the inline height is the whole answer, and the
+   floor lives here so it survives a pass that has not run yet. */
+.cards[data-drop="running"] > .card { flex: 0 0 auto; min-height: 125px; }
 
 .card { background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid var(--line);
   border-radius: 6px; padding: 12px; cursor: grab; position: relative; overflow: hidden; }
@@ -126,7 +144,10 @@ main { padding: 16px; max-width: 1200px; }
   background: rgba(0, 184, 148, .12); border-bottom: 1px solid rgba(0, 184, 148, .45); }
 .card.spent .pos-wipe { border-bottom-color: transparent; }
 .card.dragging { opacity: .35; }
-.placeholder { border: 1px dashed var(--accent); border-radius: 6px; background: #2a3040; }
+/* The drop gap. `flex: 0 0 auto` matters in the running column: its content
+   routinely overflows, and as a shrinkable flex item the placeholder was crushed
+   from 90px to 2px — the column opened a slot, but a nearly invisible one. */
+.placeholder { flex: 0 0 auto; border: 1px dashed var(--accent); border-radius: 6px; background: #2a3040; }
 .empty { color: var(--dim); font-size: 13px; text-align: center; padding: 18px 0; }
 
 /* ══ Timekeeping ═══════════════════════════════════════════════════════════
