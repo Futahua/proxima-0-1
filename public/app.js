@@ -780,14 +780,14 @@
     if (!host || !dragId) return;
     event.preventDefault();
     // Dropping into Running while locked would add a task to a roster that is
-    // supposed to be frozen. Refuse it and say so, rather than admit a task the
-    // plan cannot give a slice to.
+    // supposed to be frozen. Refuse it where the reader is looking, rather than
+    // admit a task the plan cannot give a slice to.
     if (host.dataset.drop === 'running' && lockedPlan()) {
       if (placeholder) placeholder.remove();
       dragId = null;
       $$('.cards').forEach((c) => c.classList.remove('over'));
       render();
-      runInfo.textContent = 'The running column is a locked plan — unlock to change who is in the run.';
+      flash('The running column is a locked plan — unlock to change who is in the run.', host);
       return;
     }
     const next = placeholder ? placeholder.nextElementSibling : null;
@@ -991,19 +991,22 @@
       ticker = null;
     } else {
       const target = fromLocalInput(targetInput.value);
+      // These go through the flash channel rather than the line under the button:
+      // that line is rewritten by the next tick, so a refusal written there was
+      // erased about a second later — visible just long enough to be missed.
       if (!target || target <= new Date()) {
-        runInfo.textContent = 'Pick a target in the future before locking.';
+        flash('Pick a target in the future before locking.', targetInput);
         return;
       }
       // Locking nothing is not a run: there is no plan to freeze and no one to
       // consume the horizon. Refuse it instead of storing a run with no members.
       if (liveRunning().length === 0) {
-        runInfo.textContent = 'Nothing to lock — no tasks are in the running column.';
+        flash('Nothing to lock — no tasks are in the running column.', lockBtn);
         return;
       }
       const plan = snapshotPlan(targetInput.value);
       if (!plan) {
-        runInfo.textContent = 'Pick a target in the future before locking.';
+        flash('Pick a target in the future before locking.', targetInput);
         return;
       }
       Store.setRun(plan);
@@ -1056,10 +1059,6 @@
     $('#tkEmpty').hidden = anyDeadline;
     $('#tkPanels').hidden = !anyDeadline;
 
-    // A notice explains a refused action, so it is cleared by the next full pass
-    // rather than lingering as stale advice.
-    $('#tkNotice').hidden = true;
-
     if (panels.calendar) renderCalendar(tasks);
     if (panels.timeline) renderTimeline(tasks);
     if (panels.countdown) renderCountdowns(tasks);
@@ -1068,11 +1067,40 @@
     tickTimekeeping();
   }
 
-  /** Say why an action was refused, in words, next to the thing it concerns. */
-  function showNotice(text) {
-    const notice = $('#tkNotice');
-    notice.textContent = text;
-    notice.hidden = false;
+  // ── Refusals ──────────────────────────────────────────────────────────────
+  // One channel for every refused action in the app: a small chip near whatever
+  // was touched, gone on its own after a few seconds. It replaced a full-width
+  // red banner that carried the same visual weight as a real error and sat above
+  // the whole panel, which is far too loud for "that gesture did not apply".
+  let flashTimer = 0;
+
+  /**
+   * Say why an action was refused. `anchor` is the element the reader touched, so
+   * the message appears where their attention already is; without one it appears
+   * under the top bar. Transient by design — nothing has to be dismissed, and
+   * nothing lingers to be mistaken for live state.
+   */
+  function flash(text, anchor) {
+    const el = $('#flash');
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = false;
+    // Measure only after it has content, so the placement is right first time.
+    const box = el.getBoundingClientRect();
+    let left = Math.round((window.innerWidth - box.width) / 2);
+    let top = 68;
+    if (anchor && anchor.isConnected) {
+      const a = anchor.getBoundingClientRect();
+      left = Math.round(a.left + a.width / 2 - box.width / 2);
+      top = Math.round(a.top - box.height - 8);
+      // Keep it on screen, and below the bar if there is no room above.
+      if (top < 8) top = Math.round(a.bottom + 8);
+    }
+    el.style.left = Math.max(8, Math.min(left, window.innerWidth - box.width - 8)) + 'px';
+    el.style.top = Math.max(8, Math.min(top, window.innerHeight - box.height - 8)) + 'px';
+    el.classList.remove('warn');
+    window.clearTimeout(flashTimer);
+    flashTimer = window.setTimeout(() => { el.hidden = true; }, 5000);
   }
 
   function syncPanelVisibility() {
@@ -1224,11 +1252,14 @@
         chip.style.width = bar.widthPct + '%';
         chip.style.top = (bar.row * 20 + 3) + 'px';
         if (bar.span.reversed) {
-          // Contradictory data: say so, and show it where the deadline actually is.
+          // Contradictory data: say so, show it where the deadline actually is, and
+          // say what to do — the same wording the timeline bar uses, so one state
+          // reads the same wherever it appears.
           chip.classList.add('invalid');
-          chip.title = 'Invalid dates: starts ' + readableDay(dayString(new Date(bar.span.start))) +
-            ' but is due ' + readableDay(dayString(new Date(bar.span.end))) +
-            ' — the start is after the deadline.';
+          chip.title = bar.task.name + ' — its dates are reversed: it starts ' +
+            readableDay(dayString(new Date(bar.span.start))) + ' but is due ' +
+            readableDay(dayString(new Date(bar.span.end))) +
+            '. Open it to fix the start or the deadline.';
           chip.textContent = '⚠ ' + bar.task.name;
         } else {
           // The tooltip names the same span the bar is drawn from, so a task whose
@@ -1568,9 +1599,14 @@
         if (span.reversed) {
           bar.classList.add('invalid');
           label.textContent = '⚠ ' + task.name;
-          bar.title = 'Invalid dates: starts ' + readableDay(dayString(new Date(span.start))) +
-            ' but is due ' + readableDay(dayString(new Date(span.end))) +
-            ' — the start is after the deadline. Drawn at its real deadline.';
+          // Wording matters here: this state was saved by the app, so the message
+          // says what to do about it rather than reciting the rule it breaks. The
+          // bar is still draggable — a move preserves the relation, so it is not
+          // refused — but the reader should know the dates themselves need fixing.
+          bar.title = task.name + ' — its dates are reversed: it starts ' +
+            readableDay(dayString(new Date(span.start))) + ' but is due ' +
+            readableDay(dayString(new Date(span.end))) +
+            '. Dragging moves it as it is; open it to fix the start or the deadline.';
         }
         placeBar(bar, task, win);
         // Say so in words too: a clipped bar must not read as a task that simply
@@ -1654,31 +1690,24 @@
         const fields = {};
 
         if (shiftDays !== 0) {
-          const nextStart = shiftDay(originStartDay, shiftDays);
-          const nextDeadline = shiftDay(originEndDay, shiftDays);
-
-          // A whole-bar drag shifts both ends by the same whole number of days, and
-          // that is order-preserving: a valid task cannot become reversed, and a
-          // reversed one cannot be repaired by dragging (only the dialog can change
-          // the relationship between the two dates). So a drag cannot invent the
-          // contradiction the dialog refuses to save.
+          // A whole-bar drag shifts both ends by the same whole number of days.
+          // That is order-preserving EXACTLY: (end + k) - (start + k) === end - start,
+          // so a valid task cannot become reversed and a reversed one cannot become
+          // valid. The relation between the two dates is a property of the task, not
+          // of where it sits, and a drag changes only where it sits.
           //
-          // This check therefore only fires if the dates are re-read late on a
-          // different day from the one the drag started on, which can happen around
-          // midnight. It refuses there rather than clamping one date onto the other.
-          if (dayStart(nextDeadline) < dayStart(nextStart)) {
-            // Render first, then post the notice: a pass clears the notice, so the
-            // order matters or the explanation would erase itself.
-            renderTimekeeping();
-            showNotice('Not moved: that would put the deadline (' + readableDay(nextDeadline) +
-              ') before the start (' + readableDay(nextStart) + '). A task cannot be due before it begins.');
-            return;
-          }
-          fields.start = nextStart;
-          fields.deadline = nextDeadline;
+          // There used to be a guard here that refused a move which would land the
+          // deadline before the start. It could never fire for a task that was valid
+          // to begin with, and for an already-reversed task it fired on EVERY drag —
+          // the move changes nothing about the contradiction, which the store already
+          // holds, so the task became permanently undraggable and complained only
+          // after the reader had tried. Removed: the invariant makes the refusal
+          // unnecessary, and the bar keeps its invalid treatment wherever it lands.
+          // Repairing the relation is the dialog's job, and only the dialog's.
+          fields.start = shiftDay(originStartDay, shiftDays);
+          fields.deadline = shiftDay(originEndDay, shiftDays);
+          Store.updateTask(task.id, fields);
         }
-
-        if (shiftDays !== 0) Store.updateTask(task.id, fields);
 
         if (rowShift !== 0) {
           // Ask for the row the gesture pointed at, then walk down while anything
@@ -1747,12 +1776,14 @@
     card.dataset.id = task.id;
     if (isReversed(task)) {
       // The timer counts to the real deadline, so it stays truthful; the card
-      // says the stored dates contradict each other rather than hiding it.
+      // says the stored dates contradict each other rather than hiding it. Same
+      // wording as the other two panels.
       card.classList.add('invalid');
       const span = spanOf(task);
-      card.title = 'Invalid dates: starts ' + readableDay(dayString(new Date(span.start))) +
-        ' but is due ' + readableDay(dayString(new Date(span.end))) +
-        ' — the start is after the deadline.';
+      card.title = task.name + ' — its dates are reversed: it starts ' +
+        readableDay(dayString(new Date(span.start))) + ' but is due ' +
+        readableDay(dayString(new Date(span.end))) +
+        '. Open it to fix the start or the deadline.';
     }
 
     const info = document.createElement('div');

@@ -172,6 +172,22 @@ main { padding: 16px; max-width: 1200px; }
 .tk-notice { margin: 0 0 12px; padding: 9px 12px; border-radius: 6px; font-size: 12px;
   color: var(--ink); background: rgba(224, 108, 117, .12); border: 1px solid var(--danger); }
 
+/* A bar whose stored dates are reversed cannot be dragged into a valid state, so
+   it does not invite a grab it would then have to refuse. The tooltip says what
+   to do about it; the bar itself keeps the invalid treatment. */
+.tk-tl-bar.invalid { cursor: pointer; }
+
+/* Refused actions speak here: one quiet chip, near the thing that was touched,
+   gone on its own. Deliberately not a page-level banner — a refusal about one bar
+   should not shout across the whole panel. */
+.flash { position: fixed; z-index: 60; max-width: 340px; padding: 7px 11px;
+  border-radius: 6px; font-size: 12px; line-height: 1.4; color: var(--ink);
+  background: var(--panel-2); border: 1px solid var(--line);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .35); pointer-events: none;
+  animation: flash-in .12s ease-out; }
+.flash.warn { border-color: var(--u-overdue, #e06c75); }
+@keyframes flash-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+
 .tk-toggles { display: flex; gap: 8px; flex-wrap: wrap; }
 .tk-toggle::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 7px;
   border-radius: 50%; background: var(--line); vertical-align: middle; }

@@ -23,7 +23,6 @@ commit; it is in the working tree on top of it.
 
 | # | Finding | Original | State here |
 | --- | --- | --- | --- |
-| 1 | **Gantt row packing.** The original packs tasks into non-overlapping rows, supports vertical drag with collision resolution, and persists `ganttRow` across at least 300 available rows. We draw one row per task. The reviewer's summary: "the original Gantt is a spatial scheduling surface; the rebuild is basically a task list with horizontal bars." | `ProjectDeadlines.svelte:16-57`, drag/collision persistence `557-594` | **Fixed.** `ganttRow` is a stored task field; `packTask` places a new task in the first row where it does not overlap and keeps a stored row unless something there now collides; `resolveDroppedRow` walks a dropped task down past anything settled in the row it asked for. Vertical drag is continuous during the gesture and resolves at 40px per row on release. |
 | 2 | **Shift-resize of either bar edge.** The original resizes a bar's start or end with a modifier. | `460-463`, `505-510`, `561-566` | Not built; `shiftKey` appears nowhere. Whole-bar movement only. |
 | 3 | **Pixel/time-based bar movement.** The original moves a bar in continuous time (`newStartMs = zeroMs + newLeftPx / ganttZoom * 86400000`); we round displacement to whole days. | `542-550` | Open. Sub-day precision is unreachable while the store keeps dates as `YYYY-MM-DD` — see #5. |
 | 4 | **Configurable colour rules.** The original evaluates a user-configurable `colorRules` set at render time, affecting calendar, timeline and countdowns. We hardcode urgency bands. | `142-161` | Open, and knowingly a placeholder: `URGENCY_COLOR` carries a comment saying it stands in for the rules system. |
@@ -47,10 +46,20 @@ commit; it is in the working tree on top of it.
 | 10 | **The whole card is both draggable and a click target.** The original drags `.pos-card` but attaches the open-editor click only to the inner content div, so a press anywhere on the card body can still be read as a click after a wobble. Ours puts both on the card, so a near-miss drag opens the editor. | `ElasticView.svelte:504-519` | Open. |
 | 11 | **No `dropEffect = 'none'` on a forbidden target.** The original sets it so the cursor itself says the drop will be refused. Ours returns silently, so a locked running column looks just as inviting as an open one right up until release. | `ElasticView.svelte:383-386` | Open. Related to the locked-plan refusal, which currently explains itself only *after* the drop. |
 | 12 | **`dragend` always rebuilds.** Ours calls a full `render()` on every dragend, including an aborted one that changed nothing. The original only clears its local drag state. | `ElasticView.svelte:358-362` | Open. Cheap to fix; correctness is unaffected. |
-| 13 | **The Gantt has no vertical axis.** No row packing, no drag between rows, no persisted `ganttRow`, and no shift-resize of either bar edge. | `ProjectDeadlines.svelte:16-57`, `460-463`, `505-510`, `561-566` | Open, and already recorded as #1/#2 — repeated here because the same review raised it. |
+| 13 | **The Gantt has no shift-resize of either bar edge.** Raised here as "no vertical axis" too, but row packing and vertical drag are now closed (see Closed below); what remains of this finding is the resize, which is #2. | `ProjectDeadlines.svelte:460-463`, `505-510`, `561-566` | Open as #2. Restated only to keep the review's wording traceable. |
 | 14 | **The Timeline header does not pan.** The original is grab-to-pan; ours is zoom and Today buttons only. | `ProjectDeadlines.svelte:652-678` | Open. |
 | 15 | **A purely vertical drag still moves an instant task sideways.** The original writes `newStartMs` from the pointer whether or not the gesture moved horizontally, so a zero-duration task dragged straight down is re-anchored under the cursor rather than staying put. We commit dates only when the horizontal displacement rounds to a non-zero day count, so a purely vertical drag leaves the dates alone — which is what the gesture asked for, and what makes row changes independently usable. | `ProjectDeadlines.svelte:590-608` | Deliberate divergence, not a defect. Recorded so it is not "restored" later. Still open for sub-day movement (#3) and bounded by day granularity (#5). |
 | 16 | **Filtering leaves gaps in the timeline, it does not renumber.** Because a stored row is kept, filtering a project out leaves the rows it held empty — the visible bars keep their vertical positions and the grid keeps the height of the highest row in use. The original renders a flat 300 tracks, so it has the same property; ours just does not render the unused ones. | `ProjectDeadlines.svelte:64` | Accepted, and the reason stored rows are worth having: a bar returns to where the user put it. Worth revisiting only if gaps ever read as a bug rather than as spacing. |
+
+---
+
+## Test fixtures
+
+`tsk_fixture_reversed` — "FIXTURE — reversed dates" — is a deliberately
+contradictory task (start after deadline) left in the store on purpose, so the
+invalid treatment is always visible on screen rather than only in a test. It is
+labelled a fixture in its own name, because an unlabelled broken task was once
+mistaken for real corruption.
 
 ---
 
@@ -58,6 +67,7 @@ commit; it is in the working tree on top of it.
 
 | Finding | How |
 | --- | --- |
+| **Gantt row packing** — the timeline was one row per task, a list with bars rather than a spatial surface | `ganttRow` is a stored field; packing places a task in the first free row, keeps a stored row unless it now collides, and resolves drops against what is already settled. Vertical drag is continuous during and resolves at 40px per row on release. Verified: overlapping spans never share a row, non-overlapping ones do, a colliding task yields while the others hold their rows, rows survive filtering, a finished task's row survives its return, re-rendering writes nothing, and filtered-out rows leave a gap rather than renumbering |
 | Finished tasks appeared in all three panels | Excluded at the source of all three, `93c4b1b` |
 | Calendar drew deadline-day chips, not start→deadline span bars | Rewritten as week-clipped span bars, `93c4b1b` |
 | Calendar spans ran one day long | The three `+ DAY_MS` uses removed, `ec78d01` |
@@ -82,5 +92,5 @@ commit; it is in the working tree on top of it.
 | **The running column could not open a slot.** Its cards were `position: absolute`, so the in-flow drop placeholder could not push them and the column visibly refused the drop | Cards are ordinary flow items. Their inline heights are still written from `max(125, (w/totalWeight)H)` — `flex-grow` was tried and rejected because each item's 125px floor skews its share (weights 6/3/1 over 900px gave 416/271/174 where the formula wants 540/270/125) — while the column's own height is definite and independent, so H stays stable. The placeholder also needed `flex: 0 0 auto` or the overflowing column crushed it from 90px to 2px |
 | Drop placeholder sized to the card's full height, tearing a 250-540px cavity into the destination list | Capped at 90px, as the original caps it |
 | No edge autoscroll, so a column taller than the viewport stopped coming to meet the hand | 8px per dragover within 60px of the top or bottom edge, applied before the insertion index is resolved |
-| **The timeline was one row per task** — a list with bars rather than a spatial surface | `ganttRow` is a stored field; packing places a task in the first free row, keeps a stored row unless it now collides, and resolves drops against what is already settled. Vertical drag is continuous during and resolves at 40px per row on release. Verified: overlapping spans never share a row, non-overlapping ones do, a colliding task yields while the others hold their rows, rows survive filtering, a finished task's row survives its return, re-rendering writes nothing, and filtered-out rows leave a gap rather than renumbering |
+| **A refusal used to be a full-width red banner**, and the guard around a reversed task refused *every* drag of it — a gesture that could never succeed, explained only after it failed | The guard is gone: `(end + k) - (start + k) === end - start` exactly, so a drag cannot change validity either way, and a reversed bar keeps its invalid treatment wherever it lands. Every refusal now uses one quiet mechanism — a small chip near whatever was touched, gone after five seconds — with wording that names the task and says what to do. Reversed bars take a pointer cursor and a tooltip that says so before the gesture |
 

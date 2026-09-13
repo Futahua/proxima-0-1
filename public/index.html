@@ -7,6 +7,9 @@
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
+<!-- One quiet channel for every refused action. A refusal is a sentence the
+     reader needs once, near the thing they touched — not a page-level alarm. -->
+<div class="flash" id="flash" role="status" aria-live="polite" hidden></div>
 <header class="topbar">
   <div class="brand"><span class="badge">P</span><div><h1>Proxima</h1><p id="storeLine">local store</p></div></div>
   <nav class="surfaces">
@@ -72,7 +75,6 @@
     </div>
 
     <p class="tk-empty" id="tkEmpty" hidden>No tasks with deadlines yet. Give a task a deadline and it appears here.</p>
-    <p class="tk-notice" id="tkNotice" hidden role="alert"></p>
 
     <div class="tk-panels" id="tkPanels" hidden>
       <section class="tk-panel" data-panel="calendar" hidden>
