@@ -183,17 +183,26 @@
   // ── Timekeeping view state ────────────────────────────────────────────────
   // Which panels are on screen is a composition the reader chooses, not a mode:
   // any combination is allowed, including all three at once, but never none. The
-  // composition is persisted through Store so it survives a reload; zoom is a
-  // session detail and is not task data either.
+  // composition is persisted through Store so it survives a reload — and so is the
+  // timeline's zoom, which the original keeps in plugin settings for the same
+  // reason: a zoom level is a way of looking at the data, and having to re-find it
+  // every reload is a small tax on every session.
   const panels = { calendar: false, timeline: true, countdown: false };
+
   const calCursor = { y: new Date().getFullYear(), m: new Date().getMonth() };
-  let tlZoom = 44;
+  /** Pixels per day to start from, matching the store's own default. */
+  let tlZoom = 40;
+  /** Bounds are the original's own, shared by the wheel and the buttons. */
+  const MIN_TL_ZOOM = 10;
+  const MAX_TL_ZOOM = 300;
   let tlCentered = false;
   let countdownSignature = '';
   /** Packed row per visible task, refreshed by every timeline render. */
   let timelineRows = new Map();
   /** The task whose bar is under the hand, so a tick leaves its position alone. */
   let tlDraggingId = null;
+  /** Coalesces the wheel's many zoom steps into one store write. */
+  let zoomSaveTimer = 0;
 
   const tlViewport = $('#tlViewport');
   const tlInner = $('#tlInner');
@@ -1403,6 +1412,64 @@
     return ((ms - win.min) / DAY_MS) * tlZoom;
   }
 
+  // ── Gesture bindings ──────────────────────────────────────────────────────
+  /**
+   * The ONE place a gesture's binding is named. Shift+drag stretches a bar, as in
+   * the original (ProjectDeadlines.svelte:501-504); the chord is a taste decision,
+   * not a law, so it lives here as data. Changing it to another modifier — or to a
+   * dedicated grab handle, which would read `event.target` instead — is an edit to
+   * this object and the two predicates below, and nothing else in the file has to
+   * be hunted down.
+   *
+   *   eventFlag  the mouse event property the press is read from
+   *   key        the key whose press and release light up the hint
+   *   hintAttr   the body attribute the hint's CSS hangs off
+   */
+  const STRETCH_BINDING = {
+    eventFlag: 'shiftKey',
+    key: 'Shift',
+    hintAttr: 'data-shift-pressed',
+  };
+
+  function stretchRequested(event) {
+    return event[STRETCH_BINDING.eventFlag] === true;
+  }
+
+  /**
+   * Where the pointer last was over a bar, so the hint can be lit the instant the
+   * binding key goes down without waiting for the pointer to move first.
+   */
+  let lastPointer = null;
+
+  /**
+   * Which end a stretch takes hold of: the half of the bar the pointer is in,
+   * exactly as the original decides it. The hover hint calls this too, so what the
+   * cursor promises before the press is what the drag does after it.
+   */
+  function stretchEdgeAt(clientX, rect) {
+    return clientX < rect.left + rect.width / 2 ? 'left' : 'right';
+  }
+
+  function clearStretchHints() {
+    $$('.tk-tl-bar.hover-left-half, .tk-tl-bar.hover-right-half').forEach((el) => {
+      el.classList.remove('hover-left-half', 'hover-right-half');
+    });
+  }
+
+  /**
+   * Mark the half of the bar under a point, so the stretch announces itself the
+   * moment the key goes down rather than waiting for the pointer to move first.
+   */
+  function showStretchHintAt(clientX, clientY) {
+    clearStretchHints();
+    if (tlDraggingId) return;
+    const under = document.elementFromPoint(clientX, clientY);
+    const bar = under && under.closest ? under.closest('.tk-tl-bar') : null;
+    if (!bar) return;
+    const edge = stretchEdgeAt(clientX, bar.getBoundingClientRect());
+    bar.classList.add(edge === 'left' ? 'hover-left-half' : 'hover-right-half');
+  }
+
   // ── Row packing ───────────────────────────────────────────────────────────
   // The timeline is a spatial surface, not a list: a task occupies a row, and two
   // tasks may share one only while their spans do not overlap. A row is stored on
@@ -1555,12 +1622,15 @@
    * spans zero days and is held open only by the visual 24px floor, and a
    * two-day task covers exactly two columns.
    *
-   * A reversed span yields a negative width, which the floor turns into a 24px
-   * marker. That marker is anchored on the EARLIER of the two dates so it lands on
-   * the deadline the task claims — the alternative, anchoring on the start, draws
-   * it days away from its own deadline, which hides the contradiction the marker
-   * exists to expose. The data is still reported untouched; only the drawn
-   * geometry is made presentable, and it is drawn where the user was told to look.
+   * A reversed span is drawn as the interval between its two days, with the LEFT
+   * edge on the EARLIER of them — which for a reversed task is the deadline it
+   * claims, so the bar still lands where the reader was told to look. The 24px
+   * floor is not what holds a reversed bar open; it only keeps a zero-length span
+   * (a start and a deadline on one day) visible as a mark. The original instead
+   * computes `deadline - start` as a negative width, which CSS drops, leaving a 24px
+   * stub at the task's START: days away from its own deadline, which hides the very
+   * contradiction the invalid treatment exists to expose. The data is reported
+   * untouched either way — only the drawn geometry is made presentable.
    *
    * The window is finite, so the span is CLIPPED to it — both ends. Clipping only
    * the left edge was a lie: a task that began before the window kept its full
@@ -1570,12 +1640,25 @@
   function barGeometry(task, win) {
     const span = spanOf(task);
     if (!span) return null;
-    const from = Math.min(span.start, span.end);
-    const to = Math.max(span.start, span.end);
+    return spanGeometry(Math.min(span.start, span.end), Math.max(span.start, span.end), win);
+  }
+
+  /**
+   * The geometry of ANY interval, whether it is stored on a task or only proposed
+   * by a gesture in progress. `earlier` and `later` are milliseconds and must
+   * already be ordered — ordering is the reversed-span decision, and it is made by
+   * the caller that knows what the two dates mean.
+   *
+   * This is split out of `barGeometry` for exactly one reason: a stretch preview
+   * must be drawn by the same rule as the bar it will become. A preview with its
+   * own clamping or its own anchor would let the hand see one shape and leave
+   * another behind on release.
+   */
+  function spanGeometry(earlier, later, win) {
     // Width stays exclusive of the end day, as reviewed: a one-day task is one
     // column, a two-day task two. Only the clip is new.
-    const rawLeft = tlLeftInWindow(from, win);
-    const rawRight = tlLeftInWindow(to, win);
+    const rawLeft = tlLeftInWindow(earlier, win);
+    const rawRight = tlLeftInWindow(later, win);
     const windowEnd = tlLeftInWindow(win.max, win);
     const left = Math.max(0, rawLeft);
     const right = Math.min(windowEnd, rawRight);
@@ -1585,6 +1668,11 @@
       clippedStart: rawLeft < 0,
       clippedEnd: rawRight > windowEnd,
     };
+  }
+
+  /** The whole-day column a stored day sits in, counted from the window's first day. */
+  function dayIndexIn(day, win) {
+    return Math.round((dayStart(day) - win.min) / DAY_MS);
   }
 
   function placeBar(bar, task, win) {
@@ -1730,12 +1818,43 @@
       const DRAG_SLOP = 3;
       let armed = false;
       let dragging = false;
+      // 'move', 'resize-left' or 'resize-right'. Decided once, at press, from the
+      // binding and the half of the bar that was pressed.
+      let mode = 'move';
       let grabX = 0;
       let grabY = 0;
       let originLeftPx = 0;
       let originStartDay = '';
       let originEndDay = '';
       let originRow = 0;
+      // Where the two ends sit as day columns, taken from the STORED days rather
+      // than from the drawn pixels: a bar whose start falls before the window is
+      // drawn clipped at 0, and a stretch must move its real start, not the edge it
+      // happens to be painted at.
+      let originStartIndex = 0;
+      let originEndIndex = 0;
+
+      /** The whole-day column the pointer is over, in the grid's own coordinates. */
+      const dayIndexAt = (clientX) => Math.round((clientX - tlRows.getBoundingClientRect().left) / tlZoom);
+
+      /**
+       * Draw the bar for a span the gesture is only proposing. It goes through the
+       * same geometry as the committed bar — the same 24px floor, the same clipping,
+       * the same anchor on the earlier of the two days when the span is reversed —
+       * so the shape under the hand is the shape left behind on release.
+       */
+      const previewSpan = (startIndex, endIndex) => {
+        const geometry = spanGeometry(
+          win.min + Math.min(startIndex, endIndex) * DAY_MS,
+          win.min + Math.max(startIndex, endIndex) * DAY_MS,
+          win,
+        );
+        bar.style.transform = 'translate(' + Math.round(geometry.left) + 'px, 0px)';
+        bar.style.width = Math.round(geometry.width) + 'px';
+        bar.classList.toggle('clipped-start', geometry.clippedStart);
+        bar.classList.toggle('clipped-end', geometry.clippedEnd);
+        paintBarClips(bar, geometry);
+      };
 
       const onMove = (event) => {
         if (!armed) return;
@@ -1745,17 +1864,37 @@
           if (Math.abs(dx) < DRAG_SLOP && Math.abs(dy) < DRAG_SLOP) return;
           dragging = true;
           tlDraggingId = task.id;
-          document.body.classList.add('tk-dragging');
+          document.body.classList.add(mode === 'move' ? 'tk-dragging' : 'tk-resizing');
+          // The hover hint is about a bar nobody is holding yet.
+          bar.classList.remove('hover-left-half', 'hover-right-half');
         }
-        // Continuous on both axes: the bar sits where the pointer puts it, and the
-        // row it will land in is decided at release at ROW_HEIGHT per row.
-        bar.style.transform = 'translate(' + Math.round(originLeftPx + dx) + 'px, ' + Math.round(dy) + 'px)';
+        if (mode === 'move') {
+          // Continuous on both axes: the bar sits where the pointer puts it, and the
+          // row it will land in is decided at release at ROW_HEIGHT per row.
+          bar.style.transform = 'translate(' + Math.round(originLeftPx + dx) + 'px, ' + Math.round(dy) + 'px)';
+          return;
+        }
+        // Stretching: the end that was taken hold of goes to the column under the
+        // pointer and the other end stays exactly where it was. Only that one end is
+        // a proposal — the far end is read from the days the store already holds.
+        // Vertically nothing happens, which is also true of the original's stretch.
+        //
+        // The horizontal slop is the COMMIT's own condition, not a second one: a pull
+        // that never left its column will not be written at release, so it must not
+        // be shown as a change either. Without this a nine-pixel downward pull on a
+        // bar's right half redrew the bar days shorter and then sprang back when the
+        // hand let go — the same "it moved and then it didn't" the whole-bar drag was
+        // cured of.
+        if (Math.abs(dx) < DRAG_SLOP) return;
+        const pointed = dayIndexAt(event.clientX);
+        if (mode === 'resize-left') previewSpan(pointed, originEndIndex);
+        else previewSpan(originStartIndex, pointed);
       };
 
       const onUp = (event) => {
         window.removeEventListener('mousemove', onMove);
         window.removeEventListener('mouseup', onUp);
-        document.body.classList.remove('tk-dragging');
+        document.body.classList.remove('tk-dragging', 'tk-resizing');
         tlDraggingId = null;
         if (!armed) return;
         armed = false;
@@ -1785,7 +1924,38 @@
         // from. It stays startless until the user actually moves it.
         const fields = {};
 
-        if (shiftDays !== 0) {
+        if (mode !== 'move') {
+          // Stretching writes ONE end, and it writes it only when the gesture moved
+          // horizontally — the same principle the move above applies with its
+          // `shiftDays !== 0`: a pull that never left its column never asked for a
+          // date change, and without this a five-pixel vertical wobble on a bar's
+          // right half would silently shorten the task.
+          if (Math.abs(dx) >= DRAG_SLOP) {
+            // The day under the pointer becomes that end's day. That is the
+            // original's rule (ProjectDeadlines.svelte:609-614): the end is PLACED
+            // where it was dropped, not nudged by a delta, so the edge takes hold of
+            // the pointer and lands on the column the reader aimed at. Rounding is
+            // the commit-time snapping every gesture in this panel shares, and the
+            // preview rounds the same way, so nothing moves on release.
+            const day = dayString(new Date(win.min + dayIndexAt(event.clientX) * DAY_MS));
+            if (mode === 'resize-left') {
+              // A startless task gains a real start here rather than having its
+              // provenance rewritten — the same treatment the move above gives it.
+              fields.start = day;
+            } else {
+              fields.deadline = day;
+            }
+            // Nothing refuses a stretch that lands the start after the deadline. The
+            // pair is stored exactly as asked and the bar draws it by the one
+            // reversed-span rule there is — the interval between the two days, left
+            // edge on the earlier of them, which for a reversed task is the deadline
+            // it claims — and that is what the preview drew too, so the contradiction
+            // appears under the hand instead of after the fact. A refusal here would
+            // be a second rule for the same state, and the task editor stays the one
+            // place the contradiction is repaired.
+            Store.updateTask(task.id, fields);
+          }
+        } else if (shiftDays !== 0) {
           // A whole-bar drag shifts both ends by the same whole number of days.
           // That is order-preserving EXACTLY: (end + k) - (start + k) === end - start,
           // so a valid task cannot become reversed and a reversed one cannot become
@@ -1805,15 +1975,15 @@
           Store.updateTask(task.id, fields);
         }
 
-        if (rowShift !== 0) {
-          // Ask for the row the gesture pointed at, then walk down while anything
-          // already there overlaps — the original's collision resolution.
-          const visible = deadlineTasks();
-          const wanted = Math.max(0, originRow + rowShift);
-          const context = buildPackContext(visible, task.id);
-          const settled = resolveDroppedRow(task.id, wanted, context.occupied, context.pendingIds, context.pending);
-          Store.updateTask(task.id, { ganttRow: settled });
-        }
+        // The row, once, for every gesture. A stretch changes the span, so it can
+        // create a collision the task did not have before; a move can too. Both go
+        // through the drop-time walk rather than leaving it to the next pack pass, so
+        // the row a task lands in is decided by the gesture that moved it.
+        const wanted = mode === 'move' ? Math.max(0, originRow + rowShift) : originRow;
+        const visible = deadlineTasks();
+        const context = buildPackContext(visible, task.id);
+        const settled = resolveDroppedRow(task.id, wanted, context.occupied, context.pendingIds, context.pending);
+        if (settled !== originRow) Store.updateTask(task.id, { ganttRow: settled });
 
         refreshAfterWrite();
       };
@@ -1821,6 +1991,10 @@
       bar.addEventListener('mousedown', (event) => {
         if (event.button !== 0) return;
         event.preventDefault();
+        // Which gesture a press starts is decided here, once, and nowhere else.
+        mode = stretchRequested(event)
+          ? 'resize-' + stretchEdgeAt(event.clientX, bar.getBoundingClientRect())
+          : 'move';
         armed = true;
         dragging = false;
         grabX = event.clientX;
@@ -1833,8 +2007,28 @@
         originRow = timelineRows.get(task.id) || 0;
         originStartDay = dayString(new Date((span ? span.start : startOfToday())));
         originEndDay = dayString(new Date((span ? span.end : startOfToday())));
+        originStartIndex = dayIndexIn(originStartDay, win);
+        originEndIndex = dayIndexIn(originEndDay, win);
+        bar.classList.remove('hover-left-half', 'hover-right-half');
         window.addEventListener('mousemove', onMove);
         window.addEventListener('mouseup', onUp);
+      });
+
+      // The hint the cursor gives before anyone presses: the half under the pointer
+      // is named by the same predicate the press reads, so the promise and the
+      // behaviour cannot drift apart. It is only *shown* while the binding key is
+      // held — the CSS does that — so an ordinary drag is not dressed up as a
+      // stretch.
+      bar.addEventListener('mousemove', (event) => {
+        if (armed || dragging) return;
+        lastPointer = { x: event.clientX, y: event.clientY };
+        const edge = stretchEdgeAt(event.clientX, bar.getBoundingClientRect());
+        bar.classList.toggle('hover-left-half', edge === 'left');
+        bar.classList.toggle('hover-right-half', edge === 'right');
+      });
+      bar.addEventListener('mouseleave', () => {
+        lastPointer = null;
+        bar.classList.remove('hover-left-half', 'hover-right-half');
       });
 
       row.append(bar);
@@ -2359,23 +2553,137 @@
     renderCalendar(deadlineTasks());
   });
 
-  $('#tlZoomIn').addEventListener('click', () => {
-    tlZoom = Math.min(160, Math.round(tlZoom * 1.25));
+  // ── Timeline zoom ─────────────────────────────────────────────────────────
+  /**
+   * The one way the zoom changes, whoever asked. Both the wheel and the header
+   * buttons come through here, so they share the clamps and the persistence and
+   * cannot drift apart.
+   *
+   * `anchorPx` is where in the viewport the zoom should hold still — the pointer,
+   * for the wheel. Without it the view keeps its left edge, which is fine for a
+   * button whose whole point is a predictable step.
+   */
+  function setTimelineZoom(nextZoom, anchorPx) {
+    const clamped = Math.max(MIN_TL_ZOOM, Math.min(MAX_TL_ZOOM, nextZoom));
+    if (Math.abs(clamped - tlZoom) < 0.01) return;
+
+    // The grid does not start at the viewport's left edge: the ruler and the rows
+    // sit inside an inset wrapper, so viewport pixel 0 is not day 0. Anchoring
+    // without that offset creeps by the inset on every step of a wheel gesture —
+    // small, systematic, and exactly the drift this anchoring exists to prevent.
+    // Measured live, so moving the inset in CSS cannot silently break the zoom.
+    const viewportRect = tlViewport.getBoundingClientRect();
+    const anchor = Number.isFinite(anchorPx) ? anchorPx : 0;
+    const gridOrigin = tlRows.getBoundingClientRect().left - viewportRect.left
+      + tlViewport.scrollLeft;
+    // What the anchor is pointing at, in days from the grid's own start. Kept
+    // fractional: a whole-day-quantised anchor would jump the view by up to a day on
+    // every step.
+    const dayUnderAnchor = (anchor + tlViewport.scrollLeft - gridOrigin) / tlZoom;
+
+    tlZoom = clamped;
     renderTimeline(deadlineTasks());
-  });
-  $('#tlZoomOut').addEventListener('click', () => {
-    tlZoom = Math.max(16, Math.round(tlZoom * 0.8));
-    renderTimeline(deadlineTasks());
-  });
+
+    // Put that same point back under the anchor at the new scale. This is the whole
+    // difference between zooming that feels anchored and zooming that feels like
+    // the timeline jumped: without it, whatever was under the cursor slides away.
+    tlViewport.scrollLeft = gridOrigin + dayUnderAnchor * tlZoom - anchor;
+    tickTimekeeping();
+    saveZoomSoon();
+  }
+
+  /**
+   * Persist the zoom, coalesced. A wheel gesture fires many events and each one
+   * would otherwise be a store write.
+   */
+  function saveZoomSoon() {
+    window.clearTimeout(zoomSaveTimer);
+    zoomSaveTimer = window.setTimeout(() => {
+      Store.setViews({ ...panels, zoom: tlZoom });
+    }, 250);
+  }
+
+  /**
+   * Ctrl+wheel to zoom, anchored to the pointer. Without ctrl the wheel is left
+   * entirely alone, so the ordinary scroll — including the browser's own
+   * page-scroll — keeps working.
+   */
+  tlViewport.addEventListener('wheel', (event) => {
+    if (!event.ctrlKey) return;
+    event.preventDefault();
+    const rect = tlViewport.getBoundingClientRect();
+    const pointerPx = event.clientX - rect.left;
+    const factor = event.deltaY > 0 ? 0.9 : 1.1;
+    setTimelineZoom(tlZoom * factor, pointerPx);
+  }, { passive: false });
+
+  $('#tlZoomIn').addEventListener('click', () => setTimelineZoom(tlZoom * 1.25, null));
+  $('#tlZoomOut').addEventListener('click', () => setTimelineZoom(tlZoom * 0.8, null));
   $('#tlToday').addEventListener('click', () => scrollTimelineToToday(true));
+
+  // ── Header grab-to-pan ────────────────────────────────────────────────────
+  // The other half of the original's timeline navigation: the date ruler is a
+  // handle. Small enough to fall out of the zoom work, so it did.
+  (function wireHeaderPan() {
+    let panning = false;
+    let startX = 0;
+    let startScroll = 0;
+    const stop = () => {
+      panning = false;
+      document.body.classList.remove('tk-panning');
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', stop);
+    };
+    const move = (event) => {
+      if (!panning) return;
+      tlViewport.scrollLeft = startScroll - (event.clientX - startX);
+    };
+    tlDates.addEventListener('mousedown', (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      panning = true;
+      startX = event.clientX;
+      startScroll = tlViewport.scrollLeft;
+      document.body.classList.add('tk-panning');
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', stop);
+    });
+  })();
+
+  // ── The stretch hint's key ────────────────────────────────────────────────
+  // Shift+drag is invisible until you know it exists, so the gesture's one need is
+  // to announce itself: while the binding key is held, the half of the bar under
+  // the pointer is marked as the end a drag would take hold of. The key is tracked
+  // here rather than read only at press time precisely so the hint can appear
+  // BEFORE the press — a hint that only shows up after you have already committed
+  // to the gesture is not a hint.
+  window.addEventListener('keydown', (event) => {
+    if (event.key !== STRETCH_BINDING.key) return;
+    document.body.setAttribute(STRETCH_BINDING.hintAttr, 'true');
+    if (lastPointer) showStretchHintAt(lastPointer.x, lastPointer.y);
+  });
+  const dropStretchHint = () => {
+    document.body.removeAttribute(STRETCH_BINDING.hintAttr);
+    clearStretchHints();
+  };
+  window.addEventListener('keyup', (event) => {
+    if (event.key === STRETCH_BINDING.key) dropStretchHint();
+  });
+  // Key events are not delivered to a window that has lost focus, so a key held
+  // while the reader switches away would otherwise leave the hint stuck on.
+  window.addEventListener('blur', dropStretchHint);
 
   // Panning is view state only: it moves the bars' projection, never a task.
   tlViewport.addEventListener('scroll', () => tickTimekeeping());
 
-  // The composition the reader last built comes back from the store; a fresh
-  // store yields the default (timeline only), and all-off can never be loaded.
-  // This is a plain read — launching the app writes nothing.
-  Object.assign(panels, Store.views());
+  // The composition the reader last built comes back from the store, zoom
+  // included; a fresh store yields the defaults (timeline only, 40px per day), and
+  // all-off can never be loaded. This is a plain read — launching writes nothing.
+  const savedViews = Store.views();
+  Object.assign(panels, savedViews);
+  // Normalised on the way in by the store, so a corrupt or absent zoom reads as
+  // the default rather than as a timeline at NaN pixels per day.
+  tlZoom = savedViews.zoom;
   syncPanelVisibility();
   ensureTarget();
   refreshProjectOptions();

@@ -15,7 +15,8 @@ reason to leave it unwritten.
 
 Verified against the working tree at `148803c` unless noted. The integrity pass
 below (lock snapshot, deadline expiry, timeline clipping) is not yet in a tagged
-commit; it is in the working tree on top of it.
+commit; it is in the working tree on top of it, and so is the timeline gesture
+work (pointer-anchored zoom, grab-to-pan header, shift-drag stretch).
 
 ---
 
@@ -23,8 +24,7 @@ commit; it is in the working tree on top of it.
 
 | # | Finding | Original | State here |
 | --- | --- | --- | --- |
-| 2 | **Shift-resize of either bar edge.** The original resizes a bar's start or end with a modifier. | `460-463`, `505-510`, `561-566` | Not built; `shiftKey` appears nowhere. Whole-bar movement only. |
-| 3 | **Pixel/time-based bar movement.** The original moves a bar in continuous time (`newStartMs = zeroMs + newLeftPx / ganttZoom * 86400000`); we round displacement to whole days. | `542-550` | Open. Sub-day precision is unreachable while the store keeps dates as `YYYY-MM-DD` — see #5. |
+| 3 | **Pixel/time-based bar movement.** The original moves a bar in continuous time (`newStartMs = zeroMs + newLeftPx / ganttZoom * 86400000`); we round displacement to whole days. The same applies to a stretch: the original drops an edge on the exact millisecond under the pointer, ours lands it on the column. | `542-550`, `609-614` | Open. Sub-day precision is unreachable while the store keeps dates as `YYYY-MM-DD` — see #5. |
 | 4 | **Configurable colour rules.** The original evaluates a user-configurable `colorRules` set at render time, affecting calendar, timeline and countdowns. We hardcode urgency bands. | `142-161` | Open, and knowingly a placeholder: `URGENCY_COLOR` carries a comment saying it stands in for the rules system. |
 | 5 | **Day-granularity deadlines.** We store `deadline` as `YYYY-MM-DD`; the original does arithmetic on whatever timestamp its model supplied. Countdown bucket maths is now faithful, but identical sub-day semantics cannot be proven without the original's task schema. | store.js | Open question, not yet a decision. Blocks #3 and #15. |
 | 6 | **Persisted calendar/countdown column resizing.** | `84-122` | Not built. |
@@ -56,8 +56,8 @@ commit; it is in the working tree on top of it.
 | 10 | **The whole card is both draggable and a click target.** The original drags `.pos-card` but attaches the open-editor click only to the inner content div, so a press anywhere on the card body can still be read as a click after a wobble. Ours puts both on the card, so a near-miss drag opens the editor. | `ElasticView.svelte:504-519` | Open. |
 | 11 | **No `dropEffect = 'none'` on a forbidden target.** The original sets it so the cursor itself says the drop will be refused. Ours returns silently, so a locked running column looks just as inviting as an open one right up until release. | `ElasticView.svelte:383-386` | Open. Related to the locked-plan refusal, which currently explains itself only *after* the drop. |
 | 12 | **`dragend` always rebuilds.** Ours calls a full `render()` on every dragend, including an aborted one that changed nothing. The original only clears its local drag state. | `ElasticView.svelte:358-362` | Open. Cheap to fix; correctness is unaffected. |
-| 13 | **The Gantt has no shift-resize of either bar edge.** Raised here as "no vertical axis" too, but row packing and vertical drag are now closed (see Closed below); what remains of this finding is the resize, which is #2. | `ProjectDeadlines.svelte:460-463`, `505-510`, `561-566` | Open as #2. Restated only to keep the review's wording traceable. |
-| 14 | **The Timeline header does not pan.** The original is grab-to-pan; ours is zoom and Today buttons only. | `ProjectDeadlines.svelte:652-678` | Open. |
+| 13 | **The Gantt has no shift-resize of either bar edge.** Raised here as "no vertical axis" too, but row packing and vertical drag are now closed (see Closed below); what remains of this finding is the resize, which is #2. | `ProjectDeadlines.svelte:460-463`, `505-510`, `561-566` | **Closed as #2.** Restated only to keep the review's wording traceable. |
+| 14 | **The Timeline header does not pan.** The original is grab-to-pan; ours is zoom and Today buttons only. | `ProjectDeadlines.svelte:652-678` | **Closed.** Built alongside the zoom this round; the cursor affordance came with it. |
 | 15 | **A purely vertical drag still moves an instant task sideways.** The original writes `newStartMs` from the pointer whether or not the gesture moved horizontally, so a zero-duration task dragged straight down is re-anchored under the cursor rather than staying put. We commit dates only when the horizontal displacement rounds to a non-zero day count, so a purely vertical drag leaves the dates alone — which is what the gesture asked for, and what makes row changes independently usable. | `ProjectDeadlines.svelte:590-608` | Deliberate divergence, not a defect. Recorded so it is not "restored" later. Still open for sub-day movement (#3) and bounded by day granularity (#5). |
 | 16 | **Filtering leaves gaps in the timeline, it does not renumber.** Because a stored row is kept, filtering a project out leaves the rows it held empty — the visible bars keep their vertical positions and the grid keeps the height of the highest row in use. The original renders a flat 300 tracks, so it has the same property; ours just does not render the unused ones. | `ProjectDeadlines.svelte:64` | Accepted, and the reason stored rows are worth having: a bar returns to where the user put it. Worth revisiting only if gaps ever read as a bug rather than as spacing. |
 
@@ -66,10 +66,22 @@ commit; it is in the working tree on top of it.
 ## Test fixtures
 
 `tsk_fixture_reversed` — "FIXTURE — reversed dates" — is a deliberately
-contradictory task (start after deadline) left in the store on purpose, so the
-invalid treatment is always visible on screen rather than only in a test. It is
-labelled a fixture in its own name, because an unlabelled broken task was once
-mistaken for real corruption.
+contradictory task (start `2026-09-18`, deadline `2026-09-14`) left in the store
+on purpose, so the invalid treatment is always visible on screen rather than only
+in a test. It is labelled a fixture in its own name, because an unlabelled broken
+task was once mistaken for real corruption.
+
+It cannot be created through the app: the task dialog refuses a deadline that
+precedes its start (see Closed), so the fixture only exists because it was written
+into the store by hand. Two copies of it had accumulated in the store — the same
+id twice — which quietly broke `Store.task(id)` and gave both copies the same
+packed row; the duplicate was removed this round and the store left with one.
+
+## Open — found while building the timeline gestures
+
+| # | Finding | Original | State here |
+| --- | --- | --- | --- |
+| 23 | **How wide is a reversed bar?** A contradictory task is drawn as the interval between its two days with the left edge on the earlier one, so a start four days past its deadline paints four days of column, all in the invalid colour, labelled `⚠`. The alternative — a fixed 24px marker on the deadline — would stop a contradiction from looking like a plausible span. Both are defensible; nobody has chosen. | `getGanttPixelOffsets` gives a negative width, which CSS drops: the original leaves a 24px stub at the START, days away from the deadline it claims | Open. `barGeometry`'s comment now describes what is actually drawn instead of claiming a 24px marker, so neither reading can be "restored" by accident. Whichever is chosen applies to the stretch preview and the committed bar together, because both go through the same function. |
 
 ---
 
@@ -83,6 +95,9 @@ mistaken for real corruption.
 | **Projects were a filter dropdown and a button** — no place where a project's identity and its pressure could be seen together | The Projects Hub, a third section on the page: cards carrying name, description, derived age, task count, overdue count, P1 count, next deadline, archive state, and a warning when a project's own tasks contradict themselves. New Project through a modal, Archive / Restore / Delete with Delete confirmed by a dialog that names the exact consequence. Verified: every card's four derived numbers match the store and the board; two archived-test tasks orphaned to uncategorised on delete with their count stated before the reader agreed; cancel wrote nothing |
 | **Archive state could have been a flag plus a filter** | One field, `archivedAt`: present means archived, absent means active. The Hub's "show archived" toggle only decides what is listed, so there is no second source of truth to fall out of step. Scoping is likewise derived from the filter control rather than mirrored in a variable — a copy was written, disagreed with the control, and was removed |
 | **Gantt row packing** — the timeline was one row per task, a list with bars rather than a spatial surface | `ganttRow` is a stored field; packing places a task in the first free row, keeps a stored row unless it now collides, and resolves drops against what is already settled. Vertical drag is continuous during and resolves at 40px per row on release. Verified: overlapping spans never share a row, non-overlapping ones do, a colliding task yields while the others hold their rows, rows survive filtering, a finished task's row survives its return, re-rendering writes nothing, and filtered-out rows leave a gap rather than renumbering |
+| **Shift-drag stretched nothing** (#2, #13) — the original resizes either bar edge with a modifier and ours had whole-bar movement only | Shift+drag stretches: the half of the bar that was pressed picks the end (`e.clientX < rect.left + rect.width/2`, the original's own test, read by the hover hint as well so the promise and the behaviour cannot drift), and the key is named once in `STRETCH_BINDING` so the chord is one edit to change. The end is PLACED on the column under the pointer rather than nudged by a delta — the original's rule — with the same whole-day rounding and the same horizontal-slop condition as the commit, so the preview and what is left behind agree exactly. Pulls that never left their column write nothing at all: the first version redrew the bar days shorter and sprang back on release, which is the very fault the whole-bar drag was cured of. A stretch that lands the start after the deadline is stored as asked and drawn by the one reversed-span rule (see #23) rather than refused by a second one, and it can repair a contradiction as easily as create one. The row walk now runs for every gesture, not only a vertical move, because a new span can collide where the old one did not. Verified by driving the page: both edges moved and restored to the day, the far end untouched, a reversal created and repaired by gesture alone, a nine-pixel downward pull leaving the store byte-identical and the bar still, a plain drag still moving both ends by the same days, a press with no travel still opening the editor in either mode, a stretch into a row-mate's days pushed down the row walk, and a reversed stretch's preview identical to the bar that replaced it |
+| **The Timeline could only be zoomed with +/- buttons, and every step lost the reader's place** — the header did not pan and the zoom survived nothing (#14) | Ctrl+wheel zooms (ctrl only: without it the wheel is untouched and not prevented, verified), 0.9/1.1 per notch within the original's own 10–300, anchored on the pointer: the point under the cursor moved by 0.008 of a day over a six-step gesture, where anchoring on the scroller's own `scrollLeft` would have crept about 2.4px on **every** step of a 1.1× gesture — the grid does not start at viewport pixel 0 (it sits 24px inside the scroller), so the anchor measures the grid's real origin instead. Wheel and buttons share one path, so they share the clamps and the persistence; the zoom is written through `Store.setViews` coalesced behind a 250ms timer, and a fresh store starts at the original's default of 40px per day. The date ruler is now grab-to-pan, with the original's `cursor: grab` and a `grabbing` state while dragging; panning scrolls the view and writes nothing. Verified: zoom persisted across a reload, both clamps (10 and 300) reached and held, buttons exact inverses of each other, plain wheel untouched, pan tracked the pointer 1:1 and froze on release, and the ruler's own cursor changed with the drag |
+| **The stretch gesture was invisible** — nothing said the modifier existed | While the binding key is held, the half of the bar under the pointer is marked with a white edge rule and a `w-resize`/`e-resize` cursor; the key is tracked on `keydown`/`keyup` so the hint appears the instant the key goes down without the pointer having to move first, and a `blur` clears a key that never got its keyup. Verified by computed style: no mark without the key, `w-resize` on the left half, `e-resize` on the right, both cleared on release, and nothing left marked when the pointer leaves a bar |
 | Finished tasks appeared in all three panels | Excluded at the source of all three, `93c4b1b` |
 | Calendar drew deadline-day chips, not start→deadline span bars | Rewritten as week-clipped span bars, `93c4b1b` |
 | Calendar spans ran one day long | The three `+ DAY_MS` uses removed, `ec78d01` |

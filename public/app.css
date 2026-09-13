@@ -261,7 +261,10 @@ main { padding: 16px; max-width: 1200px; }
 .tk-tl-viewport::-webkit-scrollbar-thumb:hover { background: #5b6679; background-clip: content-box; }
 .tk-tl-inner { position: relative; padding: 0 0 8px; margin-left: 24px; }
 .tk-tl-dates { position: sticky; top: 0; z-index: 3; height: 34px; background: var(--panel-2);
-  border-bottom: 1px solid var(--line); }
+  border-bottom: 1px solid var(--line); cursor: grab; }
+/* The ruler is a pan handle, so it says so before it is grabbed. */
+body.tk-panning { cursor: grabbing; user-select: none; }
+body.tk-panning .tk-tl-dates { cursor: grabbing; }
 .tk-tl-date { position: absolute; top: 0; height: 34px; display: flex; flex-direction: column;
   align-items: center; justify-content: center; border-left: 1px solid #333a47; font-size: 9px;
   color: var(--dim); }
@@ -285,6 +288,18 @@ main { padding: 16px; max-width: 1200px; }
 .tk-tl-bar:hover { filter: brightness(1.1); }
 .tk-tl-bar.invalid { background: var(--line); color: var(--dim); }
 body.tk-dragging { cursor: grabbing; user-select: none; }
+body.tk-dragging .tk-tl-bar, body.tk-resizing .tk-tl-bar { transition: none; }
+/* Stretch, in progress: the whole page says "you are moving an edge now". */
+body.tk-resizing, body.tk-resizing * { cursor: ew-resize !important; }
+body.tk-resizing .tk-tl-bar { box-shadow: 0 4px 14px rgba(0, 0, 0, .35); }
+/* The stretch hint. `data-shift-pressed` is STRETCH_BINDING.hintAttr in app.js —
+   the binding itself is named once there; this is the same name spelled for CSS. */
+body[data-shift-pressed="true"] .tk-tl-bar.hover-left-half,
+body[data-shift-pressed="true"] .tk-tl-bar.hover-left-half * { cursor: w-resize !important; }
+body[data-shift-pressed="true"] .tk-tl-bar.hover-right-half,
+body[data-shift-pressed="true"] .tk-tl-bar.hover-right-half * { cursor: e-resize !important; }
+body[data-shift-pressed="true"] .tk-tl-bar.hover-left-half { box-shadow: inset 3px 0 0 rgba(255, 255, 255, .8); }
+body[data-shift-pressed="true"] .tk-tl-bar.hover-right-half { box-shadow: inset -3px 0 0 rgba(255, 255, 255, .8); }
 .tk-tl-bar-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ── Panel 3: Countdowns ── */

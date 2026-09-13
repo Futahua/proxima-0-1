@@ -15,6 +15,16 @@ const Store = (() => {
   /** Default composition of the Timekeeping cockpit. Its own save path, as ever. */
   const DEFAULT_VIEWS = { calendar: false, timeline: true, countdown: false };
 
+  /**
+   * Timeline zoom, in pixels per day. The original keeps this in plugin settings
+   * (`settings.ts:18`, default 40) and so survives a reload; ours goes through
+   * Store for the same reason the panel composition does. The bounds and the
+   * default are the original's own (10–300, 40).
+   */
+  const DEFAULT_ZOOM = 40;
+  const MIN_ZOOM = 10;
+  const MAX_ZOOM = 300;
+
   /** The statuses the board actually has columns for. */
   const STATUSES = ['backlog', 'running', 'finished'];
 
@@ -397,13 +407,16 @@ const Store = (() => {
     views: () => normaliseViews(state.views),
 
     /**
-     * Persist a composition. Writes only when normalisation actually changed what
-     * is stored, so a no-op call leaves the store byte-identical.
+     * Persist a composition, and the timeline's zoom with it. Writes only when
+     * normalisation actually changed what is stored, so a no-op call leaves the
+     * store byte-identical — which matters here because zoom changes arrive on
+     * every wheel tick.
      */
     setViews(views) {
       const next = normaliseViews(views);
       const current = normaliseViews(state.views);
-      if (next.calendar === current.calendar && next.timeline === current.timeline && next.countdown === current.countdown) {
+      if (next.calendar === current.calendar && next.timeline === current.timeline &&
+          next.countdown === current.countdown && next.zoom === current.zoom) {
         return next;
       }
       const saved = commit(() => { state.views = next; return { ...next }; });
@@ -417,16 +430,24 @@ const Store = (() => {
    * A composition the cockpit can actually show. All three panels off is not one
    * of them: fall back to the timeline, exactly as the original does when the last
    * panel is switched off. Also the single place a partial or absent record on
-   * disk becomes a complete one.
+   * disk becomes a complete one, and where a missing or unusable zoom becomes the
+   * default rather than a broken timeline.
    */
   function normaliseViews(value) {
     const views = {
       calendar: value ? Boolean(value.calendar) : DEFAULT_VIEWS.calendar,
       timeline: value && typeof value.timeline === 'boolean' ? value.timeline : DEFAULT_VIEWS.timeline,
       countdown: value ? Boolean(value.countdown) : DEFAULT_VIEWS.countdown,
+      zoom: clampZoom(value ? value.zoom : undefined),
     };
     if (!views.calendar && !views.timeline && !views.countdown) views.timeline = true;
     return views;
+  }
+
+  function clampZoom(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return DEFAULT_ZOOM;
+    return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, n));
   }
 
   function clampWeight(value) {
