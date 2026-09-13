@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Proxima</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="badge">P</span><div><h1>Proxima</h1><p id="storeLine">local store</p></div></div>
+  <nav class="surfaces">
+    <button class="seg active" data-surface="tasks">Tasks</button>
+    <button class="seg" data-surface="schedule" disabled title="next page">Schedule</button>
+    <button class="seg" data-surface="projects" disabled title="next page">Projects Hub</button>
+  </nav>
+  <label class="projpick">Project
+    <select id="projectFilter"><option value="">-- All Projects --</option></select>
+  </label>
+  <span class="spacer"></span>
+  <button id="newProjectBtn" class="ghost">+ Project</button>
+</header>
+
+<main>
+  <div class="subtabs">
+    <button class="seg small active" data-sub="elastic">Elastic Boards</button>
+    <button class="seg small" data-sub="timekeeping">Timekeeping</button>
+  </div>
+
+  <section class="boardhead" id="boardHead">
+    <div>
+      <p class="eyebrow" id="scopeLabel">ALL PROJECTS</p>
+      <h2 id="boardTitle">Elastic Boards</h2>
+      <p class="sub" id="boardSub">Backlog, live execution and finished work.</p>
+    </div>
+    <div class="counts"><span id="taskCount">0 tasks</span>
+      <button id="newTaskBtn" class="primary">New task</button>
+    </div>
+  </section>
+
+  <section class="runbar" id="runbar">
+    <label>Execution target
+      <input type="datetime-local" id="target">
+    </label>
+    <button id="lockBtn" class="lock">Lock</button>
+    <span id="runInfo" class="runinfo"></span>
+  </section>
+
+  <section class="columns" id="columns">
+    <div class="col" data-status="backlog">
+      <div class="colhead"><span>BACKLOG</span><span class="n" data-count="backlog">0</span></div>
+      <div class="cards" data-drop="backlog"></div>
+    </div>
+    <div class="col" data-status="running">
+      <div class="colhead"><span class="running">RUNNING</span><span class="n" data-count="running">0</span></div>
+      <div class="cards" data-drop="running"></div>
+    </div>
+    <div class="col" data-status="finished">
+      <div class="colhead"><span class="finished">FINISHED</span><span class="n" data-count="finished">0</span></div>
+      <div class="cards" data-drop="finished"></div>
+    </div>
+  </section>
+
+  <section class="boardhead" id="tkHead" hidden>
+    <div>
+      <p class="eyebrow">TIMEKEEPING</p>
+      <h2>Deadlines</h2>
+      <p class="sub">Calendar, timeline and countdowns. Compose the workspace from as many panels as you want — they are not alternatives.</p>
+    </div>
+    <div class="counts"><span id="tkCount">0 deadlines</span></div>
+  </section>
+
+  <section class="tk" id="timekeeping" hidden>
+    <div class="tk-toggles">
+      <button class="seg small tk-toggle" data-panel="calendar" aria-pressed="false">Deadline Calendar</button>
+      <button class="seg small tk-toggle active" data-panel="timeline" aria-pressed="true">Timeline</button>
+      <button class="seg small tk-toggle" data-panel="countdown" aria-pressed="false">Countdowns</button>
+    </div>
+
+    <p class="tk-empty" id="tkEmpty" hidden>No tasks with deadlines yet. Give a task a deadline and it appears here.</p>
+
+    <div class="tk-panels" id="tkPanels">
+      <section class="tk-panel" data-panel="calendar" hidden>
+        <header class="tk-panel-head">
+          <span class="tk-panel-title">Deadline Calendar — <span id="calMonthLabel"></span></span>
+          <span class="tk-panel-actions">
+            <button class="tk-btn" id="calPrev" title="Previous month">‹</button>
+            <button class="tk-btn" id="calToday">Today</button>
+            <button class="tk-btn" id="calNext" title="Next month">›</button>
+          </span>
+        </header>
+        <div class="tk-panel-body">
+          <div class="tk-weekdays" id="calWeekdays"></div>
+          <div class="tk-cal" id="calGrid"></div>
+        </div>
+      </section>
+
+      <section class="tk-panel tk-panel-wide" data-panel="timeline" hidden>
+        <header class="tk-panel-head">
+          <span class="tk-panel-title">Timeline</span>
+          <span class="tk-panel-actions">
+            <button class="tk-btn" id="tlZoomOut" title="Zoom out">−</button>
+            <button class="tk-btn" id="tlZoomIn" title="Zoom in">+</button>
+            <button class="tk-btn" id="tlToday">Today</button>
+          </span>
+        </header>
+        <div class="tk-tl-viewport" id="tlViewport">
+          <div class="tk-tl-inner" id="tlInner">
+            <div class="tk-tl-dates" id="tlDates"></div>
+            <div class="tk-tl-rows" id="tlRows"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tk-panel" data-panel="countdown" hidden>
+        <header class="tk-panel-head">
+          <span class="tk-panel-title">Countdowns</span>
+        </header>
+        <div class="tk-panel-body">
+          <div class="tk-groups" id="cdGroups"></div>
+        </div>
+      </section>
+    </div>
+  </section>
+</main>
+
+<dialog id="taskDialog">
+  <form method="dialog" id="taskForm">
+    <h3 id="taskDialogTitle">New task</h3>
+    <label>Name <input name="name" required maxlength="200" autocomplete="off"></label>
+    <label>Note <textarea name="note" rows="2" maxlength="500"></textarea></label>
+    <label>Project
+      <select name="project"><option value="">Uncategorised</option></select>
+    </label>
+    <label>Status
+      <select name="status">
+        <option value="backlog">Backlog</option>
+        <option value="running">Running</option>
+        <option value="finished">Finished</option>
+      </select>
+    </label>
+    <label>Weight <input name="weight" type="number" min="1" max="100" step="1" value="1">
+      <small>How big a share of the remaining time this takes.</small>
+    </label>
+    <label>Deadline <input name="deadline" type="date"></label>
+    <label>Start <input name="start" type="date">
+      <small>When work begins. Where the Timeline bar starts; deadline is where it ends.</small>
+    </label>
+    <menu>
+      <button value="delete" id="deleteTaskBtn" class="danger" type="submit" formnovalidate>Delete</button>
+      <span class="spacer"></span>
+      <button value="cancel" type="submit" formnovalidate class="ghost">Cancel</button>
+      <button value="save" class="primary">Save</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="projectDialog">
+  <form method="dialog" id="projectForm">
+    <h3>New project</h3>
+    <label>Name <input name="name" required maxlength="120" autocomplete="off"></label>
+    <menu>
+      <span class="spacer"></span>
+      <button value="cancel" type="submit" formnovalidate class="ghost">Cancel</button>
+      <button value="save" class="primary">Create</button>
+    </menu>
+  </form>
+</dialog>
+
+<script src="store.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

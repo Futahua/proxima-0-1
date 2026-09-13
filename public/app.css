@@ -1,0 +1,272 @@
+:root {
+  --bg: #21252e; --panel: #272c37; --panel-2: #2e3440; --line: #3a4150;
+  --ink: #e6e9ef; --dim: #97a0b0; --accent: #b8d04a; --running: #4fd1a5;
+  --finished: #e7b24b; --danger: #e06c75; --radius: 8px;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
+button, input, select, textarea { font: inherit; color: inherit; }
+.spacer { flex: 1; }
+
+.topbar { display: flex; align-items: center; gap: 16px; padding: 12px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 10px; }
+.badge { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
+  background: #7b5cf0; font-weight: 700; }
+.brand h1 { margin: 0; font-size: 17px; }
+.brand p { margin: 0; font-size: 11px; color: var(--dim); }
+
+.seg { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 14px; cursor: pointer; }
+.seg.active { background: var(--accent); color: #1d2129; border-color: var(--accent); font-weight: 600; }
+.seg[disabled] { opacity: .45; cursor: not-allowed; }
+.seg.small { padding: 5px 12px; font-size: 13px; }
+.surfaces { display: flex; gap: 8px; }
+.projpick { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); }
+.projpick select, .runbar input { background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 10px; }
+.ghost { background: transparent; border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 12px; cursor: pointer; }
+.primary { background: transparent; border: 1px solid var(--accent); color: var(--accent);
+  border-radius: 6px; padding: 6px 14px; cursor: pointer; font-weight: 600; }
+.danger { background: transparent; border: 1px solid var(--danger); color: var(--danger);
+  border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+
+main { padding: 16px; max-width: 1200px; }
+.subtabs { display: flex; gap: 8px; margin-bottom: 18px; }
+.boardhead { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 14px; }
+.eyebrow { margin: 0; font-size: 11px; letter-spacing: .08em; color: var(--dim); }
+.boardhead h2 { margin: 2px 0 4px; font-size: 22px; }
+.sub { margin: 0; color: var(--dim); font-size: 13px; }
+.counts { margin-left: auto; display: flex; align-items: center; gap: 14px; color: var(--dim); }
+
+.runbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; font-size: 13px; }
+.runbar label { display: flex; align-items: center; gap: 8px; color: var(--dim); }
+.lock { background: var(--accent); color: #1d2129; border: none; border-radius: 6px;
+  padding: 7px 18px; font-weight: 700; cursor: pointer; }
+.lock.on { background: var(--danger); color: #fff; }
+.runinfo { color: var(--dim); }
+
+.columns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; align-items: start; }
+.col { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.colhead { display: flex; justify-content: space-between; padding: 12px 14px;
+  border-bottom: 1px solid var(--line); font-size: 12px; letter-spacing: .06em; color: var(--dim); }
+.colhead .running { color: var(--running); }
+.colhead .finished { color: var(--finished); }
+.cards { padding: 12px; display: flex; flex-direction: column; gap: 10px; min-height: 120px; }
+.cards.over { background: #2b3140; }
+
+/* Quiet scrollbars for the card columns: a transparent track with a thumb barely
+   lighter than the panel, so a long column still reads as scrollable without a
+   bright system bar cutting across the dark board. Standard properties first for
+   Firefox and the Electron shell, then the WebKit pseudos Chromium actually uses. */
+.cards { scrollbar-width: thin; scrollbar-color: #465063 transparent; }
+.cards::-webkit-scrollbar { width: 8px; height: 8px; }
+.cards::-webkit-scrollbar-track { background: transparent; }
+.cards::-webkit-scrollbar-thumb {
+  background: #465063; border-radius: 999px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+.cards::-webkit-scrollbar-thumb:hover { background: #5b6679; background-clip: content-box; }
+.cards::-webkit-scrollbar-thumb:active { background: #6b7789; background-clip: content-box; }
+.cards::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+.cards::-webkit-scrollbar-corner { background: transparent; }
+
+/* The running column is a measured box: its clientHeight is the H that every
+   card's proportional height is computed against. Only the running cards leave
+   the flow — the other columns stay plain lists.
+   The height must stay definite: a stretching flex rule would silently win over
+   the measured inline height and desync H from the rendered box. */
+.col[data-status="running"] { display: block; }
+.cards[data-drop="running"] {
+  position: relative; display: block; min-height: 300px; overflow-y: auto;
+}
+.cards[data-drop="running"] > .card { position: absolute; left: 0; right: 0; }
+
+.card { background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid var(--line);
+  border-radius: 6px; padding: 12px; cursor: grab; position: relative; overflow: hidden; }
+.card:hover { border-color: #4a5364; }
+.card.running { border-left-color: var(--running); }
+.card.finished { border-left-color: var(--finished); }
+.card .body { position: relative; z-index: 3; display: flex; flex-direction: column; min-height: 100%; }
+.card .kind { font-size: 10px; letter-spacing: .08em; color: var(--dim); }
+.card h4 { margin: 4px 0 6px; font-size: 15px; text-transform: uppercase; letter-spacing: .02em; }
+.card p { margin: 0 0 8px; font-size: 13px; color: var(--dim); }
+.card .alloc { font-weight: 700; font-size: 13px; }
+.card footer { display: flex; justify-content: space-between; font-size: 11px;
+  color: var(--dim); border-top: 1px solid var(--line); padding-top: 8px; margin-top: auto; }
+/* A floor-height card has no room for the footer; it fades instead of spilling. */
+.card.tight footer { display: none; }
+
+.card .acts { position: absolute; top: 8px; right: 8px; z-index: 3;
+  display: flex; align-items: center; gap: 8px; }
+.card .del { opacity: 0; background: transparent; border: none; color: var(--danger);
+  cursor: pointer; font-size: 15px; line-height: 1; }
+.card:hover .del { opacity: 1; }
+
+/* Inline weight stepper, clamped at a minimum of one. */
+.stepper { display: inline-flex; align-items: center; gap: 2px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 2px; }
+.stepper .step { width: 20px; height: 20px; display: grid; place-items: center; padding: 0;
+  background: transparent; border: none; border-radius: 50%; cursor: pointer;
+  color: var(--ink); font-size: 13px; line-height: 1; }
+.stepper .step:hover { background: var(--panel-2); }
+.stepper .step[disabled] { opacity: .35; cursor: not-allowed; }
+.stepper .w { min-width: 16px; text-align: center; font-size: 12px; font-weight: 700; color: var(--dim); }
+
+/* Locked progress: a translucent green layer wiped down the card from the top,
+   its height the task's completed ratio — not a thin bar at the bottom. */
+.pos-wipe { position: absolute; top: 0; left: 0; right: 0; z-index: 1; pointer-events: none;
+  background: rgba(0, 184, 148, .12); border-bottom: 1px solid rgba(0, 184, 148, .45); }
+.card.spent .pos-wipe { border-bottom-color: transparent; }
+.card.dragging { opacity: .35; }
+.placeholder { border: 1px dashed var(--accent); border-radius: 6px; background: #2a3040; }
+.empty { color: var(--dim); font-size: 13px; text-align: center; padding: 18px 0; }
+
+/* ══ Timekeeping ═══════════════════════════════════════════════════════════
+   Three panels over one task set. They are independent: any combination can be
+   on screen at once, so the row lays them out side by side and only the timeline
+   flexes. Urgency bands drive the colour of every deadline-marked element. */
+:root {
+  --u-overdue: #e06c75; --u-today: #e7a24b; --u-soon: #e7d24b;
+  --u-week: #9fd04a; --u-later: #6fa8dc;
+}
+
+.tk-toggles { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.tk-toggle::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 7px;
+  border-radius: 50%; background: var(--line); vertical-align: middle; }
+.tk-toggle.active::before { background: var(--accent); }
+.tk-toggle.active { border-color: var(--accent); }
+
+.tk-empty { color: var(--dim); font-size: 13px; background: var(--panel); border: 1px dashed var(--line);
+  border-radius: var(--radius); padding: 22px; text-align: center; margin: 0; }
+
+.tk-panels { display: flex; gap: 14px; align-items: stretch; overflow-x: auto; padding-bottom: 4px;
+  min-height: 460px; scrollbar-width: thin; scrollbar-color: #465063 transparent; }
+.tk-panels::-webkit-scrollbar { height: 8px; }
+.tk-panels::-webkit-scrollbar-track { background: transparent; }
+.tk-panels::-webkit-scrollbar-thumb { background: #465063; border-radius: 999px;
+  border: 2px solid transparent; background-clip: content-box; }
+.tk-panels::-webkit-scrollbar-thumb:hover { background: #5b6679; background-clip: content-box; }
+
+.tk-panel { display: flex; flex-direction: column; flex: 0 0 auto; width: 440px; max-height: 620px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.tk-panel-wide { flex: 1 1 460px; min-width: 380px; width: auto; }
+.tk-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 12px; letter-spacing: .06em;
+  color: var(--dim); text-transform: uppercase; background: var(--panel-2); }
+.tk-panel-actions { display: flex; gap: 4px; }
+.tk-btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 3px 9px; cursor: pointer; font-size: 12px; color: var(--ink); line-height: 1.4; }
+.tk-btn:hover { border-color: var(--accent); color: var(--accent); }
+.tk-panel-body { flex: 1; overflow: auto; padding: 10px; min-height: 0;
+  scrollbar-width: thin; scrollbar-color: #465063 transparent; }
+.tk-panel-body::-webkit-scrollbar { width: 8px; }
+.tk-panel-body::-webkit-scrollbar-track { background: transparent; }
+.tk-panel-body::-webkit-scrollbar-thumb { background: #465063; border-radius: 999px;
+  border: 2px solid transparent; background-clip: content-box; }
+
+/* ── Panel 1: Deadline Calendar ── */
+.tk-weekdays { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 6px; }
+.tk-weekday { text-align: center; font-size: 10px; letter-spacing: .08em; color: var(--dim); }
+.tk-weekday.weekend { color: #6d7686; }
+.tk-cal { display: flex; flex-direction: column; gap: 6px; }
+.tk-cal-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.tk-cal-cell { min-height: 62px; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px; display: flex; flex-direction: column; gap: 3px; overflow: hidden; }
+.tk-cal-cell.other-month { opacity: .42; }
+.tk-cal-cell.weekend { background: #2a3039; }
+.tk-cal-cell.today { border-color: var(--accent); box-shadow: inset 0 0 0 1px rgba(184, 208, 74, .35); }
+.tk-cal-num { font-size: 10px; color: var(--dim); }
+.tk-cal-cell.today .tk-cal-num { color: var(--accent); font-weight: 700; }
+.tk-cal-chip { display: block; width: 100%; text-align: left; border: none; border-radius: 4px;
+  padding: 2px 5px; font-size: 11px; cursor: pointer; color: #1b1f26; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tk-cal-chip:hover { filter: brightness(1.12); }
+
+/* ── Panel 2: Timeline ── */
+.tk-tl-viewport { flex: 1; overflow: auto; position: relative; min-height: 0;
+  scrollbar-width: thin; scrollbar-color: #465063 transparent; }
+.tk-tl-viewport::-webkit-scrollbar { width: 8px; height: 8px; }
+.tk-tl-viewport::-webkit-scrollbar-track { background: transparent; }
+.tk-tl-viewport::-webkit-scrollbar-thumb { background: #465063; border-radius: 999px;
+  border: 2px solid transparent; background-clip: content-box; }
+.tk-tl-viewport::-webkit-scrollbar-thumb:hover { background: #5b6679; background-clip: content-box; }
+.tk-tl-inner { position: relative; padding: 0 0 8px; margin-left: 24px; }
+.tk-tl-dates { position: sticky; top: 0; z-index: 3; height: 34px; background: var(--panel-2);
+  border-bottom: 1px solid var(--line); }
+.tk-tl-date { position: absolute; top: 0; height: 34px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; border-left: 1px solid #333a47; font-size: 9px;
+  color: var(--dim); }
+.tk-tl-date.weekend { background: rgba(0, 0, 0, .16); }
+.tk-tl-date.month-start { border-left-color: #55606f; }
+.tk-tl-date.today { background: rgba(184, 208, 74, .12); color: var(--accent); }
+.tk-tl-dow { font-size: 9px; opacity: .75; }
+.tk-tl-num { font-size: 10px; font-weight: 600; }
+.tk-tl-dates-pad { position: absolute; inset: 0; }
+.tk-tl-rows { position: relative; }
+.tk-tl-row { position: relative; height: 34px; border-bottom: 1px solid #31384500; }
+.tk-tl-row:nth-child(even) { background: rgba(255, 255, 255, .018); }
+.tk-tl-today-line { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(184, 208, 74, .5);
+  pointer-events: none; }
+.tk-tl-bar { position: absolute; top: 5px; height: 24px; border-radius: 5px; cursor: grab;
+  display: flex; align-items: center; padding: 0 8px; overflow: hidden; color: #1b1f26;
+  font-size: 11px; font-weight: 600; will-change: transform; }
+.tk-tl-bar:active { cursor: grabbing; }
+.tk-tl-bar:hover { filter: brightness(1.1); }
+.tk-tl-bar.invalid { background: var(--line); color: var(--dim); }
+body.tk-dragging { cursor: grabbing; user-select: none; }
+.tk-tl-bar-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Panel 3: Countdowns ── */
+.tk-groups { display: flex; flex-direction: column; gap: 10px; }
+.tk-group { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--panel-2); }
+.tk-group-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px;
+  background: transparent; border: none; cursor: pointer; text-align: left; font-size: 11px;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
+.tk-group-head:hover { color: var(--ink); }
+.tk-group-count { margin-left: auto; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 999px; padding: 0 7px; font-size: 10px; color: var(--ink); }
+.tk-group-chevron { transition: transform .12s ease; font-size: 10px; }
+.tk-group.collapsed .tk-group-chevron { transform: rotate(-90deg); }
+.tk-group.collapsed .tk-group-items { display: none; }
+.tk-group-items { display: flex; flex-direction: column; gap: 6px; padding: 0 8px 8px; }
+.tk-cd-card { display: flex; align-items: center; gap: 10px; background: var(--panel);
+  border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 6px;
+  padding: 8px 10px; cursor: pointer; }
+.tk-cd-card:hover { border-color: #4a5364; }
+.tk-cd-info { min-width: 0; flex: 1; }
+.tk-cd-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tk-cd-date { font-size: 11px; color: var(--dim); }
+.tk-cd-right { text-align: right; flex: 0 0 auto; }
+.tk-cd-timer { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+.tk-cd-track { width: 92px; height: 4px; margin-top: 5px; background: #384051; border-radius: 2px; overflow: hidden; }
+.tk-cd-fill { height: 100%; background: var(--running); }
+
+/* Urgency bands, shared by calendar chips, timeline bars and countdown cards. */
+.tk-cal-chip.urgency-overdue, .tk-tl-bar.urgency-overdue { background: var(--u-overdue); }
+.tk-cal-chip.urgency-today, .tk-tl-bar.urgency-today { background: var(--u-today); }
+.tk-cal-chip.urgency-soon, .tk-tl-bar.urgency-soon { background: var(--u-soon); }
+.tk-cal-chip.urgency-week, .tk-tl-bar.urgency-week { background: var(--u-week); }
+.tk-cal-chip.urgency-later, .tk-tl-bar.urgency-later { background: var(--u-later); }
+.tk-cd-card.urgency-overdue { border-left-color: var(--u-overdue); }
+.tk-cd-card.urgency-today { border-left-color: var(--u-today); }
+.tk-cd-card.urgency-soon { border-left-color: var(--u-soon); }
+.tk-cd-card.urgency-week { border-left-color: var(--u-week); }
+.tk-cd-card.urgency-later { border-left-color: var(--u-later); }
+.tk-group.urgency-overdue .tk-group-title { color: var(--u-overdue); }
+.tk-group.urgency-today .tk-group-title { color: var(--u-today); }
+.tk-group.urgency-soon .tk-group-title { color: var(--u-soon); }
+.tk-group.urgency-week .tk-group-title { color: var(--u-week); }
+.tk-group.urgency-later .tk-group-title { color: var(--u-later); }
+
+dialog { background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 10px; padding: 20px; width: min(460px, 92vw); }
+dialog::backdrop { background: rgba(0,0,0,.55); }
+dialog h3 { margin: 0 0 14px; }
+dialog label { display: block; margin-bottom: 12px; font-size: 12px; color: var(--dim); }
+dialog input, dialog select, dialog textarea { width: 100%; margin-top: 4px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+dialog small { display: block; margin-top: 4px; color: var(--dim); }
+dialog menu { display: flex; gap: 8px; padding: 0; margin: 18px 0 0; }
