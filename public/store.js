@@ -125,30 +125,43 @@ const Store = (() => {
 
     /**
      * The visible composition of the Timekeeping panels, so the workspace the
-     * reader builds survives a reload. View state, but it is state the app owns,
-     * so it takes the same single save path as everything else.
+     * reader builds survives a reload. This is a read: it normalises whatever is
+     * on disk into a usable shape and writes nothing, so merely launching the app
+     * never touches the store.
      */
-    views() {
-      return {
-        calendar: state.views ? Boolean(state.views.calendar) : DEFAULT_VIEWS.calendar,
-        timeline: state.views && typeof state.views.timeline === 'boolean' ? state.views.timeline : DEFAULT_VIEWS.timeline,
-        countdown: state.views ? Boolean(state.views.countdown) : DEFAULT_VIEWS.countdown,
-      };
-    },
+    views: () => normaliseViews(state.views),
+
+    /**
+     * Persist a composition. Writes only when normalisation actually changed what
+     * is stored, so a no-op call leaves the store byte-identical.
+     */
     setViews(views) {
-      const next = {
-        calendar: Boolean(views && views.calendar),
-        timeline: Boolean(views && views.timeline),
-        countdown: Boolean(views && views.countdown),
-      };
-      // All three off is not a composition the cockpit supports: fall back to the
-      // timeline, exactly as the original does when the last panel is switched off.
-      if (!next.calendar && !next.timeline && !next.countdown) next.timeline = true;
+      const next = normaliseViews(views);
+      const current = normaliseViews(state.views);
+      if (next.calendar === current.calendar && next.timeline === current.timeline && next.countdown === current.countdown) {
+        return next;
+      }
       state.views = next;
       save();
       return { ...next };
     },
   };
+
+  /**
+   * A composition the cockpit can actually show. All three panels off is not one
+   * of them: fall back to the timeline, exactly as the original does when the last
+   * panel is switched off. Also the single place a partial or absent record on
+   * disk becomes a complete one.
+   */
+  function normaliseViews(value) {
+    const views = {
+      calendar: value ? Boolean(value.calendar) : DEFAULT_VIEWS.calendar,
+      timeline: value && typeof value.timeline === 'boolean' ? value.timeline : DEFAULT_VIEWS.timeline,
+      countdown: value ? Boolean(value.countdown) : DEFAULT_VIEWS.countdown,
+    };
+    if (!views.calendar && !views.timeline && !views.countdown) views.timeline = true;
+    return views;
+  }
 
   function clampWeight(value) {
     const n = Math.round(Number(value));

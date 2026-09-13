@@ -752,19 +752,39 @@
    * The bars a week carries: every task whose span overlaps it, clipped to the
    * week, given a percentage left/width and packed into the first free row so two
    * bars never draw over each other.
+   *
+   * WIDTH is measured end minus start, with no inclusive day: a same-day task
+   * spans nothing and is held visible only by the 5% floor, and a Monday-to-Friday
+   * task covers the four days it actually occupies.
+   *
+   * OVERLAP is tested on whole day indices, inclusive at both ends. The original
+   * could compare raw instants because its dates carried a time of day, so a
+   * same-day task ran from its creation clock time to its deadline clock time. Ours
+   * are whole days, so its start and end land on the same midnight: comparing
+   * instants would drop every same-day task whose day is the Sunday a week starts
+   * on. Comparing day numbers keeps them, and does not put an inclusive day back
+   * into the width.
    */
+  function overlapDays(span, weekStartMs) {
+    const startDay = Math.round(span.start / DAY_MS);
+    const endDay = Math.round(span.end / DAY_MS);
+    const firstDay = Math.round(weekStartMs / DAY_MS);
+    const lastDay = Math.round((weekStartMs + CAL_WEEK_MS) / DAY_MS) - 1;
+    return startDay <= lastDay && endDay >= firstDay;
+  }
+
   function weekBars(tasks, weekStartMs) {
     const weekEndMs = weekStartMs + CAL_WEEK_MS;
     const overlapping = tasks
       .map((task) => ({ task, span: spanOf(task) }))
-      .filter((entry) => entry.span && entry.span.start < weekEndMs && entry.span.end + DAY_MS > weekStartMs)
+      .filter((entry) => entry.span && overlapDays(entry.span, weekStartMs))
       .sort((a, b) => a.span.start - b.span.start);
 
     const placed = [];
     overlapping.forEach((entry) => {
       const { task, span } = entry;
       const clampedStart = Math.max(span.start, weekStartMs);
-      const clampedEnd = Math.min(span.end + DAY_MS, weekEndMs);
+      const clampedEnd = Math.min(span.end, weekEndMs);
       const leftPct = ((clampedStart - weekStartMs) / CAL_WEEK_MS) * 100;
       let widthPct = ((clampedEnd - clampedStart) / CAL_WEEK_MS) * 100;
       if (widthPct < 5) widthPct = 5; // keep a short task visible
@@ -774,12 +794,13 @@
 
       placed.push({
         task,
+        span,
         row,
         leftPct,
         widthPct,
         rightPct: leftPct + widthPct,
         isStart: span.start >= weekStartMs,
-        isEnd: span.end + DAY_MS <= weekEndMs,
+        isEnd: span.end <= weekEndMs,
       });
     });
     return placed;
@@ -841,7 +862,10 @@
         chip.style.left = bar.leftPct + '%';
         chip.style.width = bar.widthPct + '%';
         chip.style.top = (bar.row * 20 + 3) + 'px';
-        chip.title = bar.task.name + ' — ' + shortDay(bar.task.start || todayDay()) + ' → ' + shortDay(bar.task.deadline);
+        // The tooltip names the same span the bar is drawn from, so a task whose
+        // start is resolved through its creation day does not claim to start today.
+        chip.title = bar.task.name + ' — ' + shortDay(dayString(new Date(bar.span.start))) +
+          ' → ' + shortDay(dayString(new Date(bar.span.end)));
         chip.textContent = bar.task.name;
         chip.addEventListener('click', (event) => {
           event.stopPropagation();
@@ -1284,7 +1308,8 @@
 
   // The composition the reader last built comes back from the store; a fresh
   // store yields the default (timeline only), and all-off can never be loaded.
-  Object.assign(panels, Store.setViews(Store.views()));
+  // This is a plain read — launching the app writes nothing.
+  Object.assign(panels, Store.views());
   syncPanelVisibility();
   ensureTarget();
   refreshProjectOptions();
