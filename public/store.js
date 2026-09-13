@@ -86,14 +86,18 @@ const Store = (() => {
       if ('weight' in fields) task.weight = clampWeight(fields.weight);
       if ('start' in fields) task.start = clampDay(fields.start, task.start || today());
       if ('deadline' in fields) task.deadline = clampDay(fields.deadline, '');
-      // Only ever moved by the timeline, and only for a task that never had an
-      // explicit start: there its creation day is what the bar is drawn from, so
-      // it has to travel with the deadline. A task with a real start is never
-      // given a creation day rewrite, because the timeline does not send one.
-      if ('createdAt' in fields) {
-        const when = new Date(fields.createdAt);
-        if (!Number.isNaN(when.getTime())) task.createdAt = when.toISOString();
-      }
+      // DELIBERATE DIVERGENCE from the original, do not "restore fidelity" here.
+      //
+      // The original moves a startless task's whole bar by rewriting createdAt
+      // (ProjectDeadlines.svelte:546-555; the same coupling appears in its calendar
+      // drag at ProjectDeadlines.svelte:434-440). We do not, and there is
+      // intentionally no createdAt path in this function: createdAt is provenance —
+      // when the task came into existence — and a scheduling gesture must not
+      // restate history. The coupling is not academic: countdown progress is
+      // measured createdAt -> deadline, so a drag used to silently rewrite a task's
+      // countdown. Scheduling intent is what `start` means, so the timeline
+      // materialises a real start on the first deliberate whole-bar drag instead.
+      // See the write site in app.js for the other half of this note.
       save();
       return task;
     },

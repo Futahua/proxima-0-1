@@ -76,6 +76,10 @@
    * Effective span of a task: from its start day, falling back to the day it was
    * created (and finally today) so tasks written before the start field existed
    * still lay out on the timeline, through to its deadline.
+   *
+   * The creation day is only ever a fallback for a task that has no start. The
+   * first whole-bar drag of such a task writes a real start, after which this
+   * fallback is no longer consulted for it — createdAt itself never moves.
    */
   function spanOf(task) {
     const end = dayStart(task.deadline);
@@ -996,10 +1000,6 @@
       let grabX = 0;
       let originStartDay = '';
       let originEndDay = '';
-      // A task that never had an explicit start must not acquire one by being
-      // dragged. Its span is anchored on its creation day instead, and that is
-      // what the move travels with.
-      let originCreatedDay = '';
 
       const onMove = (event) => {
         if (!armed) return;
@@ -1021,12 +1021,22 @@
 
         const shiftDays = Math.round((event.clientX - grabX) / tlZoom);
         if (shiftDays === 0) { renderTimekeeping(); return; }
-        // The one real write in this panel: the deadline moves, the duration is
-        // preserved, and the start travels only if the task actually had one.
-        const fields = { deadline: shiftDay(originEndDay, shiftDays) };
-        if (task.start) fields.start = shiftDay(originStartDay, shiftDays);
-        else fields.createdAt = shiftDay(originCreatedDay, shiftDays);
-        Store.updateTask(task.id, fields);
+
+        // The one real write in this panel. A whole-bar drag means "move this
+        // interval, keep its duration", so both ends travel together.
+        //
+        // DELIBERATE DIVERGENCE from the original, do not "restore fidelity" here.
+        // The original leaves a startless task startless and moves it by rewriting
+        // createdAt (ProjectDeadlines.svelte:546-555). We refuse to touch createdAt
+        // — it is provenance, and countdown progress is measured from it, so moving
+        // it would rewrite the task's countdown history behind the user's back.
+        // Scheduling intent is what `start` means, so this first deliberate drag
+        // materialises a real start at the shifted effective start it was drawn
+        // from. It stays startless until the user actually moves it.
+        Store.updateTask(task.id, {
+          start: shiftDay(originStartDay, shiftDays),
+          deadline: shiftDay(originEndDay, shiftDays),
+        });
         refreshAfterWrite();
       };
 
@@ -1036,11 +1046,11 @@
         armed = true;
         moved = false;
         grabX = event.clientX;
-        // Anchor on the span that is actually drawn, so a task whose start is
-        // still its creation fallback is not snapped to today when nudged.
+        // Anchor on the span that is actually drawn, so the interval the user
+        // grabbed is the interval that moves, and a startless task's materialised
+        // start lands exactly where its bar already was.
         originStartDay = dayString(new Date((span ? span.start : startOfToday())));
         originEndDay = dayString(new Date((span ? span.end : startOfToday())));
-        originCreatedDay = dayString(new Date(task.createdAt));
         window.addEventListener('mousemove', onMove);
         window.addEventListener('mouseup', onUp);
       });
@@ -1197,8 +1207,11 @@
         const deadlineMs = dayStart(task.deadline);
         const diff = deadlineMs - now;
         card.__timer.textContent = formatCountdown(diff);
-        // Progress always runs from the day the task was created to its deadline,
-        // as the original does, whatever start the task may also carry.
+        // Progress runs from the day the task was created to its deadline, as the
+        // original does, whatever start the task may also carry. That is why
+        // createdAt must stay immutable: this measurement would otherwise change
+        // under a scheduling gesture. `start` governs where the bar is drawn, not
+        // this clock.
         const createdMs = new Date(task.createdAt).getTime();
         const total = deadlineMs - createdMs;
         const elapsed = now - createdMs;
