@@ -32,6 +32,10 @@
 </header>
 
 <main>
+  <!-- Whether this board is live, and — when it is not — that nothing here will be
+       kept. A state, so it sits on the page rather than flashing past in a chip. -->
+  <p class="service-banner" id="serviceBanner" role="status" hidden></p>
+
   <section class="boardhead" id="boardHead">
     <div>
       <p class="eyebrow" id="scopeLabel">ALL PROJECTS</p>
@@ -216,6 +220,19 @@
       <span class="spacer"></span>
       <button value="cancel" type="submit" formnovalidate class="ghost">Cancel</button>
       <button value="save" class="primary">Create</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="migrateDialog">
+  <form method="dialog" id="migrateForm">
+    <h3>Import this browser’s board?</h3>
+    <p class="confirm-body" id="migrateBody"></p>
+    <p class="migrate-report" id="migrateReport" hidden></p>
+    <menu>
+      <button value="later" id="migrateLater" class="ghost" formnovalidate>Not now — keep it in the browser</button>
+      <span class="spacer"></span>
+      <button value="import" id="migrateConfirm" class="primary">Import into the service</button>
     </menu>
   </form>
 </dialog>

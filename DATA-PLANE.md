@@ -1,228 +1,235 @@
 # The data plane
 
-What owns the data, what changes it, and where this is going. Written at the end
-of slice 1 so slice 2 starts from a document rather than from a conversation.
+What owns the data, what changes it, and what is still open. Written as slice 2
+landed, so that the next person starts from a document rather than a chat log.
 
 ---
 
-## Why this exists
+## Why any of this exists
 
-Everything the app knows lives in `localStorage` on one browser origin. Three
-consequences, all of them observed rather than imagined:
+The board used to live in `localStorage` on one browser origin. Three consequences,
+all observed rather than imagined:
 
-- **Nothing outside the tab can reach it.** An agent has nowhere to write. It
-  would have to puppet the UI.
-- **Papers and the dev server hold different boards.** Same code, different
-  origin, different data.
-- **A browser profile change empties the whole bucket.** It already did, once,
-  between two rounds of work, and took the fixtures with it. The app contains no
-  `removeItem` and no `clear()`; it simply could not stop it.
+- **Nothing outside the tab could reach it.** An agent had nowhere to write.
+- **Papers and the dev server held different boards.** Same code, different origin.
+- **A browser profile change emptied the bucket.** It happened once and took the
+  fixtures with it. The app had no `removeItem` and no `clear()`; it simply could not
+  stop it.
 
-The creator's stated goal for this product is agentic: *agents edit the files,
-Proxima is the cockpit*, and *a backpack is a cockpit you can throw away and
-rebuild; the data is what persists*. A store reachable only from inside one tab
-cannot deliver that.
-
-## The destination
-
-A small local service owns the data.
-
-- **SQLite** for structured facts: projects, tasks, runs, commands, events,
-  proposals, actors, attachments.
-- A **files/ depot** for real file content.
-- **Cockpits and agents are all clients.** No client is special.
-- **Structured mutation happens only through explicit idempotent commands** —
-  each carrying a `commandId` and an expected revision, each refused with a
-  structured code rather than clamped into something plausible.
-- **One transaction per command**: the state change and its event are written
-  together or not at all.
-- **Events carry a monotonic `seq`**, the actor, the client, and before/after
-  values. Clients `GET /v1/snapshot`, then subscribe to events after N over SSE.
-- This is the ACP shape used next door, **minus per-turn ownership**: durable
-  shared records do not have a turn to be owned by, so conflicts are resolved by
-  revision instead.
+The creator's goal is agentic: *agents edit the files, Proxima is the cockpit*, and
+*a backpack is a cockpit you can throw away and rebuild; the data is what persists*.
+A store reachable only from inside one tab cannot deliver that. So the data moved out
+of the browser entirely.
 
 ### A creator decision, recorded
 
-**Structured task and project data will not be human-editable files.** Files stay
-canonical for *file content* — opened in their own apps, linked from Proxima —
-and the service is canonical for structured facts. There is therefore no
-YAML/JSON round-tripping to design toward, no comment preservation problem, and
-no file watcher to reconcile. If a human wants to edit a task by hand, that is a
-client editing through the command API, not a text editor.
+**Structured task and project data is not human-editable files.** Files stay
+canonical for *file content* — opened in their own apps, linked from Proxima — and
+the service is canonical for structured facts. There is no YAML round-tripping to
+design toward, no comment preservation problem, and no watcher to reconcile.
 
 ---
 
-## This slice (slice 1): the command façade, over the same bytes
+## What exists now
 
-`localStorage` stays underneath. Behaviour does not change. What changes is the
-*shape* of every mutation, so that slice 2 is a transport swap rather than a
-rewrite.
+`proximad` — one dependency-free Node program (`service/proximad.mjs`) owning a
+**Proxima Data Home**:
 
-- Mutations are `await Store.command({ type, payload, commandId, ifRev })` — not
-  `addTask` / `updateTask` / `moveTask` / `deleteTask` / `setRun` / `setViews` /
-  `addProject`. Those methods are gone; there is no second path.
-- Reads stay **synchronous** against the in-memory snapshot (`Store.tasks()`,
-  `Store.task(id)`, `Store.run()`, `Store.projects()`), because that is what the
-  render path needs and a renderer should not await.
-- Every command appends an event with a monotonic `seq`, the actor, the client,
-  and before/after values. The log lives in the store document beside the data
-  and moves wholesale to the service in slice 2.
-- Every command is **idempotent by `commandId`**: a replay returns the original
-  result rather than acting twice.
-- Invariants live behind the command boundary and refuse with a code and details.
-  The UI still prevalidates for feel; the refusal is authoritative.
-- **Read-time rescue is a different job from accepting a write.** `normalise()`
-  still coerces and repairs what it finds on disk — an impossible date, an
-  unknown status, a dangling project reference — because old and damaged data has
-  to be *usable*. A command handed the same impossible values **refuses them with
-  a code**. The two live side by side on purpose and the code says so at both.
+```
+<home>/
+  proxima.db      SQLite, WAL, one writer (the service)
+  token           the bearer token for agents, mode 0600, never given to a browser
+  instance.json   the instance marker (instanceId, schema, home)
+  files/          content depot (empty; file content is canonical AS files)
+  backups/        exact bytes of everything imported, named by origin and time
+```
 
-### Actor and client
+The home defaults to `%USERPROFILE%\Proxima Data Home` — not in a browser profile,
+not in Papers, not in the source tree — and is moved with `--home` or
+`PROXIMA_HOME`. In this workspace it runs from `D:\Letters\MatTroiSeConMoc\Proxima
+Data Home` because the sandbox cannot write to the user profile.
 
-For now the cockpit states them: actor `human:minh`, and a client id that
-distinguishes cockpits. The id is derived, not random — `?client=papers` if the
-launcher names it, `papers` when the app is running from `file:`, otherwise the
-serving host (`127-0-0-1-4180`). A service will know both for certain; until then
-the log records what it was told.
+```
+node service/proximad.mjs [--home <dir>] [--port 4181] [--host 127.0.0.1]
+                          [--allow-origin <origin>]... [--quiet]
+```
+
+It serves the cockpit from its own port, so UI and API are same-origin in the real
+build. Nothing else opens the database for writing: if a client could, the command
+and audit layer would be bypassed the first time it was convenient.
+
+### Tables
+
+`projects`, `tasks`, `runs`, `run_members`, `commands`, `events`, `proposals`,
+`actors`, `credentials`, `preferences`, `attachments` — plus `meta` (schema version,
+instance) and `origins` (which browsers have been imported, and what was archived for
+each; the brief's migration rules cannot be kept without it).
+
+Typed columns for the fields the vocabulary understands, and `extra_json` for
+everything else, because the store has always kept fields it does not recognise and
+SQLite must not be the thing that loses them. `proposals` and `attachments` are
+created empty and unused: they cost nothing now, and their absence would force a
+schema change the first time either lands.
+
+### The API
+
+| Endpoint | What it is for |
+| --- | --- |
+| `GET /` | the cockpit, served from the service |
+| `GET /v1/health` | instance, schema version, head sequence, data home |
+| `GET /v1/snapshot` | `{ schemaVersion, headSeq, board }` |
+| `POST /v1/commands` | one command: the envelope below, the same refusals back |
+| `GET /v1/events?after=N` | server-sent events; resumes from `Last-Event-ID` |
+| `POST /v1/session` | mint the cockpit's session cookie |
+| `GET`/`PUT /v1/preferences/:client` | how a cockpit looks |
+| `POST /v1/import/inspect` | what a legacy store would bring, and what conflicts |
+| `POST /v1/import` | archive the bytes, then import them |
+| `GET /v1/imports` | what has been imported, from where, and what was archived |
+
+SSE rather than WebSocket: the traffic is almost all server to client, commands
+already ride ordinary HTTP, and reconnection with `Last-Event-ID` comes free. Frames
+are **unnamed** (`data:` with no `event:` line) on purpose — a named frame only
+reaches listeners registered for that exact name, and a cockpit cannot enumerate a
+vocabulary that grows. The type travels inside the JSON. `RESYNC_REQUIRED` exists for
+a client asking for a sequence that has been compacted away; nothing is compacted
+yet, so it is implemented and unreachable.
+
+### Trust
+
+The socket binds to loopback, and that is the boundary: anything that can reach it is
+running as this user on this machine. Two doors through it:
+
+- **A bearer token** in `<home>/token`, created 0600, for agents and curl. It never
+  goes near a browser and never enters `localStorage`.
+- **A session cookie**, HttpOnly, minted by `POST /v1/session` against a one-time
+  nonce injected into the cockpit's HTML as the service serves it. The cockpit's own
+  JavaScript never holds a token, so a browser compromise cannot leak one, and a page
+  on another origin cannot mint a session without the nonce.
+
+A cockpit served from somewhere else (a dev static server) is trusted by naming its
+origin at startup: `--allow-origin http://127.0.0.1:4180`. Without that flag the
+cockpit must be served by the service itself. On Windows the 0600 mode is advisory —
+NTFS ACLs are the real control — which is why the loopback boundary is stated rather
+than assumed.
 
 ---
 
 ## The command vocabulary
 
-Every command takes the envelope below. `payload` is the command's own shape.
-
 ```
 { type, payload, commandId, ifRev, actor, client }
 ```
 
-- `commandId` — idempotency key. Omitted means "this is a fresh act" and the
-  store mints one; the result always reports the id it used.
-- `ifRev` — the revision the caller believed the target was at. Absent means the
-  caller is not racing anybody (the UI's own edits are of that kind). A mismatch
-  is `ENTITY_REV_CONFLICT` and nothing is written.
-- `actor`, `client` — defaulted from the cockpit.
+- `commandId` — idempotency key. **Stored**, in the `commands` table, which is what
+  makes a replay safe across a restart rather than only within one session. A
+  different payload under the same id is `COMMAND_ID_CONFLICT`. A *refused* command
+  does not spend its id: nothing happened, so a corrected retry is a fresh attempt,
+  not a replay. That distinction was a real bug in slice 1 and is the thing to keep
+  in mind once commands cross a network.
+- `ifRev` — the revision the caller believed the entity was at. A mismatch is
+  `ENTITY_REV_CONFLICT` and nothing is written. Absent means "not racing anybody".
+- `actor`, `client` — `human:minh` and `cockpit#window`. The window part matters: two
+  tabs of one cockpit share the cockpit id, and a client that treated their events as
+  its own would never see the other tab's changes.
 
 | Command | Payload | Notes |
 | --- | --- | --- |
-| `task.create` | `{ name, note?, project?, status?, weight?, start?, deadline?, ganttRow? }` | `start` defaults to today; `order` places it last in its column. |
-| `task.patch` | `{ taskId, patch: { name?, note?, project?, weight?, start?, deadline?, ganttRow? } }` | **Refuses `status`** and points at `task.move`. Refuses `createdAt` and `id` outright. |
+| `task.create` | `{ name, note?, project?, status?, weight?, start?, deadline?, ganttRow? }` | `start` defaults to today; the task lands last in its column. |
+| `task.patch` | `{ taskId, patch: { … } }` | **Refuses `status`** and points at `task.move`; refuses `createdAt` and `id` outright. Unknown keys are kept in `extra_json`. |
 | `task.move` | `{ taskId, toStatus, beforeTaskId }` | **`beforeTaskId`, never an index.** "Move X before Y" survives replay and concurrent clients; "set order = 12" does not. `null` means the end of the column. |
-| `task.layout` | `{ rows: [{ taskId, ganttRow }] }` | The timeline's packing, one command per render pass. Unknown ids are skipped and reported, because a pass can race a delete. |
+| `task.layout` | `{ rows: [{ taskId, ganttRow }] }` | One command per render pass. Unknown ids are skipped and reported, because a pass can race a delete. |
 | `task.delete` | `{ taskId }` | |
-| `project.create` | `{ name, description? }` | |
-| `project.archive` | `{ projectId }` | Archiving something already archived succeeds with `changed: false` — it is already true, so there is nothing to do and nothing to log. |
-| `project.restore` | `{ projectId }` | Same, in the other direction. |
-| `project.delete` | `{ projectId }` | Orphans its tasks (they become uncategorised) and names them in the event. Never deletes work. |
-| `run.lock` | `{ target, taskIds }` | The client says **which** tasks and until when; the store computes the frozen plan from its own records. |
-| `run.unlock` | `{}` | Ending an already-ended run is success with `changed: false`, not an error. |
-| `proposal.accept` | — | **Named in the destination, not served this slice.** Refuses `COMMAND_NOT_IMPLEMENTED`. |
-| `history.revert` | — | Same. |
-
-Commands added for the app rather than named in the brief: `task.delete`,
-`task.layout`, `project.create`, `project.archive`, `project.restore`,
-`project.delete`, `run.unlock`. They are listed here rather than smuggled in, so
-the vocabulary is the document and not the code.
+| `project.create` / `archive` / `restore` / `delete` | `{ name, description? }` / `{ projectId }` | Delete orphans its tasks (they become uncategorised) and names them in the event. It never deletes work. |
+| `run.lock` | `{ target, taskIds }` | The client says **which** tasks and until when; the service computes the frozen plan from its own rows. |
+| `run.unlock` | `{}` | Ending an ended run is success with `changed: false`. |
+| `proposal.accept`, `history.revert` | — | Named in the destination, not served: `COMMAND_NOT_IMPLEMENTED`, with the slice they belong to. |
 
 ### Results
 
-Resolves — never rejects — with one of:
-
 ```
-{ ok: true,  commandId, seq, rev, changed, value, replayed? }
+{ ok: true,  commandId, seq, rev, changed, value, replayed?, event? }
 { ok: false, commandId, code, message, details }
 ```
 
-`changed: false` means the command was accepted and there was nothing to do (a
-patch that changed no field, archiving an archived project, unlocking no run). No
-event is written and no revision is bumped for a command that changed nothing.
+Resolves — never rejects — so a caller has one thing to handle, and the same shape
+arrives whether it came over HTTP or (in slice 1) from memory. `changed: false` means
+accepted with nothing to do: no event, no revision, no new sequence number.
 
 ### Refusal codes
 
-| Code | Meaning |
-| --- | --- |
-| `COMMAND_UNKNOWN` | Not in the vocabulary. |
-| `COMMAND_NOT_IMPLEMENTED` | Named in the destination, not served yet. |
-| `PAYLOAD_INVALID` | Missing or malformed payload (`details.missing`). |
-| `COMMAND_ID_CONFLICT` | That id was already used for a *different* command. |
-| `ENTITY_NOT_FOUND` | No such task/project (`details.kind`, `details.id`). |
-| `ENTITY_REV_CONFLICT` | `ifRev` did not match (`details.expected`, `details.actual`). |
-| `NAME_REQUIRED` | Empty name. |
-| `DATE_INVALID` | A date that does not exist (`details.field`, `details.value`). |
-| `DEADLINE_BEFORE_START` | The pair contradicts; **refused rather than reordered**. |
-| `WEIGHT_INVALID` | Not a whole number 1–100. |
-| `STATUS_UNKNOWN` | Not a column this board has (`details.allowed`). |
-| `PROJECT_NOT_FOUND` | A project reference that resolves to nothing. |
-| `GANTT_ROW_INVALID` | Not a timeline row. |
-| `FIELD_NOT_PATCHABLE` | e.g. `status` through `task.patch` (`details.use`). |
-| `MOVE_ANCHOR_NOT_IN_COLUMN` | The "before" task is not in the destination column. |
-| `RUN_HAS_NO_MEMBERS` | Locking with nothing running. |
-| `RUN_TARGET_INVALID` | Not an instant in the future. |
-| `RUN_ALREADY_LOCKED` | Unlock before locking again. |
-| `WRITE_FAILED` | The browser refused the write; the whole change was rolled back. |
+`COMMAND_UNKNOWN`, `COMMAND_NOT_IMPLEMENTED`, `PAYLOAD_INVALID`,
+`COMMAND_ID_CONFLICT`, `ENTITY_NOT_FOUND`, `ENTITY_REV_CONFLICT`, `NAME_REQUIRED`,
+`DATE_INVALID`, `DEADLINE_BEFORE_START`, `WEIGHT_INVALID`, `STATUS_UNKNOWN`,
+`PROJECT_NOT_FOUND`, `GANTT_ROW_INVALID`, `FIELD_NOT_PATCHABLE`,
+`MOVE_ANCHOR_NOT_IN_COLUMN`, `RUN_HAS_NO_MEMBERS`, `RUN_TARGET_INVALID`,
+`RUN_ALREADY_LOCKED`, `WRITE_FAILED`.
 
-Refusals are remembered for the session in memory only: a replay inside one
-session gets the original code, and after a reload the command is simply
-evaluated again. A refusal is not an event and is not worth a write that could
-itself fail.
+Each carries `message` (a sentence for the reader) and `details` (fields for a
+client). The cockpit prevalidates for feel; the refusal is authoritative.
+
+### Events
+
+Every committed command writes its state change, its command row and its event in one
+transaction. The event carries a monotonic `seq`, the time, the type, the command id,
+the actor, the client, the entity, and before/after values. A creation is revision 1;
+everything else moves the revision on by one.
 
 ---
 
-## What slice 1 deliberately kept
+## The cockpit's side
 
-Because these earned their place and the refactor must not cost them:
+`public/store.js` is a client. It holds the last snapshot in memory so reads stay
+synchronous (a renderer should not await), mirrors that snapshot into a **read-only**
+cache under `proxima.cache.v1` so a launch paints before the service answers, and
+subscribes to the event stream. An event this window did not cause triggers a
+re-fetch of the snapshot — cheaper than reasoning about a renumbered column, and
+impossible to get subtly wrong at this size.
 
-- the single mutation path, now the command layer;
-- rollback when a write cannot be persisted, with the change invisible rather
-  than merely unsaved;
-- a typed, visible load or write failure — never a fake empty board;
-- unknown fields **inside a record** preserved (and, as of this slice, unknown
-  top-level keys too);
-- stable ids, and `createdAt` immutable as provenance;
-- the frozen run snapshot, computed inside the store so no client can send a
-  stale plan;
-- strict date and weight parsing;
-- an invalid write refused, never made plausible;
-- one exceptional case: `normalise()` on read still rescues old and damaged data.
+**The rule that matters: after migration the cockpit never writes board data to the
+browser again.** Not on failure, not as a fallback. If the service cannot be reached
+it says so, on the page, in a sentence: *the board is a read-only copy from <time>;
+nothing you change here will be saved, and nothing has been written to this browser*.
+A local write is how two boards start disagreeing, which is the failure this whole
+design exists to escape. The cockpit keeps trying quietly every few seconds, and the
+banner is also a retry button.
 
-## State that is *not* board data
+Cockpit preferences — panel composition, timeline zoom — are device state, not board
+data: they live locally for immediate use and are mirrored to the service's
+`preferences` table per client, so a wiped browser profile stops costing the reader
+their layout. The route and the Daily lens are pure view state and are stored nowhere.
 
-| State | Where it lives | Why |
-| --- | --- | --- |
-| Timekeeping panel composition | `Cockpit`, per client, in `proxima.cockpit.v1` | How *this* cockpit looks. Papers and a laptop may differ. |
-| Timeline zoom | Same | Same. |
-| Route (`#/`, `#/hub`, `#/schedule`, `#/project/<id>`) | The URL | It is the address; nothing durable should be able to disagree with it. |
-| Project lens (the Daily filter) | Nowhere durable | A look, not a fact. |
+### Migration
 
-`views` was removed from the board document in this slice. A document written by
-an older build still carries one, and it is adopted into the cockpit **once**,
-on first load, so nobody loses their layout to the split.
+On first connection to an empty service the cockpit shows **what it found** (counts of
+tasks, projects, and whether a run is active) and asks. It does not adopt whichever
+origin connects first.
+
+- The exact bytes are archived into `backups/` **before** anything is written, under a
+  name that says which origin and when (`http-127-0-0-1-4180-20260914-021937.json`
+  plus a `.meta.json` with the sha256 and counts).
+- The import runs as actor `migration:localstorage`, preserving ids, `createdAt`,
+  unknown fields, run snapshots, gantt rows, weights and order — and produces a report
+  rather than dropping anything quietly.
+- Records that cannot be read are **rescued, not refused**: an impossible date becomes
+  today, an unknown status becomes Backlog, a dangling project reference reads as
+  uncategorised. Refusal is for new writes; rescue is for old bytes.
+- A **second origin** later gets `inspect` first: same id and same contents
+  deduplicates, same id and different contents is an explicit conflict that is
+  **never** imported, different ids import both. Two old boards are never merged by
+  last-write-wins.
+- **The browser copy is left exactly where it was.** Nothing deletes it.
 
 ---
 
-## Slice 2, when it comes
+## What is not built, and why that is next
 
-1. A local service (SQLite + `files/`), started by the cockpit or alongside it.
-2. Tables: `projects`, `tasks`, `runs`, `commands` (unique index on `commandId`),
-   `events` (`seq` monotonic), `actors`, `attachments`, `proposals`.
-3. `POST /v1/commands` — the envelope above, verbatim; the same codes back.
-4. `GET /v1/snapshot` — the document the cockpit already knows how to read.
-5. `GET /v1/events?after=N` over SSE — the log, streamed.
-6. `Store` becomes an HTTP client: reads against a snapshot the cockpit keeps in
-   memory, `command()` a POST. Nothing else in `app.js` should have to change,
-   which is the whole point of slice 1.
-7. The event log's local trim (`EVENT_MEMORY = 1000`, `COMMAND_MEMORY = 200`,
-   with `prunedThrough` recording where a pruned copy starts) disappears: the
-   service keeps all of it.
-
-## Open questions for slice 2
-
-- **Actor identity.** `human:minh` is stated by the cockpit today. The service
-  should decide it from the connection, and there needs to be a story for a
-  second human.
-- **What an agent may do.** The vocabulary is the same for everyone; whether an
-  agent may `project.delete`, or whether proposals exist so that it cannot, is a
-  policy question this slice deliberately did not answer. `proposal.accept` is
-  reserved for exactly that answer.
-- **Offline.** A cockpit that cannot reach the service has no writes. Whether
-  that is a queue, a read-only mode, or a hard stop is undecided.
+- **Actor identity.** `human:minh` is stated by the cockpit and `agent:headless` by
+  the client library. The service records what it is told. A second human, and the
+  question of what an agent may do that a human may not, is what `proposal.accept`
+  exists to answer.
+- **Compaction.** The log keeps everything; `RESYNC_REQUIRED` is implemented for the
+  day it does not.
+- **Attachments.** The table exists; nothing writes to `files/` yet, because file
+  content is canonical as files and Proxima links to them.
+- **Offline writes.** Deliberately absent. A queue would be a second board.
+- **Multi-device.** Nothing here assumes one machine, but nothing tests two either.

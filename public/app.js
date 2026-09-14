@@ -1317,42 +1317,150 @@
     return true;
   }
 
-  // ── Store integrity ───────────────────────────────────────────────────────
-  // Every mutation goes through the store's commit(), which rolls the whole state
-  // back when the write fails. So a failed write can no longer leave the board
-  // showing work that is not saved — but silence would be just as bad in the other
-  // direction, so the failure is announced here, once, from one place.
+  // ── The service, and saying so when it is not there ───────────────────────
+  // The board lives in proximad now. Two things the reader must be able to tell at a
+  // glance: whether what they are looking at is live, and — if it is not — that
+  // nothing they do here will be kept. A read-only copy is honest; a local write is
+  // how two boards start disagreeing.
+
+  function updateServiceBanner(status) {
+    const banner = $('#serviceBanner');
+    if (!banner) return;
+    const state = status || Store.loadStatus();
+    // `mode` is what the store reports live; `kind` is the same thing in the shape the
+    // rest of the cockpit asks for. Either will do here.
+    const mode = state.mode || (state.kind === 'offline' ? 'offline' : state.kind === 'connecting' ? 'connecting' : 'online');
+    if (mode === 'online') { banner.hidden = true; banner.textContent = ''; return; }
+    banner.hidden = false;
+    banner.classList.toggle('connecting', mode === 'connecting');
+    if (mode === 'connecting') {
+      banner.textContent = 'Contacting the Proxima service…';
+      return;
+    }
+    const when = Store.cachedAt() ? new Date(Store.cachedAt()).toLocaleString() : null;
+    banner.textContent = 'The Proxima service is not reachable' + (state.detail ? ' (' + state.detail + ')' : '') +
+      '. This board is a read-only copy' + (when ? ' from ' + when : '') +
+      ' — nothing you change here will be saved, and nothing has been written to this browser.';
+  }
+
+  // ── The migration bridge ──────────────────────────────────────────────────
+  // The pre-service board is still in this browser. It is never imported silently:
+  // the reader is shown what was found and asked. Nothing here writes it, and a
+  // "not now" leaves it exactly where it is.
+
+  function legacyWantsAttention() {
+    const summary = Store.legacySummary();
+    if (!summary) return false;
+    if (Store.migratedNote()) return false;
+    return summary.unreadable || !summary.empty;
+  }
+
+  async function openMigrateDialog() {
+    const summary = Store.legacySummary();
+    if (!summary) return;
+    const dialog = $('#migrateDialog');
+    const body = $('#migrateBody');
+    const report = $('#migrateReport');
+    const confirmBtn = $('#migrateConfirm');
+    report.hidden = true;
+    report.textContent = '';
+    confirmBtn.disabled = false;
+    body.textContent = summary.unreadable
+      ? 'This browser holds a board under “proxima.store.v1” that cannot be read as this app’s format. ' +
+        'It will be archived byte for byte before anything else happens, and nothing will be imported from it.'
+      : 'This browser holds a board that predates the Proxima service: ' + summary.tasks +
+        (summary.tasks === 1 ? ' task' : ' tasks') + ', ' + summary.projects +
+        (summary.projects === 1 ? ' project' : ' projects') + (summary.run ? ', and an active run' : '') +
+        '. Importing copies it into the service under the actor “migration:localstorage”, keeping ids, dates and ' +
+        'anything this app does not recognise. The exact bytes are archived first, and this browser copy is left ' +
+        'alone either way.';
+    dialog.showModal();
+    if (summary.unreadable) return;
+    // What would actually happen, from the service's point of view.
+    const inspected = await Store.inspectLegacy();
+    if (!inspected || !inspected.ok) {
+      report.hidden = false;
+      report.textContent = 'The service could not read that board: ' + ((inspected && inspected.error) || 'unknown reason') + '.';
+      confirmBtn.disabled = true;
+      return;
+    }
+    const lines = [];
+    lines.push(inspected.serviceEmpty
+      ? 'The service is empty, so everything found here is new to it.'
+      : 'The service already holds a board: ' + inspected.novel.tasks + ' of these tasks and ' +
+        inspected.novel.projects + ' of these projects are new, ' + inspected.same.tasks + ' tasks and ' +
+        inspected.same.projects + ' projects are already there and identical.');
+    if (inspected.conflicts.length) {
+      lines.push(inspected.conflicts.length + (inspected.conflicts.length === 1 ? ' record has' : ' records have') +
+        ' the same id but different contents: ' + inspected.conflicts.map((c) => c.kind + ' ' + c.name).join(', ') +
+        '. Those will NOT be imported — two old boards are never merged by overwriting one with the other. ' +
+        'The archive keeps the bytes so it can be decided by hand.');
+    }
+    if (inspected.dropped && (inspected.dropped.tasks || inspected.dropped.projects)) {
+      lines.push(inspected.dropped.tasks + inspected.dropped.projects + ' records cannot be read at all and will be reported, not dropped silently.');
+    }
+    report.hidden = false;
+    report.textContent = lines.join(' ');
+  }
+
+  async function runMigration() {
+    const confirmBtn = $('#migrateConfirm');
+    const report = $('#migrateReport');
+    confirmBtn.disabled = true;
+    report.hidden = false;
+    report.textContent = 'Importing…';
+    const result = await Store.importLegacy();
+    if (!result || !result.ok) {
+      report.textContent = (result && result.message) || 'The import was refused.';
+      confirmBtn.disabled = false;
+      return;
+    }
+    report.textContent = result.message + ' This browser’s copy has been left exactly as it was.';
+    confirmBtn.textContent = 'Done';
+    confirmBtn.disabled = false;
+    // The migration brought the old layout across with it, so this cockpit adopts it
+    // now rather than at the next launch.
+    await adoptServicePreferences();
+    refreshProjectOptions();
+    renderRoute();
+  }
+
+  /** How this cockpit looks, from the service — the layout a wiped profile lost. */
+  async function adoptServicePreferences() {
+    const adopted = await Store.adoptPreferences();
+    if (!adopted) return false;
+    Object.assign(panels, Cockpit.prefs());
+    tlZoom = Cockpit.prefs().zoom;
+    syncPanelVisibility();
+    renderTimekeeping();
+    return true;
+  }
+
+  // ── Failures, reported rather than swallowed ──────────────────────────────
+  // A write the SERVICE could not complete is still rolled back by the service and
+  // still worth saying plainly: the change is not in the board, and the reader
+  // should not be left thinking it is. The connection itself is reported by the
+  // banner, which is the right weight for it — a state, not an event.
   Store.onWriteFailure((failure) => {
-    flash('Not saved — the browser refused the write (' + failure.reason +
-      '). The change has been undone so nothing on screen is unsaved. Free some storage or check site permissions, then try again.',
-      null, { sticky: true, warn: true });
+    flash('Not saved — the service could not write that (' + failure.reason +
+      '). Nothing was changed, on the service or here.', null, { sticky: true, warn: true });
   });
 
-  /** Report a store that could not be read, instead of showing an empty app. */
+  /**
+   * Say what the cockpit found when it started.
+   *
+   * There is no "this browser's board was corrupt" report any more: the board is not
+   * in the browser. What is left in the browser is a pre-service copy, and that is
+   * the migration dialog's business — it shows what was found, in full, before
+   * anything is done with it.
+   */
   function reportLoadStatus() {
     const status = Store.loadStatus();
-    if (status.kind === 'corrupt') {
-      flash('Your saved data could not be read, so this is an empty board — nothing has been deleted. ' +
-        (status.rescued
-          ? 'The original bytes were copied to localStorage key "proxima.store.unreadable" before anything could overwrite them.'
-          : 'The original bytes are still under "proxima.store.v1"; the rescue copy already existed, so it was left alone.') +
-        ' ' + status.detail, null, { sticky: true, warn: true });
+    if (status.kind === 'offline') {
+      updateServiceBanner(status);
       return;
     }
-    if (status.kind === 'wrong-version') {
-      flash('This board was written by a different version of Proxima, so it has been left untouched rather than shown wrongly. ' +
-        (status.rescued ? 'A copy of the original is under "proxima.store.unreadable". ' : '') +
-        status.detail, null, { sticky: true, warn: true });
-      return;
-    }
-    if (status.kind === 'ok' && status.notes) {
-      const notes = status.notes;
-      const parts = [];
-      if (notes.unknownStatus) parts.push(notes.unknownStatus + (notes.unknownStatus === 1 ? ' task had a status this board has no column for and was filed under Backlog' : ' tasks had a status this board has no column for and were filed under Backlog'));
-      if (notes.droppedTasks) parts.push(notes.droppedTasks + (notes.droppedTasks === 1 ? ' unreadable task record was skipped' : ' unreadable task records were skipped'));
-      if (notes.droppedProjects) parts.push(notes.droppedProjects + (notes.droppedProjects === 1 ? ' unreadable project record was skipped' : ' unreadable project records were skipped'));
-      if (parts.length) flash(parts.join('; ') + '. Your other data loaded normally.', null, { warn: true, hold: 9000 });
-    }
+    if (Store.writeError()) return; // onWriteFailure has already said it, stickily
   }
 
   function syncPanelVisibility() {
@@ -3088,4 +3196,48 @@
   // One clock for the whole page. Nothing about a tick writes or rebuilds, and both
   // ticks leave a surface they are not mounted on alone.
   setInterval(tickTimekeeping, 1000);
+
+  // ── Connecting to the service ─────────────────────────────────────────────
+  // The first paint above used the local cache, so the cockpit opens instantly and
+  // says what it is showing. Everything after this is the service: the board it
+  // sends replaces the cache, and every later change — this cockpit's or another
+  // one's — arrives as an event and redraws what is on screen.
+
+  Store.onChange(() => {
+    // Another cockpit, or a reconnection, changed the board under us.
+    Object.assign(panels, Cockpit.prefs());
+    syncPanelVisibility();
+    refreshProjectOptions();
+    if (Store.run() && !ticker) ticker = setInterval(tick, 1000);
+    if (!Store.run() && ticker) stopTicker();
+    renderRoute();
+  });
+  Store.onStatus((status) => updateServiceBanner(status));
+
+  (async function connect() {
+    await Store.bootstrap();
+    Object.assign(panels, Cockpit.prefs());
+    syncPanelVisibility();
+    refreshProjectOptions();
+    if (Store.run() && !ticker) ticker = setInterval(tick, 1000);
+    renderRoute();
+    updateServiceBanner(Store.loadStatus());
+    if (Store.mode() === 'online' && legacyWantsAttention()) openMigrateDialog();
+  })();
+
+  $('#migrateConfirm').addEventListener('click', (event) => {
+    event.preventDefault();
+    if ($('#migrateConfirm').textContent === 'Done') { $('#migrateDialog').close(); return; }
+    runMigration();
+  });
+  $('#migrateLater').addEventListener('click', (event) => {
+    event.preventDefault();
+    // Nothing is imported and nothing is deleted: the browser copy stays exactly
+    // where it was, and the dialog can be asked for again from the banner.
+    $('#migrateDialog').close();
+  });
+  $('#serviceBanner').addEventListener('click', () => {
+    if (Store.mode() === 'offline') { Store.reconnect().catch(() => {}); return; }
+    if (legacyWantsAttention()) openMigrateDialog();
+  });
 })();

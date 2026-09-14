@@ -51,6 +51,13 @@ a.primary, a.ghost { display: inline-block; text-decoration: none; }
   border-radius: 6px; padding: 6px 12px; cursor: pointer; }
 
 main { padding: 16px; max-width: 1200px; }
+/* The state of the connection, said once and left on screen. Clicking it retries. */
+.service-banner { margin: 0 0 14px; padding: 9px 12px; border-radius: 6px; cursor: pointer;
+  background: #3a2f22; border: 1px solid #7a5c33; color: #f0d6a8; font-size: 13px; }
+.service-banner.connecting { background: var(--panel-2); border-color: var(--line); color: var(--dim);
+  cursor: default; }
+.migrate-report { margin: 10px 0 0; padding: 10px; border-radius: 6px; background: var(--panel-2);
+  border: 1px solid var(--line); font-size: 12px; color: var(--ink); }
 /* A route with nothing derived to draw: a title and a sentence. Narrower than the
    board, because a paragraph set 1200px wide is unreadable. */
 .stub { max-width: 680px; }
