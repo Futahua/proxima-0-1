@@ -1,35 +1,213 @@
 /*
- * The store. One place, one format, no Markdown.
+ * The store, and the cockpit's own preferences beside it.
  *
- * Records live as plain objects in one JSON document under a single localStorage key.
- * Every write goes through save(), so there is exactly one path that can change
- * durable state and exactly one thing to swap out later (a file, SQLite, OPFS)
- * without the surface knowing.
+ * BOARD DATA is structured fact: projects, tasks, the locked run, and the log of
+ * every command that produced them. It is shared — Papers, an agent and this dev
+ * cockpit are all looking at the same board — so it changes only through
+ * `Store.command()`: one explicit, idempotent, logged command at a time, carrying
+ * who asked and what revision they expected. Reads stay synchronous against the
+ * in-memory snapshot, because that is what a render pass needs.
+ *
+ * Today the bytes live in localStorage and a command is applied and persisted in
+ * one synchronous step. The command boundary is the point: in the next slice the
+ * same envelope goes to a local service over HTTP, the same refusals come back as
+ * structured codes, and the cockpit does not have to be rewritten to get there.
+ * See DATA-PLANE.md in the project root for the destination, the vocabulary and
+ * the refusal codes.
+ *
+ * COCKPIT PREFERENCES are not board data. Which Timekeeping panels are open and
+ * how far the timeline is zoomed are properties of the cockpit you are sitting at,
+ * not of the board: Papers and a laptop may look at one board at different zooms.
+ * They live in `Cockpit` below, per client, and are read and written synchronously
+ * because they are local and stay local.
+ *
+ * What this file keeps on purpose, because it earned it: exactly one path that can
+ * change durable state; a rollback when that path cannot persist; a typed, visible
+ * load or write failure instead of a fake empty board; unknown fields inside a
+ * record preserved; stable ids and an immutable createdAt; the frozen run
+ * snapshot; strict date and weight handling; and the rule that an invalid write is
+ * REFUSED rather than made plausible.
  */
+
+/**
+ * Cockpit-local preference state and identity.
+ *
+ * Nothing here is shared, nothing here is a command and nothing here is logged:
+ * losing a zoom level costs nothing, and a board that had to be told about it
+ * would be a board that could disagree with the cockpit about how it looks.
+ */
+const Cockpit = (() => {
+  const KEY = 'proxima.cockpit.v1';
+
+  /**
+   * Who is asking. The actor is the human; the client distinguishes the cockpit
+   * they are asking from. Until there is a service to authenticate either, the
+   * cockpit states them and the event log records them as stated.
+   *
+   * A client is named by the launcher (`?client=papers`), else by what it is
+   * running as: the packaged app reads its files over `file:` and is therefore
+   * Papers, and anything served over HTTP is named for its host. Deterministic on
+   * purpose — a random id per launch would make the log unreadable.
+   */
+  const ACTOR = 'human:minh';
+  const DEFAULT_PREFS = { calendar: false, timeline: true, countdown: false, zoom: 40 };
+  const MIN_ZOOM = 10;
+  const MAX_ZOOM = 300;
+
+  function slug(value) {
+    const text = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    return text.slice(0, 40);
+  }
+
+  function detectClient() {
+    let named = '';
+    try {
+      named = slug(new URLSearchParams(location.search).get('client'));
+    } catch {
+      named = '';
+    }
+    if (named) return named;
+    if (location.protocol === 'file:') return 'papers';
+    return slug(location.hostname + (location.port ? '-' + location.port : '')) || 'cockpit';
+  }
+
+  function readDocument() {
+    let raw = null;
+    try {
+      raw = localStorage.getItem(KEY);
+    } catch {
+      return { clients: {} };
+    }
+    if (!raw) return { clients: {} };
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { clients: {} };
+      const clients = parsed.clients && typeof parsed.clients === 'object' && !Array.isArray(parsed.clients)
+        ? parsed.clients
+        : {};
+      return { clients: clients };
+    } catch {
+      // A cockpit that cannot read its own preferences starts at the defaults. It
+      // is not board data and it is not worth a rescue copy or a notice.
+      return { clients: {} };
+    }
+  }
+
+  const clientId = detectClient();
+  let document_ = readDocument();
+  let failureHandler = null;
+
+  /**
+   * A cockpit's preferences, made complete. All three panels off is not a
+   * composition anyone can look at, so the timeline comes back — the same rule the
+   * original applies when the last panel is switched off — and a zoom outside the
+   * original's own bounds is brought inside them.
+   */
+  function normalisePrefs(value) {
+    const prefs = {
+      calendar: value ? Boolean(value.calendar) : DEFAULT_PREFS.calendar,
+      timeline: value && typeof value.timeline === 'boolean' ? value.timeline : DEFAULT_PREFS.timeline,
+      countdown: value ? Boolean(value.countdown) : DEFAULT_PREFS.countdown,
+      zoom: clampZoom(value ? value.zoom : undefined),
+    };
+    if (!prefs.calendar && !prefs.timeline && !prefs.countdown) prefs.timeline = true;
+    return prefs;
+  }
+
+  function clampZoom(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return DEFAULT_PREFS.zoom;
+    return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, n));
+  }
+
+  const prefs = () => normalisePrefs(document_.clients[clientId]);
+
+  function hasStoredPrefs() {
+    return Boolean(document_.clients[clientId]);
+  }
+
+  function write() {
+    try {
+      localStorage.setItem(KEY, JSON.stringify({ version: 1, clients: document_.clients }));
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: String((error && error.name) || 'write-failed') };
+    }
+  }
+
+  return {
+    actor: ACTOR,
+    clientId: clientId,
+    prefs: prefs,
+    hasStoredPrefs: hasStoredPrefs,
+    onWriteFailure(handler) { failureHandler = typeof handler === 'function' ? handler : null; },
+
+    /**
+     * Change this cockpit's preferences. Returns the preferences it now holds, or
+     * null when the write was refused — in which case the caller is holding a
+     * composition the cockpit cannot remember, and is told so rather than handed a
+     * preference that is not stored.
+     */
+    patch(partial) {
+      const next = normalisePrefs({ ...prefs(), ...(partial || {}) });
+      const current = prefs();
+      if (next.calendar === current.calendar && next.timeline === current.timeline &&
+          next.countdown === current.countdown && next.zoom === current.zoom) {
+        return next;
+      }
+      document_.clients[clientId] = next;
+      const outcome = write();
+      if (outcome.ok) return { ...next };
+      document_.clients[clientId] = current;
+      if (failureHandler) {
+        try { failureHandler({ reason: outcome.reason, at: new Date().toISOString() }); } catch { /* reporting must never throw */ }
+      }
+      return null;
+    },
+  };
+})();
+
 const Store = (() => {
   const KEY = 'proxima.store.v1';
   /** Where a store we could not read is parked, before anything can overwrite it. */
   const RESCUE_KEY = 'proxima.store.unreadable';
-  const EMPTY = { version: 1, projects: [], tasks: [], run: null, views: null };
-
-  /** Default composition of the Timekeeping cockpit. Its own save path, as ever. */
-  const DEFAULT_VIEWS = { calendar: false, timeline: true, countdown: false };
 
   /**
-   * Timeline zoom, in pixels per day. The original keeps this in plugin settings
-   * (`settings.ts:18`, default 40) and so survives a reload; ours goes through
-   * Store for the same reason the panel composition does. The bounds and the
-   * default are the original's own (10–300, 40).
+   * The board document. `views` is deliberately absent: which panels a cockpit has
+   * open is that cockpit's business and lives in Cockpit.
    */
-  const DEFAULT_ZOOM = 40;
-  const MIN_ZOOM = 10;
-  const MAX_ZOOM = 300;
+  const EMPTY = {
+    version: 1,
+    projects: [],
+    tasks: [],
+    run: null,
+    // Append-only record of what changed, and the counter that numbers it.
+    events: [],
+    seq: 0,
+    // commandId -> what that command did, so a replay returns the original result
+    // instead of acting twice.
+    commands: {},
+  };
 
   /** The statuses the board actually has columns for. */
   const STATUSES = ['backlog', 'running', 'finished'];
 
+  /**
+   * How much history this build keeps. localStorage is a few megabytes and has
+   * already run out once, so the log is trimmed rather than allowed to grow until
+   * the next write fails. Trimming is a compromise, not a design: the service holds
+   * the whole log in a table with no window at all, and `prunedThrough` is what
+   * lets a reader tell "nothing happened before this" from "this is where my copy
+   * starts".
+   */
+  const EVENT_MEMORY = 1000;
+  const COMMAND_MEMORY = 200;
+
   const loaded = load();
   let state = loaded.state;
+
+  /** What an older document kept under `views`, for Cockpit to adopt once. */
+  const legacyViews = loaded.legacyViews;
 
   /**
    * Read the store.
@@ -46,12 +224,17 @@ const Store = (() => {
    *               localStorage, unread.
    *
    * When it cannot read the store it makes a copy under RESCUE_KEY, so the first
-   * ordinary mutation cannot serialise empty state over data that was merely
+   * ordinary command cannot serialise empty state over data that was merely
    * unreadable. The copy is taken once and never overwritten by a later rescue.
+   *
+   * Everything below this line is RESCUE: it makes old or damaged records usable.
+   * It is emphatically not the policy for new writes — a command that is handed an
+   * impossible date is refused with a code, not repaired into a plausible one. The
+   * two jobs are different and are kept apart on purpose.
    */
   function load() {
     const raw = safeGet(KEY);
-    if (raw === null || raw === '') return { state: structuredClone(EMPTY), status: { kind: 'empty' } };
+    if (raw === null || raw === '') return { state: structuredClone(EMPTY), status: { kind: 'empty' }, legacyViews: null };
 
     let parsed;
     try {
@@ -67,7 +250,9 @@ const Store = (() => {
         'The stored data was written by a different version of this app (found version ' +
         String(parsed.version) + ', this build reads version 1).');
     }
-    return normalise(parsed);
+    const outcome = normalise(parsed);
+    outcome.legacyViews = parsed.views && typeof parsed.views === 'object' ? parsed.views : null;
+    return outcome;
   }
 
   /**
@@ -85,7 +270,7 @@ const Store = (() => {
     } catch {
       rescued = false; // nothing more we can do; the original is still in place
     }
-    return { state: structuredClone(EMPTY), status: { kind: kind, detail: detail, rescued: rescued } };
+    return { state: structuredClone(EMPTY), status: { kind: kind, detail: detail, rescued: rescued }, legacyViews: null };
   }
 
   /**
@@ -115,13 +300,32 @@ const Store = (() => {
         return false;
       });
 
+    const events = (Array.isArray(parsed.events) ? parsed.events : []).filter((e) => e && typeof e === 'object');
+    const seqFromEvents = events.reduce((max, e) => (Number.isFinite(Number(e.seq)) ? Math.max(max, Number(e.seq)) : max), 0);
+    const commands = parsed.commands && typeof parsed.commands === 'object' && !Array.isArray(parsed.commands)
+      ? parsed.commands
+      : {};
+
+    // Unknown top-level keys survive, so a document written by a later build is not
+    // silently stripped of a section this build does not know about yet. `views` is
+    // the one exception: it moved to the cockpit, and is adopted there rather than
+    // left behind here to be read as board data.
+    const known = new Set(['version', 'projects', 'tasks', 'run', 'events', 'seq', 'commands']);
+    const extras = {};
+    Object.keys(parsed).forEach((key) => {
+      if (!known.has(key) && key !== 'views') extras[key] = parsed[key];
+    });
+
     return {
       state: {
+        ...extras,
         version: 1,
         projects: projects,
         tasks: tasks,
         run: parsed.run && typeof parsed.run === 'object' ? parsed.run : null,
-        views: parsed.views && typeof parsed.views === 'object' ? parsed.views : null,
+        events: events,
+        seq: Number.isFinite(Number(parsed.seq)) ? Math.max(Number(parsed.seq), seqFromEvents) : seqFromEvents,
+        commands: commands,
       },
       status: { kind: 'ok', notes: notes },
     };
@@ -145,6 +349,10 @@ const Store = (() => {
       // fall out of step with it, and the Hub's "show archived" toggle only
       // decides what is listed.
       archivedAt: validInstant(raw.archivedAt) ? raw.archivedAt : null,
+      // Every entity carries the revision its last command left it at, which is
+      // what `ifRev` is checked against. A record from before revisions existed is
+      // at revision 1, not at zero: zero would mean "never written".
+      rev: positiveInt(raw.rev, 1),
     };
   }
 
@@ -185,7 +393,69 @@ const Store = (() => {
       ganttRow: clampRow(raw.ganttRow),
       order: Number.isFinite(Number(raw.order)) ? Math.round(Number(raw.order)) : 0,
       createdAt: typeof raw.createdAt === 'string' && raw.createdAt ? raw.createdAt : new Date().toISOString(),
+      rev: positiveInt(raw.rev, 1),
     };
+  }
+
+  function positiveInt(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : fallback;
+  }
+
+  // ── Read-time rescue ──────────────────────────────────────────────────────
+  // The three helpers below make a record READABLE. They are the opposite of
+  // VALIDATION further down, which refuses a command: this half repairs what is
+  // already on disk, because a task with an impossible date still has to appear
+  // somewhere, while a command handed an impossible date must not be obeyed. Keep
+  // them apart.
+
+  /**
+   * A day that really exists, not merely one that looks like a date. The shape
+   * check alone let "2026-13-45" through, which parses as a real Date object rolled
+   * into the next year and would then be rendered as a deadline nobody stored.
+   * Round-tripping through Date is what proves it.
+   *
+   * Shared by both halves on purpose: the rescue half uses it to decide a stored
+   * value is unusable, and the command half uses it to refuse a new one. One
+   * definition of "a real day", two different things done about it.
+   */
+  function isRealDay(value) {
+    const text = typeof value === 'string' ? value.trim().slice(0, 10) : '';
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
+    const parts = text.split('-');
+    const y = Number(parts[0]);
+    const m = Number(parts[1]);
+    const d = Number(parts[2]);
+    const probe = new Date(y, m - 1, d);
+    return probe.getFullYear() === y && probe.getMonth() === m - 1 && probe.getDate() === d;
+  }
+
+  function clampWeight(value) {
+    const n = Math.round(Number(value));
+    if (!Number.isFinite(n)) return 1;
+    return Math.min(100, Math.max(1, n));
+  }
+
+  /**
+   * A timeline row. Anything that is not a usable row number becomes null, which
+   * the timeline reads as "pack me" — so a missing or corrupt value results in a
+   * placement rather than an invented one.
+   */
+  function clampRow(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const n = Math.round(Number(value));
+    if (!Number.isFinite(n) || n < 0) return null;
+    return Math.min(10000, n);
+  }
+
+  /**
+   * A task day, kept as a YYYY-MM-DD string so a deadline or start never drifts by
+   * a timezone. `fallback` is what an empty or unusable value resolves to, which is
+   * how tasks written before the start field existed still get a usable date.
+   */
+  function clampDay(value, fallback) {
+    const text = typeof value === 'string' ? value.trim().slice(0, 10) : '';
+    return isRealDay(text) ? text : fallback;
   }
 
   function safeGet(key) {
@@ -206,10 +476,11 @@ const Store = (() => {
   }
 
   // ── The write contract ────────────────────────────────────────────────────
-  // A mutation either persists or it visibly did not happen. There is no third
-  // outcome, and no per-call-site handling: every mutation below runs inside
-  // commit(), which snapshots the in-memory state, applies the change, and rolls
-  // the whole state back if the write fails.
+  // A command either persists or it visibly did not happen. There is no third
+  // outcome, and no per-call-site handling: every command below runs inside
+  // commit(), which snapshots the in-memory state, applies the change — the data,
+  // the revision, the event and the command's own memory of itself, all together —
+  // and rolls the whole lot back if the write fails.
   //
   // Rolling back rather than keeping the change was the deliberate choice. A UI
   // that renders state the store does not hold is a lie, and this project has
@@ -236,6 +507,705 @@ const Store = (() => {
 
   const id = (prefix) => prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
+  // ── The command layer ─────────────────────────────────────────────────────
+  // One envelope, one vocabulary, one place where a refusal is decided.
+  //
+  //   command({ type, payload, commandId, ifRev, actor, client })
+  //
+  //     type       one of COMMANDS below — the whole vocabulary, nothing implied
+  //     payload    the command's own shape (see DATA-PLANE.md)
+  //     commandId  idempotency key. Replaying an id returns what it did the first
+  //                time. Omitted means "this is a fresh act" and one is minted.
+  //     ifRev      the revision the caller believed the entity was at. A mismatch
+  //                is refused rather than applied over somebody else's change.
+  //     actor, client  who and where; defaulted from the cockpit until a service
+  //                can say for certain.
+  //
+  // Resolves — never rejects — with either
+  //   { ok: true,  commandId, seq, rev, value, changed, replayed }
+  //   { ok: false, commandId, code, message, details }
+  // so a caller has exactly one thing to handle and the same shape arrives from
+  // HTTP in the next slice.
+
+  const REFUSAL_MESSAGES = {
+    COMMAND_UNKNOWN: (d) => 'This build has no command called “' + d.type + '”.',
+    COMMAND_NOT_IMPLEMENTED: (d) => '“' + d.type + '” is part of the destination but is not served yet.',
+    PAYLOAD_INVALID: (d) => 'That ' + d.type + ' command is missing ' + (d.missing || []).join(', ') + '.',
+    COMMAND_ID_CONFLICT: () => 'That command id was already used for a different command.',
+    ENTITY_NOT_FOUND: (d) => 'There is no ' + d.kind + ' with the id “' + d.id + '”.',
+    ENTITY_REV_CONFLICT: (d) => 'Somebody else changed this ' + d.kind + ' first (you expected revision ' + d.expected + ', it is at ' + d.actual + '). Nothing was written.',
+    NAME_REQUIRED: () => 'A name is required.',
+    DATE_INVALID: (d) => '“' + d.value + '” is not a real date, so ' + d.field + ' was not written.',
+    DEADLINE_BEFORE_START: (d) => 'The deadline (' + d.deadline + ') is before the start (' + d.start + '). Nothing was written.',
+    WEIGHT_INVALID: (d) => 'A weight has to be a whole number from 1 to 100; “' + d.value + '” is not.',
+    STATUS_UNKNOWN: (d) => '“' + d.value + '” is not a column this board has (' + (d.allowed || []).join(', ') + ').',
+    PROJECT_NOT_FOUND: (d) => 'There is no project with the id “' + d.projectId + '”.',
+    GANTT_ROW_INVALID: (d) => '“' + d.value + '” is not a timeline row.',
+    FIELD_NOT_PATCHABLE: (d) => 'task.patch cannot change ' + d.field + ' — use ' + d.use + '.',
+    MOVE_ANCHOR_NOT_IN_COLUMN: (d) => 'The task to insert before is not in that column any more.',
+    RUN_HAS_NO_MEMBERS: () => 'Nothing to lock — no tasks are in the running column.',
+    RUN_TARGET_INVALID: (d) => '“' + d.target + '” is not an instant in the future, so there is no horizon to lock.',
+    RUN_ALREADY_LOCKED: () => 'A run is already locked. Unlock it before locking another.',
+    WRITE_FAILED: (d) => 'Not saved — the browser refused the write (' + d.reason + '). The change has been undone so nothing on screen is unsaved.',
+  };
+
+  const VALIDATION = {
+    day(value) {
+      return isRealDay(value);
+    },
+    weight(value) {
+      const n = Number(value);
+      return Number.isFinite(n) && Number.isInteger(n) && n >= 1 && n <= 100;
+    },
+    row(value) {
+      if (value === null) return true;
+      const n = Number(value);
+      return Number.isFinite(n) && Number.isInteger(n) && n >= 0 && n <= 10000;
+    },
+  };
+
+  function refuse(code, details) {
+    const shape = details || {};
+    const build = REFUSAL_MESSAGES[code];
+    return {
+      ok: false,
+      code: code,
+      details: shape,
+      message: build ? build(shape) : 'That command was refused (' + code + ').',
+    };
+  }
+
+  /**
+   * A stable fingerprint of what a command was asked to do, so a reused id with a
+   * different intent is caught. Key order is normalised because two callers
+   * building the same payload should not look like two different commands.
+   */
+  function fingerprint(type, payload) {
+    const stable = (value) => {
+      if (value === null || typeof value !== 'object') return JSON.stringify(value === undefined ? null : value);
+      if (Array.isArray(value)) return '[' + value.map(stable).join(',') + ']';
+      return '{' + Object.keys(value).sort().map((k) => JSON.stringify(k) + ':' + stable(value[k])).join(',') + '}';
+    };
+    return type + ' ' + stable(payload || {});
+  }
+
+  const findTask = (taskId) => state.tasks.find((t) => t.id === taskId) || null;
+  const findProject = (projectId) => state.projects.find((p) => p.id === projectId) || null;
+
+  /** The revision a command's `ifRev` is checked against. */
+  function revisionOf(kind, targetId) {
+    if (kind === 'task') { const t = findTask(targetId); return t ? t.rev : null; }
+    if (kind === 'project') { const p = findProject(targetId); return p ? p.rev : null; }
+    if (kind === 'run') return state.run ? positiveInt(state.run.rev, 1) : null;
+    return null;
+  }
+
+  /**
+   * Refuse an `ifRev` that does not match, before anything is touched. The expected
+   * revision travels in the ENVELOPE, not in the payload: it is about the state the
+   * caller believed it was editing, which is a property of the request rather than
+   * of the change. An absent `ifRev` means the caller is not racing anybody — the
+   * UI's own edits are of that kind — and the command proceeds.
+   */
+  function checkRev(ctx, kind, targetId) {
+    const ifRev = ctx.ifRev;
+    if (ifRev === undefined || ifRev === null) return null;
+    const actual = revisionOf(kind, targetId);
+    if (actual === null) return refuse('ENTITY_NOT_FOUND', { kind: kind, id: targetId });
+    if (Number(ifRev) !== actual) {
+      return refuse('ENTITY_REV_CONFLICT', { kind: kind, id: targetId, expected: Number(ifRev), actual: actual });
+    }
+    return null;
+  }
+
+  /**
+   * Refusals are remembered for the session, in memory only, and only against the
+   * exact command that was refused.
+   *
+   * Two reasons for the fingerprint. A refusal changes nothing, so the id is not
+   * spent: a caller that fixes its payload and sends the same id again is making a
+   * fresh attempt, not replaying one — which is exactly what the task dialog does
+   * when the reader corrects a weight and presses Save again. And a byte-identical
+   * replay inside one session still gets the original code rather than whatever the
+   * changed state would now say.
+   *
+   * They are deliberately not persisted: refusing is not an event, and a refusal is
+   * not worth a write that could itself fail.
+   */
+  const refusalMemory = new Map();
+
+  /**
+   * The vocabulary. Each handler VALIDATES and returns a closure that applies the
+   * change; nothing is mutated until the whole command is known to be acceptable,
+   * so a refusal can never leave half a change behind.
+   *
+   * Handlers return either
+   *   { ok: true, apply: () => ({ value, entity, before, after, changed, extra }) }
+   *   { ok: false, ... refusal }
+   */
+  const COMMANDS = {
+    /**
+     * A new task. Placement is "last in its own column": every existing order is
+     * lower than a fresh count, so the task lands at the end of whichever column it
+     * starts in and task.move is the only thing that reorders.
+     */
+    'task.create'(payload, ctx) {
+      const missing = [];
+      if (typeof payload.name !== 'string' || !payload.name.trim()) missing.push('name');
+      if (missing.length) return refuse('PAYLOAD_INVALID', { type: 'task.create', missing: missing });
+      if (payload.project && !findProject(payload.project)) {
+        return refuse('PROJECT_NOT_FOUND', { projectId: payload.project });
+      }
+      if (payload.status !== undefined && !STATUSES.includes(payload.status)) {
+        return refuse('STATUS_UNKNOWN', { value: payload.status, allowed: STATUSES });
+      }
+      if (payload.weight !== undefined && !VALIDATION.weight(payload.weight)) {
+        return refuse('WEIGHT_INVALID', { value: payload.weight });
+      }
+      if (payload.start !== undefined && payload.start !== '' && !VALIDATION.day(payload.start)) {
+        return refuse('DATE_INVALID', { field: 'start', value: payload.start });
+      }
+      if (payload.deadline !== undefined && payload.deadline !== '' && !VALIDATION.day(payload.deadline)) {
+        return refuse('DATE_INVALID', { field: 'deadline', value: payload.deadline });
+      }
+      if (payload.ganttRow !== undefined && payload.ganttRow !== null && !VALIDATION.row(payload.ganttRow)) {
+        return refuse('GANTT_ROW_INVALID', { value: payload.ganttRow });
+      }
+      const start = payload.start === undefined || payload.start === '' ? today() : payload.start;
+      const deadline = payload.deadline === undefined ? '' : payload.deadline;
+      if (deadline && deadline < start) {
+        return refuse('DEADLINE_BEFORE_START', { start: start, deadline: deadline });
+      }
+      const task = {
+        id: id('tsk'),
+        name: String(payload.name).trim().slice(0, 200),
+        note: typeof payload.note === 'string' ? payload.note.slice(0, 500) : '',
+        project: payload.project || '',
+        status: payload.status || 'backlog',
+        weight: payload.weight === undefined ? 1 : Number(payload.weight),
+        start: start,
+        deadline: deadline,
+        // No row yet: the timeline packs a fresh task into the first row where it
+        // does not overlap anything and writes the result back. A row is a
+        // scheduling decision, so it lives on the task like any other field.
+        ganttRow: payload.ganttRow === undefined ? null : payload.ganttRow,
+        order: state.tasks.length,
+        createdAt: new Date().toISOString(),
+        rev: 1,
+      };
+      return {
+        ok: true,
+        apply: () => {
+          state.tasks.push(task);
+          return { value: { ...task }, entity: { kind: 'task', id: task.id }, before: null, after: { ...task }, changed: true, created: true };
+        },
+      };
+    },
+
+    /**
+     * Change fields on an existing task. `status` is NOT among them: where a task
+     * sits is a move, and a move names an anchor rather than an index, so replays
+     * and concurrent clients agree about what happened.
+     */
+    'task.patch'(payload, ctx) {
+      const task = findTask(payload.taskId);
+      if (!task) return refuse('ENTITY_NOT_FOUND', { kind: 'task', id: payload.taskId });
+      const conflict = checkRev(ctx, 'task', payload.taskId);
+      if (conflict) return conflict;
+      const patch = payload.patch && typeof payload.patch === 'object' ? payload.patch : null;
+      if (!patch) return refuse('PAYLOAD_INVALID', { type: 'task.patch', missing: ['patch'] });
+      const fields = Object.keys(patch);
+      if (fields.length === 0) return refuse('PAYLOAD_INVALID', { type: 'task.patch', missing: ['patch'] });
+      if ('status' in patch) return refuse('FIELD_NOT_PATCHABLE', { field: 'status', use: 'task.move' });
+      if ('createdAt' in patch) return refuse('FIELD_NOT_PATCHABLE', { field: 'createdAt', use: 'nothing — provenance is immutable' });
+      if ('id' in patch) return refuse('FIELD_NOT_PATCHABLE', { field: 'id', use: 'nothing — ids are stable' });
+
+      if ('name' in patch && (typeof patch.name !== 'string' || !patch.name.trim())) return refuse('NAME_REQUIRED', {});
+      if ('project' in patch && patch.project && !findProject(patch.project)) {
+        return refuse('PROJECT_NOT_FOUND', { projectId: patch.project });
+      }
+      if ('weight' in patch && !VALIDATION.weight(patch.weight)) return refuse('WEIGHT_INVALID', { value: patch.weight });
+      if ('start' in patch && patch.start !== '' && !VALIDATION.day(patch.start)) {
+        return refuse('DATE_INVALID', { field: 'start', value: patch.start });
+      }
+      if ('deadline' in patch && patch.deadline !== '' && !VALIDATION.day(patch.deadline)) {
+        return refuse('DATE_INVALID', { field: 'deadline', value: patch.deadline });
+      }
+      if ('ganttRow' in patch && !VALIDATION.row(patch.ganttRow)) return refuse('GANTT_ROW_INVALID', { value: patch.ganttRow });
+      if ('note' in patch && typeof patch.note !== 'string') return refuse('PAYLOAD_INVALID', { type: 'task.patch', missing: ['note as text'] });
+
+      const next = {};
+      if ('name' in patch) next.name = String(patch.name).trim().slice(0, 200);
+      if ('note' in patch) next.note = patch.note.slice(0, 500);
+      if ('project' in patch) next.project = patch.project || '';
+      if ('weight' in patch) next.weight = Number(patch.weight);
+      if ('start' in patch) next.start = patch.start === '' ? (task.start || today()) : patch.start;
+      if ('deadline' in patch) next.deadline = patch.deadline;
+      if ('ganttRow' in patch) next.ganttRow = patch.ganttRow;
+
+      const changedFields = Object.keys(next).filter((key) => task[key] !== next[key]);
+      if (changedFields.length === 0) {
+        return { ok: true, apply: () => ({ value: { ...task }, entity: { kind: 'task', id: task.id }, before: null, after: null, changed: false }) };
+      }
+      // The stored pair has to remain a pair: changing one end can contradict the
+      // other, and that is refused rather than accepted as a plausible inversion.
+      const startAfter = 'start' in next ? next.start : task.start;
+      const deadlineAfter = 'deadline' in next ? next.deadline : task.deadline;
+      if (startAfter && deadlineAfter && deadlineAfter < startAfter) {
+        return refuse('DEADLINE_BEFORE_START', { start: startAfter, deadline: deadlineAfter });
+      }
+      const before = {};
+      const after = {};
+      changedFields.forEach((key) => { before[key] = task[key]; after[key] = next[key]; });
+      return {
+        ok: true,
+        apply: () => {
+          Object.assign(task, next);
+          return { value: { ...task }, entity: { kind: 'task', id: task.id }, before: before, after: after, changed: true };
+        },
+      };
+    },
+
+    /**
+     * Move a task to a column, before another task or at the end.
+     *
+     * `beforeTaskId` and not an index: "put X before Y" means the same thing on a
+     * replay, on another client, and to an agent that has never seen this board's
+     * current ordering. "Set order = 12" means whatever the ordering happened to be
+     * when it was written.
+     */
+    'task.move'(payload, ctx) {
+      const task = findTask(payload.taskId);
+      if (!task) return refuse('ENTITY_NOT_FOUND', { kind: 'task', id: payload.taskId });
+      const conflict = checkRev(ctx, 'task', payload.taskId);
+      if (conflict) return conflict;
+      if (!STATUSES.includes(payload.toStatus)) return refuse('STATUS_UNKNOWN', { value: payload.toStatus, allowed: STATUSES });
+      const anchorId = payload.beforeTaskId || null;
+      if (anchorId) {
+        const anchor = findTask(anchorId);
+        if (!anchor) return refuse('ENTITY_NOT_FOUND', { kind: 'task', id: anchorId });
+        if (anchor.status !== payload.toStatus) {
+          return refuse('MOVE_ANCHOR_NOT_IN_COLUMN', { beforeTaskId: anchorId, toStatus: payload.toStatus });
+        }
+      }
+      const fromStatus = task.status;
+      if (fromStatus === payload.toStatus && !anchorId) {
+        // Already there, and asked for the end of the same column: nothing to say.
+        const column = state.tasks.filter((t) => t.status === payload.toStatus);
+        if (column[column.length - 1] && column[column.length - 1].id === task.id) {
+          return { ok: true, apply: () => ({ value: { ...task }, entity: { kind: 'task', id: task.id }, before: null, after: null, changed: false }) };
+        }
+      }
+      return {
+        ok: true,
+        apply: () => {
+          const beforeOrder = task.order;
+          task.status = payload.toStatus;
+          const rest = state.tasks.filter((t) => t.id !== task.id);
+          const column = rest.filter((t) => t.status === payload.toStatus);
+          const index = anchorId ? column.findIndex((t) => t.id === anchorId) : -1;
+          if (index < 0) column.push(task); else column.splice(index, 0, task);
+          column.forEach((t, i) => { t.order = i; });
+          state.tasks = rest.filter((t) => t.status !== payload.toStatus).concat(column);
+          // The column that was left behind keeps its own numbering: each column is
+          // ordered on its own, so gaps there mean nothing and rewriting them would
+          // be a second, unasked-for change.
+          return {
+            value: { ...task },
+            entity: { kind: 'task', id: task.id },
+            before: { status: fromStatus, order: beforeOrder },
+            after: { status: task.status, order: task.order, beforeTaskId: anchorId },
+            changed: true,
+          };
+        },
+      };
+    },
+
+    /**
+     * Packed timeline rows, as one command for a whole pass.
+     *
+     * The renderer computes the packing, draws from it and then asks for it to be
+     * remembered; committing them one at a time would put a burst of events in the
+     * log for one automatic layout. Ids that have gone missing are skipped and
+     * reported rather than refused: a render pass can legitimately race a delete.
+     */
+    'task.layout'(payload, ctx) {
+      const rows = Array.isArray(payload.rows) ? payload.rows : null;
+      if (!rows) return refuse('PAYLOAD_INVALID', { type: 'task.layout', missing: ['rows'] });
+      for (const entry of rows) {
+        if (!entry || typeof entry !== 'object') return refuse('PAYLOAD_INVALID', { type: 'task.layout', missing: ['rows[].taskId'] });
+        if (!VALIDATION.row(entry.ganttRow)) return refuse('GANTT_ROW_INVALID', { value: entry.ganttRow });
+      }
+      const pending = [];
+      const skipped = [];
+      rows.forEach((entry) => {
+        const task = findTask(entry.taskId);
+        if (!task || task.ganttRow === entry.ganttRow) { if (!task) skipped.push(entry.taskId); return; }
+        pending.push({ task: task, row: entry.ganttRow, from: task.ganttRow });
+      });
+      if (pending.length === 0) {
+        return { ok: true, apply: () => ({ value: { placed: 0, skipped: skipped }, entity: { kind: 'board', id: 'timeline' }, before: null, after: null, changed: false }) };
+      }
+      return {
+        ok: true,
+        apply: () => {
+          const before = {};
+          const after = {};
+          pending.forEach((item) => {
+            before[item.task.id] = item.from;
+            after[item.task.id] = item.row;
+            item.task.ganttRow = item.row;
+          });
+          return {
+            value: { placed: pending.length, skipped: skipped },
+            entity: { kind: 'board', id: 'timeline' },
+            before: before,
+            after: after,
+            changed: true,
+            extra: skipped.length ? { skipped: skipped } : undefined,
+          };
+        },
+      };
+    },
+
+    'task.delete'(payload, ctx) {
+      const task = findTask(payload.taskId);
+      if (!task) return refuse('ENTITY_NOT_FOUND', { kind: 'task', id: payload.taskId });
+      const conflict = checkRev(ctx, 'task', payload.taskId);
+      if (conflict) return conflict;
+      const snapshot = { ...task };
+      return {
+        ok: true,
+        apply: () => {
+          state.tasks = state.tasks.filter((t) => t.id !== task.id);
+          // A run's frozen plan references tasks, not projects or the board, so it
+          // is untouched here: the run ends only when its members stop being
+          // running, not when a record disappears. See endRunIfEmpty in the app.
+          return { value: { id: snapshot.id }, entity: { kind: 'task', id: snapshot.id }, before: snapshot, after: null, changed: true };
+        },
+      };
+    },
+
+    'project.create'(payload, ctx) {
+      if (typeof payload.name !== 'string' || !payload.name.trim()) return refuse('NAME_REQUIRED', {});
+      const project = {
+        id: id('prj'),
+        name: String(payload.name).trim().slice(0, 120),
+        description: typeof payload.description === 'string' ? payload.description.trim().slice(0, 500) : '',
+        createdAt: new Date().toISOString(),
+        archivedAt: null,
+        rev: 1,
+      };
+      return {
+        ok: true,
+        apply: () => {
+          state.projects.push(project);
+          return { value: { ...project }, entity: { kind: 'project', id: project.id }, before: null, after: { ...project }, changed: true, created: true };
+        },
+      };
+    },
+
+    'project.archive'(payload, ctx) {
+      const project = findProject(payload.projectId);
+      if (!project) return refuse('ENTITY_NOT_FOUND', { kind: 'project', id: payload.projectId });
+      const conflict = checkRev(ctx, 'project', payload.projectId);
+      if (conflict) return conflict;
+      if (project.archivedAt) {
+        return { ok: true, apply: () => ({ value: { ...project }, entity: { kind: 'project', id: project.id }, before: null, after: null, changed: false }) };
+      }
+      const at = new Date().toISOString();
+      return {
+        ok: true,
+        apply: () => {
+          project.archivedAt = at;
+          return { value: { ...project }, entity: { kind: 'project', id: project.id }, before: { archivedAt: null }, after: { archivedAt: at }, changed: true };
+        },
+      };
+    },
+
+    'project.restore'(payload, ctx) {
+      const project = findProject(payload.projectId);
+      if (!project) return refuse('ENTITY_NOT_FOUND', { kind: 'project', id: payload.projectId });
+      const conflict = checkRev(ctx, 'project', payload.projectId);
+      if (conflict) return conflict;
+      if (!project.archivedAt) {
+        return { ok: true, apply: () => ({ value: { ...project }, entity: { kind: 'project', id: project.id }, before: null, after: null, changed: false }) };
+      }
+      const was = project.archivedAt;
+      return {
+        ok: true,
+        apply: () => {
+          project.archivedAt = null;
+          return { value: { ...project }, entity: { kind: 'project', id: project.id }, before: { archivedAt: was }, after: { archivedAt: null }, changed: true };
+        },
+      };
+    },
+
+    /**
+     * Delete a project. Its tasks are NOT deleted — they keep their text, dates and
+     * history and become uncategorised. Deleting a container should not quietly
+     * destroy the work inside it, and the confirmation says how many tasks are
+     * affected before the reader agrees.
+     */
+    'project.delete'(payload, ctx) {
+      const project = findProject(payload.projectId);
+      if (!project) return refuse('ENTITY_NOT_FOUND', { kind: 'project', id: payload.projectId });
+      const conflict = checkRev(ctx, 'project', payload.projectId);
+      if (conflict) return conflict;
+      const orphans = state.tasks.filter((t) => t.project === project.id).map((t) => t.id);
+      const snapshot = { ...project };
+      return {
+        ok: true,
+        apply: () => {
+          state.tasks.forEach((t) => { if (t.project === project.id) { t.project = ''; t.rev = positiveInt(t.rev, 1) + 1; } });
+          state.projects = state.projects.filter((p) => p.id !== project.id);
+          return {
+            value: { orphaned: orphans.length, orphanedTaskIds: orphans },
+            entity: { kind: 'project', id: snapshot.id },
+            before: snapshot,
+            after: null,
+            changed: true,
+            // The tasks it let go of changed too, so they are named in the event
+            // rather than left as an unexplained side effect.
+            extra: orphans.length ? { orphanedTaskIds: orphans } : undefined,
+          };
+        },
+      };
+    },
+
+    /**
+     * Lock a run: the client says WHICH tasks are running and until when, and the
+     * store works out the plan from its own records. The plan is a frozen snapshot
+     * of weights and durations at lock time — see the note on the run in the read
+     * API — so it is computed here, once, rather than sent in by a client that
+     * might have been looking at something stale.
+     */
+    'run.lock'(payload, ctx) {
+      if (state.run) {
+        return refuse('RUN_ALREADY_LOCKED', { lockedAt: state.run.lockedAt });
+      }
+      const target = typeof payload.target === 'string' ? new Date(payload.target) : null;
+      if (!target || Number.isNaN(target.getTime()) || target.getTime() <= Date.now()) {
+        return refuse('RUN_TARGET_INVALID', { target: payload.target });
+      }
+      const ids = Array.isArray(payload.taskIds) ? payload.taskIds.filter((v) => typeof v === 'string' && v) : [];
+      const members = [];
+      ids.forEach((taskId) => {
+        const task = findTask(taskId);
+        if (task && task.status === 'running') members.push(task);
+      });
+      if (members.length === 0) return refuse('RUN_HAS_NO_MEMBERS', {});
+
+      const lockedAt = new Date();
+      const totalMs = target.getTime() - lockedAt.getTime();
+      const totalWeight = members.reduce((sum, t) => sum + t.weight, 0) || 1;
+      let cursor = lockedAt.getTime();
+      let total = 0;
+      const frozen = members.map((task) => {
+        const duration = (task.weight / totalWeight) * totalMs;
+        const startsAt = cursor;
+        const endsAt = cursor + duration;
+        cursor = endsAt;
+        total += duration;
+        return { id: task.id, name: task.name, weight: task.weight, duration: duration, startsAt: startsAt, endsAt: endsAt };
+      });
+      const run = { lockedAt: lockedAt.toISOString(), target: payload.target, members: frozen, total: total, rev: 1 };
+      return {
+        ok: true,
+        apply: () => {
+          state.run = run;
+          return {
+            value: { lockedAt: run.lockedAt, target: run.target, total: run.total, members: frozen.map((m) => ({ ...m })) },
+            entity: { kind: 'run', id: run.lockedAt },
+            before: null,
+            after: { lockedAt: run.lockedAt, target: run.target, memberIds: frozen.map((m) => m.id), total: run.total },
+            changed: true,
+            created: true,
+          };
+        },
+      };
+    },
+
+    /**
+     * End the run. Ending a run that has already ended is not an error — the app
+     * calls this whenever the last member leaves, and it may be called twice.
+     */
+    'run.unlock'(payload, ctx) {
+      if (!state.run) {
+        return { ok: true, apply: () => ({ value: null, entity: { kind: 'run', id: 'none' }, before: null, after: null, changed: false }) };
+      }
+      const snapshot = {
+        lockedAt: state.run.lockedAt,
+        target: state.run.target,
+        memberIds: (state.run.members || []).map((m) => m.id),
+      };
+      return {
+        ok: true,
+        apply: () => {
+          state.run = null;
+          return { value: { ended: snapshot }, entity: { kind: 'run', id: snapshot.lockedAt }, before: snapshot, after: null, changed: true };
+        },
+      };
+    },
+
+    /**
+     * Named in the destination, not served by this slice. Present so that a client
+     * asking for them gets an answer in the same shape as every other refusal
+     * rather than "no such command", which would be a lie about the vocabulary.
+     */
+    'proposal.accept'(payload, ctx) {
+      return refuse('COMMAND_NOT_IMPLEMENTED', { type: 'proposal.accept', slice: 'slice 2' });
+    },
+    'history.revert'(payload, ctx) {
+      return refuse('COMMAND_NOT_IMPLEMENTED', { type: 'history.revert', slice: 'slice 2' });
+    },
+  };
+
+  /**
+   * Trim the two logs. Events keep their seq — the numbers are the log's identity —
+   * and `prunedThrough` records where this copy starts, so "nothing happened yet"
+   * and "this is where my copy begins" stay distinguishable.
+   */
+  function rememberEvent(event) {
+    state.events.push(event);
+    if (state.events.length > EVENT_MEMORY) {
+      const dropped = state.events.splice(0, state.events.length - EVENT_MEMORY);
+      state.prunedThrough = dropped[dropped.length - 1].seq;
+    }
+  }
+
+  function rememberCommand(commandId, record) {
+    state.commands[commandId] = record;
+    const ids = Object.keys(state.commands);
+    if (ids.length > COMMAND_MEMORY) {
+      // Oldest first, by the sequence each command produced.
+      ids.sort((a, b) => (state.commands[a].seq || 0) - (state.commands[b].seq || 0))
+        .slice(0, ids.length - COMMAND_MEMORY)
+        .forEach((old) => { delete state.commands[old]; });
+    }
+  }
+
+  /**
+   * Apply one command. Synchronous inside — localStorage is synchronous, and this
+   * slice is not allowed to change how the app feels — and asynchronous in shape,
+   * because the next slice's transport will be and every call site has to handle
+   * that now rather than later.
+   */
+  async function command(envelope) {
+    const env = envelope && typeof envelope === 'object' ? envelope : {};
+    const type = String(env.type || '');
+    const payload = env.payload && typeof env.payload === 'object' ? env.payload : {};
+    const handler = COMMANDS[type];
+    if (!handler) return { ...refuse('COMMAND_UNKNOWN', { type: type }), commandId: env.commandId || null };
+
+    const commandId = typeof env.commandId === 'string' && env.commandId ? env.commandId : id('cmd');
+    const fingerprintNow = fingerprint(type, payload);
+
+    const rememberedRefusal = refusalMemory.get(commandId);
+    if (rememberedRefusal && rememberedRefusal.fingerprint === fingerprintNow) {
+      return { ...rememberedRefusal.refusal, commandId: commandId };
+    }
+
+    const seen = state.commands[commandId];
+    if (seen) {
+      if (seen.fingerprint !== fingerprintNow) {
+        return { ...refuse('COMMAND_ID_CONFLICT', { commandId: commandId, first: seen.type, now: type }), commandId: commandId };
+      }
+      // Idempotent by id: the answer it gave the first time, not a second helping.
+      return {
+        ok: true,
+        commandId: commandId,
+        replayed: true,
+        seq: seen.seq,
+        rev: seen.rev,
+        changed: false,
+        value: seen.value,
+      };
+    }
+
+    const checked = handler(payload, {
+      actor: env.actor || Cockpit.actor,
+      client: env.client || Cockpit.clientId,
+      ifRev: env.ifRev,
+      commandId: commandId,
+    });
+    if (!checked.ok) {
+      refusalMemory.set(commandId, { fingerprint: fingerprintNow, refusal: checked });
+      return { ...checked, commandId: commandId };
+    }
+
+    let outcome = null;
+    const applied = commit(() => {
+      const result = checked.apply();
+      if (!result.changed) {
+        // Accepted, and there was nothing to do: no event, no revision, no new
+        // sequence number. The command is still remembered, so a replay of it is
+        // answered from memory like any other.
+        rememberCommand(commandId, { type: type, fingerprint: fingerprintNow, seq: state.seq, rev: null, ok: true, value: result.value });
+        return result;
+      }
+      state.seq = positiveInt(state.seq, 0) + 1;
+      const entity = result.entity || { kind: 'board', id: 'board' };
+      // A creation IS revision 1 — the first version of the record — so it does not
+      // bump. Everything else moves the revision on by one.
+      if (!result.created) {
+        if (entity.kind === 'task') {
+          const task = findTask(entity.id);
+          if (task) task.rev = positiveInt(task.rev, 1) + 1;
+        } else if (entity.kind === 'project') {
+          const project = findProject(entity.id);
+          if (project) project.rev = positiveInt(project.rev, 1) + 1;
+        } else if (entity.kind === 'run' && state.run) {
+          state.run.rev = positiveInt(state.run.rev, 1) + 1;
+        }
+      }
+      const rev = revisionOf(entity.kind, entity.id);
+      // The value handed back is the record AS COMMITTED, revision included: a
+      // caller that wants to send ifRev next needs the number the store now holds,
+      // not the one it held while the handler was building its answer.
+      const value = result.value && typeof result.value === 'object' && 'rev' in result.value
+        ? { ...result.value, rev: rev }
+        : result.value;
+      rememberEvent({
+        seq: state.seq,
+        at: new Date().toISOString(),
+        type: type,
+        commandId: commandId,
+        actor: env.actor || Cockpit.actor,
+        client: env.client || Cockpit.clientId,
+        entity: entity,
+        before: result.before === undefined ? null : result.before,
+        after: result.after === undefined ? null : result.after,
+        ...(result.extra ? { extra: result.extra } : {}),
+      });
+      rememberCommand(commandId, { type: type, fingerprint: fingerprintNow, seq: state.seq, rev: rev, ok: true, value: value });
+      outcome = { seq: state.seq, rev: rev, value: value, changed: true };
+      return result;
+    });
+
+    if (!applied) {
+      // commit() rolled the whole change back, including the command's memory of
+      // itself, and has already told the surface. Hand back the same shape as any
+      // other refusal so the caller has one thing to handle.
+      return { ...refuse('WRITE_FAILED', { reason: (lastError && lastError.reason) || 'write-failed' }), commandId: commandId };
+    }
+    if (!outcome) {
+      // Nothing changed. `applied` is the handler's own answer; there is no new
+      // sequence number to report and no revision to claim.
+      const entity = applied.entity || null;
+      return {
+        ok: true,
+        commandId: commandId,
+        replayed: false,
+        changed: false,
+        seq: state.seq,
+        rev: entity ? revisionOf(entity.kind, entity.id) : null,
+        value: applied.value,
+      };
+    }
+    return { ok: true, commandId: commandId, replayed: false, seq: outcome.seq, rev: outcome.rev, changed: true, value: outcome.value };
+  }
+
   return {
     snapshot: () => structuredClone(state),
 
@@ -248,125 +1218,14 @@ const Store = (() => {
     writeError: () => (lastError ? { ...lastError } : null),
     onWriteFailure(handler) { failureHandler = typeof handler === 'function' ? handler : null; },
 
+    // ── Reads: synchronous, against the in-memory snapshot ────────────────────
     projects: () => state.projects.slice(),
 
     project: (projectId) => state.projects.find((p) => p.id === projectId) ?? null,
 
-    addProject(name, description) {
-      const project = {
-        id: id('prj'),
-        name: String(name).trim().slice(0, 120) || 'Untitled project',
-        description: String(description || '').trim().slice(0, 500),
-        createdAt: new Date().toISOString(),
-        archivedAt: null,
-      };
-      return commit(() => { state.projects.push(project); return project; });
-    },
-
-    /** Archive state is this one field; there is no second flag to disagree with it. */
-    setArchived(projectId, archived) {
-      const project = state.projects.find((p) => p.id === projectId);
-      if (!project) return null;
-      return commit(() => {
-        project.archivedAt = archived ? new Date().toISOString() : null;
-        return project;
-      });
-    },
-
-    /**
-     * Delete a project. Its tasks are NOT deleted — they keep their text, dates and
-     * history and become uncategorised. Deleting a container should not quietly
-     * destroy the work inside it, and the confirmation says how many tasks are
-     * affected before the reader agrees.
-     */
-    deleteProject(projectId) {
-      const project = state.projects.find((p) => p.id === projectId);
-      if (!project) return null;
-      return commit(() => {
-        const orphaned = state.tasks.filter((t) => t.project === projectId).length;
-        state.tasks.forEach((t) => { if (t.project === projectId) t.project = ''; });
-        state.projects = state.projects.filter((p) => p.id !== projectId);
-        // A run's frozen plan references tasks, not projects, so it is untouched.
-        return { orphaned: orphaned };
-      });
-    },
-
     tasks: () => state.tasks.slice(),
+
     task: (taskId) => state.tasks.find((t) => t.id === taskId) ?? null,
-
-    addTask(fields) {
-      const task = {
-        id: id('tsk'),
-        name: String(fields.name || '').trim().slice(0, 200) || 'Untitled task',
-        note: String(fields.note || '').slice(0, 500),
-        project: fields.project || '',
-        status: STATUSES.includes(fields.status) ? fields.status : 'backlog',
-        weight: clampWeight(fields.weight),
-        start: clampDay(fields.start, today()),
-        deadline: clampDay(fields.deadline, ''),
-        // No row yet: the timeline packs a fresh task into the first row where it
-        // does not overlap anything and writes the result back. A row is a
-        // scheduling decision, so it lives on the task like any other field.
-        ganttRow: null,
-        order: state.tasks.length,
-        createdAt: new Date().toISOString(),
-      };
-      return commit(() => { state.tasks.push(task); return task; });
-    },
-
-    updateTask(taskId, fields) {
-      const task = state.tasks.find((t) => t.id === taskId);
-      if (!task) return null;
-      return commit(() => {
-        if ('name' in fields) task.name = String(fields.name).trim().slice(0, 200) || task.name;
-        if ('note' in fields) task.note = String(fields.note).slice(0, 500);
-        if ('project' in fields) task.project = fields.project || '';
-        if ('status' in fields && STATUSES.includes(fields.status)) task.status = fields.status;
-        if ('weight' in fields) task.weight = clampWeight(fields.weight);
-        if ('start' in fields) task.start = clampDay(fields.start, task.start || today());
-        if ('deadline' in fields) task.deadline = clampDay(fields.deadline, '');
-        // A timeline row: a small non-negative integer, or null for "not placed
-        // yet" — which is what a task written before rows existed carries.
-        if ('ganttRow' in fields) task.ganttRow = clampRow(fields.ganttRow);
-        // DELIBERATE DIVERGENCE from the original, do not "restore fidelity" here.
-        //
-        // The original moves a startless task's whole bar by rewriting createdAt
-        // (ProjectDeadlines.svelte:546-555; the same coupling appears in its calendar
-        // drag at ProjectDeadlines.svelte:434-440). We do not, and there is
-        // intentionally no createdAt path in this function: createdAt is provenance —
-        // when the task came into existence — and a scheduling gesture must not
-        // restate history. The coupling is not academic: countdown progress is
-        // measured createdAt -> deadline, so a drag used to silently rewrite a task's
-        // countdown. Scheduling intent is what `start` means, so the timeline
-        // materialises a real start on the first deliberate whole-bar drag instead.
-        // See the write site in app.js for the other half of this note.
-        return task;
-      });
-    },
-
-    deleteTask(taskId) {
-      const before = state.tasks.length;
-      return commit(() => {
-        state.tasks = state.tasks.filter((t) => t.id !== taskId);
-        return state.tasks.length < before;
-      }) === true;
-    },
-
-    /** Move a task to a status, inserting it before `beforeId` (or at the end). */
-    moveTask(taskId, status, beforeId) {
-      const task = state.tasks.find((t) => t.id === taskId);
-      if (!task) return false;
-      return commit(() => {
-        task.status = status;
-        const rest = state.tasks.filter((t) => t.id !== taskId);
-        const column = rest.filter((t) => t.status === status);
-        const index = beforeId ? column.findIndex((t) => t.id === beforeId) : -1;
-        if (index < 0) column.push(task); else column.splice(index, 0, task);
-        column.forEach((t, i) => { t.order = i; });
-        state.tasks = rest.filter((t) => t.status !== status).concat(column);
-        return true;
-      }) === true;
-    },
 
     /**
      * The locked run, or null. A run carries the plan it was locked with:
@@ -381,117 +1240,40 @@ const Store = (() => {
      */
     run: () => (state.run ? { ...state.run, members: state.run.members ? state.run.members.map((m) => ({ ...m })) : null } : null),
 
-    setRun(run) {
-      // A locked run with no participants is not a run: there is no plan to
-      // freeze and nothing to consume. Refuse it rather than store a ghost.
-      if (run && Array.isArray(run.members) && run.members.length === 0) return null;
-      return commit(() => {
-        state.run = run
-          ? {
-            lockedAt: run.lockedAt,
-            target: run.target,
-            members: Array.isArray(run.members) ? run.members.map((m) => ({ ...m })) : null,
-            total: Number(run.total) || 0,
-          }
-          : null;
-        return state.run ? { ...state.run } : null;
-      });
-    },
+    /** The event log, oldest first. An agent reads this; the UI only logs to it. */
+    events: () => state.events.map((e) => ({ ...e })),
 
-    /**
-     * The visible composition of the Timekeeping panels, so the workspace the
-     * reader builds survives a reload. This is a read: it normalises whatever is
-     * on disk into a usable shape and writes nothing, so merely launching the app
-     * never touches the store.
-     */
-    views: () => normaliseViews(state.views),
+    /** Where the log's numbering starts in this copy, when it has been trimmed. */
+    prunedThrough: () => (Number.isFinite(Number(state.prunedThrough)) ? Number(state.prunedThrough) : 0),
 
-    /**
-     * Persist a composition, and the timeline's zoom with it. Writes only when
-     * normalisation actually changed what is stored, so a no-op call leaves the
-     * store byte-identical — which matters here because zoom changes arrive on
-     * every wheel tick.
-     */
-    setViews(views) {
-      const next = normaliseViews(views);
-      const current = normaliseViews(state.views);
-      if (next.calendar === current.calendar && next.timeline === current.timeline &&
-          next.countdown === current.countdown && next.zoom === current.zoom) {
-        return next;
-      }
-      const saved = commit(() => { state.views = next; return { ...next }; });
-      // A refused write leaves the previous composition in place; report that,
-      // rather than handing back a composition the store does not hold.
-      return saved || current;
-    },
+    /** The next sequence number a committed command will take. */
+    nextSeq: () => positiveInt(state.seq, 0) + 1,
+
+    /** A fresh idempotency key, for a caller that wants one act to stay one act. */
+    newCommandId: () => id('cmd'),
+
+    /** The one way board data changes. See the command layer above. */
+    command: command,
+
+    /** What an older document kept under `views`, for Cockpit to adopt once. */
+    legacyViews: () => (legacyViews ? { ...legacyViews } : null),
   };
-
-  /**
-   * A composition the cockpit can actually show. All three panels off is not one
-   * of them: fall back to the timeline, exactly as the original does when the last
-   * panel is switched off. Also the single place a partial or absent record on
-   * disk becomes a complete one, and where a missing or unusable zoom becomes the
-   * default rather than a broken timeline.
-   */
-  function normaliseViews(value) {
-    const views = {
-      calendar: value ? Boolean(value.calendar) : DEFAULT_VIEWS.calendar,
-      timeline: value && typeof value.timeline === 'boolean' ? value.timeline : DEFAULT_VIEWS.timeline,
-      countdown: value ? Boolean(value.countdown) : DEFAULT_VIEWS.countdown,
-      zoom: clampZoom(value ? value.zoom : undefined),
-    };
-    if (!views.calendar && !views.timeline && !views.countdown) views.timeline = true;
-    return views;
-  }
-
-  function clampZoom(value) {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return DEFAULT_ZOOM;
-    return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, n));
-  }
-
-  function clampWeight(value) {
-    const n = Math.round(Number(value));
-    if (!Number.isFinite(n)) return 1;
-    return Math.min(100, Math.max(1, n));
-  }
-
-  /**
-   * A timeline row. Anything that is not a usable row number becomes null, which
-   * the timeline reads as "pack me" — so a missing or corrupt value results in a
-   * placement rather than an invented one.
-   */
-  function clampRow(value) {
-    if (value === null || value === undefined || value === '') return null;
-    const n = Math.round(Number(value));
-    if (!Number.isFinite(n) || n < 0) return null;
-    return Math.min(10000, n);
-  }
-
-  /**
-   * A task day, kept as a YYYY-MM-DD string so a deadline or start never drifts by
-   * a timezone. `fallback` is what an empty value resolves to, which is how tasks
-   * written before the start field existed still get a usable date.
-   *
-   * The date has to EXIST, not merely look right: the shape check alone let
-   * "2026-13-45" through, which parses as a real Date object rolled into the next
-   * year and would then be rendered as a deadline that was never stored. Round-
-   * tripping through Date is what proves it.
-   */
-  function clampDay(value, fallback) {
-    const text = typeof value === 'string' ? value.trim().slice(0, 10) : '';
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return fallback;
-    const parts = text.split('-');
-    const y = Number(parts[0]);
-    const m = Number(parts[1]);
-    const d = Number(parts[2]);
-    const probe = new Date(y, m - 1, d);
-    return probe.getFullYear() === y && probe.getMonth() === m - 1 && probe.getDate() === d ? text : fallback;
-  }
 
   function today() {
     const d = new Date();
     const pad = (n) => String(n).padStart(2, '0');
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
   }
+})();
+
+/**
+ * Adopt the composition an older build kept in the board document. It was never
+ * board data — it was always "how this cockpit looks" — so it moves to where it
+ * belonged, once, and the board document stops carrying it from the next write on.
+ */
+(function adoptLegacyViews() {
+  if (Cockpit.hasStoredPrefs()) return;
+  const legacy = Store.legacyViews();
+  if (!legacy) return;
+  Cockpit.patch(legacy);
 })();

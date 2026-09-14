@@ -182,16 +182,21 @@
 
   // ── Timekeeping view state ────────────────────────────────────────────────
   // Which panels are on screen is a composition the reader chooses, not a mode:
-  // any combination is allowed, including all three at once, but never none. The
-  // composition is persisted through Store so it survives a reload — and so is the
-  // timeline's zoom, which the original keeps in plugin settings for the same
-  // reason: a zoom level is a way of looking at the data, and having to re-find it
-  // every reload is a small tax on every session.
-  const panels = { calendar: false, timeline: true, countdown: false };
+  // any combination is allowed, including all three at once, but never none. It is
+  // COCKPIT state, not board state — Papers and a laptop may look at one board at
+  // different zooms — so it is read from and written to Cockpit, beside the store
+  // and not inside it. The original keeps the same pair in plugin settings, which
+  // is per-install for the same reason.
+  const cockpitPrefs = Cockpit.prefs();
+  const panels = {
+    calendar: cockpitPrefs.calendar,
+    timeline: cockpitPrefs.timeline,
+    countdown: cockpitPrefs.countdown,
+  };
 
   const calCursor = { y: new Date().getFullYear(), m: new Date().getMonth() };
-  /** Pixels per day to start from, matching the store's own default. */
-  let tlZoom = 40;
+  /** Pixels per day, as this cockpit last left it. */
+  let tlZoom = cockpitPrefs.zoom;
   /** Bounds are the original's own, shared by the wheel and the buttons. */
   const MIN_TL_ZOOM = 10;
   const MAX_TL_ZOOM = 300;
@@ -201,7 +206,7 @@
   let timelineRows = new Map();
   /** The task whose bar is under the hand, so a tick leaves its position alone. */
   let tlDraggingId = null;
-  /** Coalesces the wheel's many zoom steps into one store write. */
+  /** Coalesces the wheel's many zoom steps into one cockpit write. */
   let zoomSaveTimer = 0;
 
   const tlViewport = $('#tlViewport');
@@ -618,10 +623,11 @@
     down.className = 'step';
     down.textContent = '−';
     down.disabled = frozen || task.weight <= 1;
-    down.addEventListener('click', (event) => {
+    down.addEventListener('click', async (event) => {
       event.stopPropagation();
       if (frozen) return;
-      Store.updateTask(task.id, { weight: Math.max(1, task.weight - 1) });
+      const result = await send('task.patch', { taskId: task.id, patch: { weight: Math.max(1, task.weight - 1) } });
+      if (reportRefusal(result, group)) return;
       render();
     });
 
@@ -634,10 +640,11 @@
     up.className = 'step';
     up.textContent = '+';
     up.disabled = frozen;
-    up.addEventListener('click', (event) => {
+    up.addEventListener('click', async (event) => {
       event.stopPropagation();
       if (frozen) return;
-      Store.updateTask(task.id, { weight: task.weight + 1 });
+      const result = await send('task.patch', { taskId: task.id, patch: { weight: task.weight + 1 } });
+      if (reportRefusal(result, group)) return;
       render();
     });
 
@@ -712,12 +719,15 @@
     del.className = 'del';
     del.title = 'Delete task';
     del.textContent = '×';
-    del.addEventListener('click', (event) => {
+    del.addEventListener('click', async (event) => {
       event.stopPropagation();
       // Deleting a plan member is allowed: it is a data operation, not a re-plan,
       // and the run ends honestly rather than keeping a slot for a task that is
       // gone. See endRunIfEmpty().
-      if (Store.deleteTask(task.id)) { render(); endRunIfEmpty(); }
+      const result = await send('task.delete', { taskId: task.id });
+      if (reportRefusal(result, del)) return;
+      render();
+      void endRunIfEmpty();
     });
     acts.append(del);
     card.append(acts);
@@ -802,6 +812,22 @@
     if (!stillInside) host.classList.remove('over');
   });
 
+  /**
+   * Move a task to a column, before a named task or at the end of it.
+   *
+   * The command names the task it goes BEFORE rather than an index: "before Y" means
+   * the same thing on a replay and on another client, where "order = 12" would mean
+   * whatever the list happened to look like when it was written. Everything the
+   * move needs is read out of the drag BEFORE the await, because the drop's own
+   * cleanup has already run by the time this resolves.
+   */
+  async function placeTask(taskId, toStatus, beforeTaskId) {
+    const result = await send('task.move', { taskId: taskId, toStatus: toStatus, beforeTaskId: beforeTaskId });
+    reportRefusal(result, null);
+    render();
+    void endRunIfEmpty();
+  }
+
   columns.addEventListener('drop', (event) => {
     const host = event.target.closest('.cards');
     if (!host || !dragId) return;
@@ -819,10 +845,13 @@
     }
     const next = placeholder ? placeholder.nextElementSibling : null;
     const beforeId = next && next.classList.contains('card') ? next.dataset.id : null;
-    Store.moveTask(dragId, host.dataset.drop, beforeId);
+    const movedId = dragId;
+    const toStatus = host.dataset.drop;
     dragId = null;
-    render();
-    endRunIfEmpty();
+    // Deliberately not awaited here: the drag's own state has to be cleared in this
+    // task, and the command applies and resolves before anything else can run. A
+    // command never rejects, so this cannot leave an unhandled failure behind.
+    void placeTask(movedId, toStatus, beforeId);
   });
 
   function cardAfter(host, y) {
@@ -858,12 +887,24 @@
     build(taskForm.elements.project, 'Uncategorised');
   }
 
+  /**
+   * One command id per opening of the dialog.
+   *
+   * A create is the one act here that a double submit would duplicate rather than
+   * merely repeat, and the store's idempotency is keyed on the command id, so the
+   * id belongs to the act of filling the form in rather than to the click. Two
+   * clicks on Save are then one task, and a second dialog is a second create.
+   */
+  let createCommandId = null;
+
   function openTask(taskId) {
     editingId = taskId;
+    createCommandId = taskId ? null : Store.newCommandId();
     const task = taskId ? Store.task(taskId) : null;
     $('#taskDialogTitle').textContent = task ? 'Edit task' : 'New task';
     $('#deleteTaskBtn').style.display = task ? '' : 'none';
     refreshProjectOptions();
+    setTaskError('');
     taskForm.elements.name.value = task ? task.name : '';
     taskForm.elements.note.value = task ? task.note : '';
     // A new task lands in whatever the mounted board is scoped to, so creating one
@@ -883,21 +924,34 @@
   }
 
   /**
+   * The dialog's one error line. It carries the cockpit's own prevalidation AND
+   * anything the store refuses, because from the reader's seat those are the same
+   * kind of sentence: this cannot be saved, and here is why.
+   */
+  function setTaskError(text) {
+    const error = $('#taskError');
+    error.textContent = text || '';
+    error.hidden = !text;
+  }
+
+  /**
    * A task cannot be due before it starts, and the dialog says so in words rather
    * than reverting or coercing either date. Returns true when the form is sane.
+   *
+   * This is prevalidation for feel, not the rule. The store refuses an impossible
+   * pair with DEADLINE_BEFORE_START and its refusal is the one that decides; this
+   * only saves the reader a round trip they can see coming.
    */
   function validateTaskDates() {
     const start = taskForm.elements.start.value;
     const deadline = taskForm.elements.deadline.value;
-    const error = $('#taskDateError');
-    if (!start || !deadline) { error.hidden = true; return true; }
+    if (!start || !deadline) { setTaskError(''); return true; }
     if (dayStart(deadline) < dayStart(start)) {
-      error.textContent = 'The deadline (' + readableDay(deadline) + ') is before the start (' +
-        readableDay(start) + '). A task cannot be due before it begins — move one of the dates.';
-      error.hidden = false;
+      setTaskError('The deadline (' + readableDay(deadline) + ') is before the start (' +
+        readableDay(start) + '). A task cannot be due before it begins — move one of the dates.');
       return false;
     }
-    error.hidden = true;
+    setTaskError('');
     return true;
   }
 
@@ -905,21 +959,26 @@
   taskForm.elements.start.addEventListener('change', validateTaskDates);
   taskForm.elements.deadline.addEventListener('change', validateTaskDates);
 
-  taskForm.addEventListener('submit', (event) => {
+  taskForm.addEventListener('submit', async (event) => {
     const action = event.submitter ? event.submitter.value : 'save';
     // Cancel and Delete keep the form's own dialog behaviour.
     if (action === 'cancel' || action === 'delete') {
-      if (action === 'delete') {
-        if (editingId) Store.deleteTask(editingId);
-        queueMicrotask(renderRoute);
+      if (action === 'delete' && editingId) {
+        const doomed = editingId;
+        const result = await send('task.delete', { taskId: doomed });
+        reportRefusal(result, taskForm);
+        renderRoute();
+        // A plan member that is deleted takes its slot with it, and the run ends
+        // honestly if it was the last one.
+        void endRunIfEmpty();
       }
       return;
     }
 
     // A save is ours to complete. The form is `method="dialog"`, so letting the
     // submit through would close the dialog even when the save is refused, taking
-    // the explanation with it. Hold the dialog open and close it ourselves once
-    // the write has actually happened.
+    // the explanation with it. Hold the dialog open until the command has actually
+    // been accepted, and put the store's own refusal in the dialog when it has not.
     event.preventDefault();
     if (!validateTaskDates()) return;
 
@@ -928,17 +987,60 @@
       note: taskForm.elements.note.value,
       project: taskForm.elements.project.value,
       status: taskForm.elements.status.value,
-      weight: taskForm.elements.weight.value,
+      weight: taskForm.elements.weight.value === '' ? 1 : taskForm.elements.weight.value,
       start: taskForm.elements.start.value,
       deadline: taskForm.elements.deadline.value,
     };
-    if (editingId) Store.updateTask(editingId, fields);
-    else Store.addTask(fields);
+
+    let result;
+    if (editingId) {
+      const editing = Store.task(editingId);
+      if (!editing) {
+        setTaskError('That task is no longer in the store.');
+        return;
+      }
+      // Where a task SITS is a move, not a patch: task.patch refuses `status`
+      // outright and points here. So a save that changes the column is two
+      // commands — the edit, then the move — which is also the honest account of
+      // what happened in the log.
+      const wantedStatus = fields.status;
+      const patch = {
+        name: fields.name,
+        note: fields.note,
+        project: fields.project,
+        weight: fields.weight,
+        start: fields.start,
+        deadline: fields.deadline,
+      };
+      result = await send('task.patch', { taskId: editingId, patch: patch });
+      if (result.ok && wantedStatus !== editing.status) {
+        result = await send('task.move', { taskId: editingId, toStatus: wantedStatus, beforeTaskId: null });
+      }
+    } else {
+      result = await send('task.create', {
+        name: fields.name,
+        note: fields.note,
+        project: fields.project,
+        status: fields.status,
+        weight: fields.weight,
+        start: fields.start,
+        deadline: fields.deadline,
+      }, { commandId: createCommandId });
+    }
+
+    if (!result.ok) {
+      // The dialog stays open with the refusal in it — including the write failure
+      // the store has already announced, which is worth repeating where the reader
+      // is actually looking.
+      setTaskError(result.message);
+      return;
+    }
+    createCommandId = null;
     taskDialog.close();
-    queueMicrotask(renderRoute);
+    renderRoute();
     // Editing a plan member's status is how it leaves the run. If that was the
     // last one, the run is over and says so rather than ticking against nobody.
-    queueMicrotask(endRunIfEmpty);
+    void endRunIfEmpty();
   });
 
   // New Project, through a modal the way task creation works. A save is ours to
@@ -947,7 +1049,7 @@
   //
   // The name field deliberately has no `required`: browser validation would block
   // the submit entirely, so the refusal would have no way to say why.
-  projectForm.addEventListener('submit', (event) => {
+  projectForm.addEventListener('submit', async (event) => {
     const action = event.submitter ? event.submitter.value : 'save';
     if (action !== 'save') return;
     event.preventDefault();
@@ -959,12 +1061,21 @@
       projectForm.elements.name.focus();
       return;
     }
-    const created = Store.addProject(name, projectForm.elements.description.value);
+    const result = await send('project.create', { name: name, description: projectForm.elements.description.value });
+    if (!result.ok) {
+      // The dialog stays open with the store's refusal in it, rather than closing
+      // over a project that was never created.
+      error.textContent = result.message;
+      error.hidden = false;
+      return;
+    }
     projectForm.reset();
     error.hidden = true;
     projectDialog.close();
-    if (!created) return; // the store refused the write and has already said so
-    queueMicrotask(() => { refreshProjectOptions(); renderRoute(); });
+    // A new project changes the lens's options, so it is rebuilt before the
+    // surface that shows it is redrawn.
+    refreshProjectOptions();
+    renderRoute();
   });
 
   // A cancelled, dismissed or completed create leaves nothing behind — no stored
@@ -1010,46 +1121,16 @@
   });
 
   /**
-   * Freeze the current running set into a plan: the participating task ids, their
-   * order, their weights, and the duration each is given over the horizon — plus
-   * the resolved start and end instant of every slot, so progress can be read off
-   * the plan without consulting live tasks at all.
-   */
-  function snapshotPlan(targetValue) {
-    const lockedAt = new Date();
-    const target = fromLocalInput(targetValue);
-    const running = liveRunning();
-    if (running.length === 0) return null;
-    if (!target || target <= lockedAt) return null;
-
-    const totalMs = target.getTime() - lockedAt.getTime();
-    const totalWeight = running.reduce((sum, t) => sum + t.weight, 0) || 1;
-    let cursor = lockedAt.getTime();
-    let total = 0;
-    const members = running.map((task) => {
-      const duration = (task.weight / totalWeight) * totalMs;
-      const startsAt = cursor;
-      const endsAt = cursor + duration;
-      cursor = endsAt;
-      total += duration;
-      return {
-        id: task.id,
-        name: task.name,
-        weight: task.weight,
-        duration,
-        startsAt,
-        endsAt,
-      };
-    });
-    return { lockedAt: lockedAt.toISOString(), target: targetValue, members: members, total: total };
-  }
-
-  /**
    * A locked run whose members have all left — finished, dragged out or deleted —
    * is over. End it and say so, rather than leaving a live run that is consuming
    * time for nobody and would hand that elapsed time to the next task to arrive.
+   *
+   * Asynchronous now, and reported here rather than by its callers: every caller is
+   * mid-flow (a drop, a delete, a save) and none of them has anything better to say
+   * about a refusal than this function does. `run.unlock` treats an already-ended
+   * run as success, so the store never refuses this for being late.
    */
-  function endRunIfEmpty() {
+  async function endRunIfEmpty() {
     const plan = lockedPlan();
     if (!plan || plan.legacy) return false;
     const remaining = plan.members.filter((m) => {
@@ -1057,40 +1138,40 @@
       return task && task.status === 'running';
     });
     if (remaining.length > 0) return false;
-    Store.setRun(null);
-    clearInterval(ticker);
-    ticker = null;
+    const result = await send('run.unlock', {});
+    if (reportRefusal(result, runInfo)) return false;
+    stopTicker();
     render();
     runInfo.textContent = 'The run ended: none of its planned tasks are still in the running column.';
     return true;
   }
 
-  lockBtn.addEventListener('click', () => {
+  function stopTicker() {
+    clearInterval(ticker);
+    ticker = null;
+  }
+
+  lockBtn.addEventListener('click', async () => {
     if (Store.run()) {
-      Store.setRun(null);
-      clearInterval(ticker);
-      ticker = null;
+      const result = await send('run.unlock', {});
+      if (reportRefusal(result, lockBtn)) return;
+      stopTicker();
     } else {
       const target = fromLocalInput(targetInput.value);
-      // These go through the flash channel rather than the line under the button:
-      // that line is rewritten by the next tick, so a refusal written there was
-      // erased about a second later — visible just long enough to be missed.
+      // Prevalidation for feel: the target is a form field the reader can fix, and
+      // saying so here saves them a round trip. Everything else about a lock — that
+      // there is something to lock, that the horizon is in the future as the store
+      // measures it — is the store's refusal to make, and it says so in the same
+      // words this used to.
       if (!target || target <= new Date()) {
         flash('Pick a target in the future before locking.', targetInput);
         return;
       }
-      // Locking nothing is not a run: there is no plan to freeze and no one to
-      // consume the horizon. Refuse it instead of storing a run with no members.
-      if (liveRunning().length === 0) {
-        flash('Nothing to lock — no tasks are in the running column.', lockBtn);
-        return;
-      }
-      const plan = snapshotPlan(targetInput.value);
-      if (!plan) {
-        flash('Pick a target in the future before locking.', targetInput);
-        return;
-      }
-      Store.setRun(plan);
+      const result = await send('run.lock', {
+        target: targetInput.value,
+        taskIds: liveRunning().map((t) => t.id),
+      });
+      if (reportRefusal(result, lockBtn)) { render(); return; }
       ticker = setInterval(tick, 1000);
     }
     render();
@@ -1197,6 +1278,43 @@
     el.style.top = Math.max(8, Math.min(top, window.innerHeight - box.height - 8)) + 'px';
     window.clearTimeout(flashTimer);
     if (!opts.sticky) flashTimer = window.setTimeout(() => { el.hidden = true; }, opts.hold || 5000);
+  }
+
+  // ── The command boundary ──────────────────────────────────────────────────
+  // Board data changes one way now: an explicit command, awaited, whose refusal is
+  // a value to be handled. These two helpers are the whole of the cockpit's side of
+  // that contract, so no call site has to remember the envelope's shape or decide
+  // for itself which failures the reader has already been told about.
+
+  /**
+   * Send one command. The envelope is the store's; this only fills in what a call
+   * site should not have to think about — a fresh idempotency key unless the caller
+   * is deliberately retrying an act it already sent (see openTask's create id, and
+   * the timeline's layout pass).
+   */
+  function send(type, payload, options) {
+    const opts = options || {};
+    return Store.command({
+      type: type,
+      payload: payload || {},
+      commandId: opts.commandId || Store.newCommandId(),
+      ifRev: opts.ifRev,
+    });
+  }
+
+  /**
+   * Say what the store refused, in the reader's terms, and say whether it refused.
+   *
+   * A refusal is a value rather than an exception, and one place decides which of
+   * them the reader has to see: the store's own durability failure is already on
+   * screen as a sticky notice, and repeating it here would replace that notice with
+   * a shorter version of itself, because the flash channel is a single chip.
+   */
+  function reportRefusal(result, anchor) {
+    if (!result || result.ok) return false;
+    if (result.code === 'WRITE_FAILED') return true;
+    flash(result.message, anchor || null, { warn: true });
+    return true;
   }
 
   // ── Store integrity ───────────────────────────────────────────────────────
@@ -1557,11 +1675,19 @@
   }
 
   /**
-   * Resolve rows for a whole visible set and persist any that changed.
+   * Resolve rows for a whole visible set.
    *
-   * Returns the settled rows, including the highest one in use, without touching
-   * the store unless something actually moved — so a re-render with an unchanged
-   * layout writes nothing and no bar jumps.
+   * Returns the settled rows, including the highest one in use, and — separately —
+   * asks for the ones that moved to be remembered. THE RENDER NO LONGER WAITS FOR
+   * THAT WRITE, and cannot: a command is asynchronous now, and a render pass cannot
+   * be. So the packing the pass computed is what gets drawn, and the same packing is
+   * proposed to the store afterwards, in one command for the whole pass.
+   *
+   * That is a real change in the shape of the render path and it is deliberate. What
+   * it costs: for the moment between the draw and the commit, the bars show a
+   * packing the store has not accepted yet. Both packings are valid layouts of the
+   * same spans, the refusal path re-renders from the stored one, and the log gets one
+   * event for a pass instead of one per row.
    */
   function resolveRows(tasks) {
     const placed = new Map();
@@ -1583,13 +1709,28 @@
       if (row === null) return;
       rows.set(task.id, row);
       maxRow = Math.max(maxRow, row);
-      if (row !== task.ganttRow) updates.push({ id: task.id, row: row });
+      if (row !== task.ganttRow) updates.push({ taskId: task.id, ganttRow: row });
     });
 
-    // Persist placements so they survive a filter change or a reload. Kept
-    // outside the render pass's own writes, through the one Store path.
-    updates.forEach((u) => Store.updateTask(u.id, { ganttRow: u.row }));
+    // Placements are persisted so they survive a filter change or a reload: a row is
+    // a scheduling decision. Asked for, not waited on — see above.
+    if (updates.length) void proposeLayout(updates);
     return { rows: rows, maxRow: maxRow, moved: updates.length };
+  }
+
+  /**
+   * Ask the store to remember a packing the renderer has already drawn.
+   *
+   * A refusal here does NOT trigger a re-render, which is the one place this
+   * deliberately differs from a refused task edit. A layout is derived: the drawn
+   * packing and the stored one are both valid packings of the same spans, nobody
+   * asked for either by hand, and a re-render would immediately propose the same
+   * thing again — the only refusal this can realistically hit is a write failure,
+   * which the store is already announcing stickily.
+   */
+  async function proposeLayout(rows) {
+    const result = await send('task.layout', { rows: rows });
+    reportRefusal(result, null);
   }
 
   /**
@@ -1920,7 +2061,11 @@
         else previewSpan(originStartIndex, pointed);
       };
 
-      const onUp = (event) => {
+      // Asynchronous, because the commit is a command. Everything that has to happen
+      // in the gesture's own task — dropping the listeners, clearing the drag state,
+      // measuring the displacement — happens before the first await, so the pointer
+      // is never holding a bar that is still listening for it.
+      const onUp = async (event) => {
         window.removeEventListener('mousemove', onMove);
         window.removeEventListener('mouseup', onUp);
         document.body.classList.remove('tk-dragging', 'tk-resizing');
@@ -1951,7 +2096,7 @@
         // Scheduling intent is what `start` means, so this first deliberate drag
         // materialises a real start at the shifted effective start it was drawn
         // from. It stays startless until the user actually moves it.
-        const fields = {};
+        let result = null;
 
         if (mode !== 'move') {
           // Stretching writes ONE end, and it writes it only when the gesture moved
@@ -1967,13 +2112,9 @@
             // the commit-time snapping every gesture in this panel shares, and the
             // preview rounds the same way, so nothing moves on release.
             const day = dayString(new Date(win.min + dayIndexAt(event.clientX) * DAY_MS));
-            if (mode === 'resize-left') {
-              // A startless task gains a real start here rather than having its
-              // provenance rewritten — the same treatment the move above gives it.
-              fields.start = day;
-            } else {
-              fields.deadline = day;
-            }
+            // A startless task gains a real start here rather than having its
+            // provenance rewritten — the same treatment the move above gives it.
+            const end = mode === 'resize-left' ? 'start' : 'deadline';
             // Nothing refuses a stretch that lands the start after the deadline. The
             // pair is stored exactly as asked and the bar draws it by the one
             // reversed-span rule there is — the interval between the two days, left
@@ -1982,7 +2123,8 @@
             // appears under the hand instead of after the fact. A refusal here would
             // be a second rule for the same state, and the task editor stays the one
             // place the contradiction is repaired.
-            Store.updateTask(task.id, fields);
+            result = await send('task.patch', { taskId: task.id, patch: { [end]: day } });
+            if (reportRefusal(result, bar)) { refreshAfterWrite(); return; }
           }
         } else if (shiftDays !== 0) {
           // A whole-bar drag shifts both ends by the same whole number of days.
@@ -1999,20 +2141,29 @@
           // after the reader had tried. Removed: the invariant makes the refusal
           // unnecessary, and the bar keeps its invalid treatment wherever it lands.
           // Repairing the relation is the dialog's job, and only the dialog's.
-          fields.start = shiftDay(originStartDay, shiftDays);
-          fields.deadline = shiftDay(originEndDay, shiftDays);
-          Store.updateTask(task.id, fields);
+          result = await send('task.patch', {
+            taskId: task.id,
+            patch: { start: shiftDay(originStartDay, shiftDays), deadline: shiftDay(originEndDay, shiftDays) },
+          });
+          if (reportRefusal(result, bar)) { refreshAfterWrite(); return; }
         }
 
         // The row, once, for every gesture. A stretch changes the span, so it can
         // create a collision the task did not have before; a move can too. Both go
         // through the drop-time walk rather than leaving it to the next pack pass, so
-        // the row a task lands in is decided by the gesture that moved it.
+        // the row a task lands in is decided by the gesture that moved it. The walk
+        // reads the task's span back out of the store, so it has to happen AFTER the
+        // dates above have been committed — which is now a real ordering the awaits
+        // above are doing the work for, rather than the accident of a synchronous
+        // write that happened to run first.
         const wanted = mode === 'move' ? Math.max(0, originRow + rowShift) : originRow;
         const visible = deadlineTasks();
         const context = buildPackContext(visible, task.id);
         const settled = resolveDroppedRow(task.id, wanted, context.occupied, context.pendingIds, context.pending);
-        if (settled !== originRow) Store.updateTask(task.id, { ganttRow: settled });
+        if (settled !== originRow) {
+          const rowResult = await send('task.patch', { taskId: task.id, patch: { ganttRow: settled } });
+          if (reportRefusal(rowResult, bar)) { refreshAfterWrite(); return; }
+        }
 
         refreshAfterWrite();
       };
@@ -2670,15 +2821,17 @@
     acts.append(open);
 
     if (project.archivedAt) {
-      acts.append(hubAction('Restore', 'Return this project to the active list', () => {
-        Store.setArchived(project.id, false);
+      acts.append(hubAction('Restore', 'Return this project to the active list', async (button) => {
+        const result = await send('project.restore', { projectId: project.id });
+        if (reportRefusal(result, button)) return;
         // The lens labels archived projects, so it is rebuilt with them.
         refreshProjectOptions();
         refreshAfterWrite();
       }));
     } else {
-      acts.append(hubAction('Archive', 'Hide from the Hub without touching its tasks', () => {
-        Store.setArchived(project.id, true);
+      acts.append(hubAction('Archive', 'Hide from the Hub without touching its tasks', async (button) => {
+        const result = await send('project.archive', { projectId: project.id });
+        if (reportRefusal(result, button)) return;
         // A lens pointing at a project that has just been archived is a state the
         // reader never asked for, so the lens is released with it. Only the lens:
         // which project the page IS is the address's business now.
@@ -2723,16 +2876,16 @@
     $('#confirmTitle').textContent = 'Delete “' + project.name + '”?';
     $('#confirmBody').textContent = consequence + ' This cannot be undone.';
     $('#confirmOk').textContent = stats.total === 0 ? 'Delete project' : 'Delete project, keep ' + stats.total + ' ' + taskWord;
-    confirmDialog.__onOk = () => {
-      const result = Store.deleteProject(project.id);
+    confirmDialog.__onOk = async () => {
+      const result = await send('project.delete', { projectId: project.id });
+      if (reportRefusal(result, null)) return;
       clearLensIf(project.id);
       refreshProjectOptions();
       refreshAfterWrite();
-      if (result) {
-        flash('Deleted “' + project.name + '”. ' + (result.orphaned
-          ? result.orphaned + ' ' + (result.orphaned === 1 ? 'task is' : 'tasks are') + ' now uncategorised.'
-          : 'It had no tasks.'), null, {});
-      }
+      const orphaned = (result.value && result.value.orphaned) || 0;
+      flash('Deleted “' + project.name + '”. ' + (orphaned
+        ? orphaned + ' ' + (orphaned === 1 ? 'task is' : 'tasks are') + ' now uncategorised.'
+        : 'It had no tasks.'), null, {});
     };
     confirmDialog.showModal();
   }
@@ -2756,10 +2909,16 @@
     btn.addEventListener('click', () => {
       const key = btn.dataset.panel;
       // Every panel toggles on its own and any combination is allowed — but not
-      // none. Switching the last one off puts the timeline back, which is what
-      // the original does; Store.setViews enforces the same rule on the way in.
+      // none. Switching the last one off puts the timeline back, which is what the
+      // original does, and Cockpit.prefs() enforces the same rule on the way in.
+      //
+      // This is a cockpit preference, not a board command: no event, no revision,
+      // and a refusal means the composition will not survive the next reload rather
+      // than that the change did not happen.
       const next = { ...panels, [key]: !panels[key] };
-      Object.assign(panels, Store.setViews(next));
+      const saved = Cockpit.patch(next);
+      if (!saved) flash('This cockpit could not save its layout, so it will not be remembered.', btn, { warn: true });
+      Object.assign(panels, saved || next);
       syncPanelVisibility();
       renderTimekeeping();
       if (key === 'timeline' && panels.timeline && !tlCentered) scrollTimelineToToday(false);
@@ -2823,13 +2982,16 @@
   }
 
   /**
-   * Persist the zoom, coalesced. A wheel gesture fires many events and each one
-   * would otherwise be a store write.
+   * Remember the zoom in this cockpit, coalesced. A wheel gesture fires many events
+   * and each one would otherwise be a write; the write is local (Cockpit), not a
+   * board command, so it stays synchronous and cannot make the wheel stutter.
    */
   function saveZoomSoon() {
     window.clearTimeout(zoomSaveTimer);
     zoomSaveTimer = window.setTimeout(() => {
-      Store.setViews({ ...panels, zoom: tlZoom });
+      if (!Cockpit.patch({ zoom: tlZoom })) {
+        flash('This cockpit could not save the zoom, so it will not be remembered.', $('#tlViewport'), { warn: true });
+      }
     }, 250);
   }
 
@@ -2906,14 +3068,11 @@
   // Panning is view state only: it moves the bars' projection, never a task.
   tlViewport.addEventListener('scroll', () => tickTimekeeping());
 
-  // The composition the reader last built comes back from the store, zoom
-  // included; a fresh store yields the defaults (timeline only, 40px per day), and
-  // all-off can never be loaded. This is a plain read — launching writes nothing.
-  const savedViews = Store.views();
-  Object.assign(panels, savedViews);
-  // Normalised on the way in by the store, so a corrupt or absent zoom reads as
-  // the default rather than as a timeline at NaN pixels per day.
-  tlZoom = savedViews.zoom;
+  // The composition and the zoom this cockpit last left came in with `panels` and
+  // `tlZoom` at the top of the file, out of Cockpit — not out of the board, which no
+  // longer has an opinion about how it is being looked at. All-off can never be
+  // loaded, and a corrupt or absent zoom reads as the default. Launching writes
+  // nothing, to either place.
   syncPanelVisibility();
   ensureTarget();
   refreshProjectOptions();
