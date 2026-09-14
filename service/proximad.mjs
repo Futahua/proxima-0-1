@@ -88,11 +88,12 @@ const log = (...parts) => { if (!args.quiet) console.log('[proximad]', ...parts)
 const HOME = resolve(args.home);
 const FILES_DIR = join(HOME, 'files');
 const BACKUPS_DIR = join(HOME, 'backups');
+const AGENTS_DIR = join(HOME, 'agents');
 const DB_PATH = join(HOME, 'proxima.db');
 const TOKEN_PATH = join(HOME, 'token');
 const INSTANCE_PATH = join(HOME, 'instance.json');
 
-for (const dir of [HOME, FILES_DIR, BACKUPS_DIR]) if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+for (const dir of [HOME, FILES_DIR, BACKUPS_DIR, AGENTS_DIR]) if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
 const instance = (() => {
   if (existsSync(INSTANCE_PATH)) {
@@ -109,18 +110,74 @@ const instance = (() => {
 })();
 
 /**
- * The root token. Created once, mode 0600 where the platform honours it, and never
- * handed to a browser: the cockpit authenticates with a session cookie instead.
+ * Credentials, one per actor.
+ *
+ *   <home>/token              the OPERATOR: human:minh, for the human at a terminal
+ *   <home>/agents/<name>.token  one per agent, actor `agent:<name>`
+ *
+ * Separate files rather than one shared root token, because the whole safety net in
+ * a frictionless system is knowing WHO did a thing: a single token makes every event
+ * read `human:minh` and attribution becomes fiction. A token is read from disk (never
+ * taken from a command line, where the process table would show it), written 0600
+ * where the platform honours it, and hashed into the `credentials` table so a leaked
+ * file can be rotated without losing the record of what it was.
+ *
+ * Every token an agent holds is deliberately the SAME authority as the operator's:
+ * the creator chose frictionless, so there is no per-operation policy here. What
+ * makes that safe is #1 attribution and #3 undo, not permissions.
  */
+function tokenFileFor(actor) {
+  if (actor === 'human:minh') return TOKEN_PATH;
+  const name = String(actor).replace(/^agent:/, '');
+  return join(AGENTS_DIR, name + '.token');
+}
+
+function readTokenFile(path) {
+  try {
+    const token = readFileSync(path, 'utf8').trim();
+    return token || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeTokenFile(path, token) {
+  writeFileSync(path, token + '\n', { mode: 0o600 });
+  try { statSync(path); } catch { /* nothing to do */ }
+}
+
 const rootToken = (() => {
-  if (existsSync(TOKEN_PATH)) return readFileSync(TOKEN_PATH, 'utf8').trim();
+  const existing = readTokenFile(TOKEN_PATH);
+  if (existing) return existing;
   const token = randomBytes(32).toString('hex');
-  writeFileSync(TOKEN_PATH, token + '\n', { mode: 0o600 });
-  try { statSync(TOKEN_PATH); } catch { /* nothing to do */ }
-  log('created a root token at', TOKEN_PATH, '(mode 0600)');
+  writeTokenFile(TOKEN_PATH, token);
+  log('created the operator token at', TOKEN_PATH, '(mode 0600)');
   return token;
 })();
-const tokenHash = createHash('sha256').update(rootToken).digest('hex');
+
+/** token -> { actor, label }. Rescanned when a token is not recognised, so adding
+ *  an agent does not need the daemon restarted, and cached otherwise. */
+let credentialCache = new Map();
+function loadCredentials() {
+  const map = new Map();
+  map.set(rootToken, { actor: 'human:minh', label: 'operator' });
+  let names = [];
+  try { names = readdirSync(AGENTS_DIR).filter((f) => f.endsWith('.token')); } catch { names = []; }
+  for (const file of names) {
+    const token = readTokenFile(join(AGENTS_DIR, file));
+    if (token) map.set(token, { actor: 'agent:' + file.replace(/\.token$/, ''), label: file.replace(/\.token$/, '') });
+  }
+  credentialCache = map;
+  return map;
+}
+loadCredentials();
+
+function actorForToken(token) {
+  if (!token) return null;
+  let found = credentialCache.get(token);
+  if (!found) found = loadCredentials().get(token);   // a token added since we last looked
+  return found || null;
+}
 
 // ── The database ────────────────────────────────────────────────────────────
 
@@ -143,6 +200,56 @@ const meta = {
 meta.set('schemaVersion', SCHEMA_VERSION);
 meta.set('instanceId', instance.instanceId);
 
+// ── Forward migrations ──────────────────────────────────────────────────────
+// The schema is CREATE TABLE IF NOT EXISTS, so a database that predates a column
+// keeps working only if the column is added. Attribution arrived after slice 2 and
+// this is where it is caught up; every step is idempotent.
+
+function ensureColumn(table, column, definition) {
+  const columns = db.prepare('PRAGMA table_info(' + table + ')').all().map((c) => c.name);
+  if (columns.includes(column)) return false;
+  db.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' ' + definition);
+  return true;
+}
+
+const ATTRIBUTION_COLUMNS = [
+  ['tasks', 'created_by', 'TEXT'],
+  ['tasks', 'last_actor', 'TEXT'],
+  ['tasks', 'last_at', 'TEXT'],
+  ['tasks', 'last_type', 'TEXT'],
+  ['tasks', 'last_seq', 'INTEGER'],
+  ['projects', 'created_by', 'TEXT'],
+  ['projects', 'last_actor', 'TEXT'],
+  ['projects', 'last_at', 'TEXT'],
+  ['projects', 'last_type', 'TEXT'],
+  ['projects', 'last_seq', 'INTEGER'],
+];
+const addedColumns = ATTRIBUTION_COLUMNS.filter(([table, column, definition]) => ensureColumn(table, column, definition));
+// Also when rows predate the columns: a database that gained them before this
+// backfill existed is in exactly the same position as one that has just gained them.
+const needsBackfill = addedColumns.length > 0
+  || Number(db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE last_seq IS NULL').get().n) > 0
+  || Number(db.prepare('SELECT COUNT(*) AS n FROM projects WHERE last_seq IS NULL').get().n) > 0;
+if (needsBackfill) {
+  if (addedColumns.length) log('migrated: added', addedColumns.map(([t, c]) => t + '.' + c).join(', '));
+  // And backfilled from the log, because the events were always there: a board that
+  // gained an attribution column on Tuesday must not read as though nothing happened
+  // before Tuesday.
+  db.exec(`UPDATE tasks SET
+             created_by = (SELECT actor FROM events e WHERE e.entity_kind = 'task' AND e.entity_id = tasks.id AND e.type = 'task.create' ORDER BY seq LIMIT 1),
+             last_actor = (SELECT actor FROM events e WHERE e.entity_kind = 'task' AND e.entity_id = tasks.id ORDER BY seq DESC LIMIT 1),
+             last_at    = (SELECT at    FROM events e WHERE e.entity_kind = 'task' AND e.entity_id = tasks.id ORDER BY seq DESC LIMIT 1),
+             last_type  = (SELECT type  FROM events e WHERE e.entity_kind = 'task' AND e.entity_id = tasks.id ORDER BY seq DESC LIMIT 1),
+             last_seq   = (SELECT seq   FROM events e WHERE e.entity_kind = 'task' AND e.entity_id = tasks.id ORDER BY seq DESC LIMIT 1)`);
+  db.exec(`UPDATE projects SET
+             created_by = (SELECT actor FROM events e WHERE e.entity_kind = 'project' AND e.entity_id = projects.id AND e.type = 'project.create' ORDER BY seq LIMIT 1),
+             last_actor = (SELECT actor FROM events e WHERE e.entity_kind = 'project' AND e.entity_id = projects.id ORDER BY seq DESC LIMIT 1),
+             last_at    = (SELECT at    FROM events e WHERE e.entity_kind = 'project' AND e.entity_id = projects.id ORDER BY seq DESC LIMIT 1),
+             last_type  = (SELECT type  FROM events e WHERE e.entity_kind = 'project' AND e.entity_id = projects.id ORDER BY seq DESC LIMIT 1),
+             last_seq   = (SELECT seq   FROM events e WHERE e.entity_kind = 'project' AND e.entity_id = projects.id ORDER BY seq DESC LIMIT 1)`);
+  log('migrated: attribution backfilled from the event log');
+}
+
 const headSeq = () => Number(db.prepare('SELECT COALESCE(MAX(seq), 0) AS s FROM events').get().s);
 const oldestSeq = () => Number(db.prepare('SELECT COALESCE(MIN(seq), 0) AS s FROM events').get().s);
 
@@ -154,10 +261,24 @@ function recordActor(actor) {
     .run(actor, kind, String(actor).split(':').slice(1).join(':'), now, now);
 }
 
-db.prepare(`INSERT INTO credentials (id, actor, kind, secret_hash, created_at, note) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO NOTHING`)
-  .run('cred_root', 'service:root', 'bearer', tokenHash, new Date().toISOString(),
-    'The token in <home>/token. Never handed to a browser.');
+function recordCredential(id, actor, kind, token, note) {
+  db.prepare(`INSERT INTO credentials (id, actor, kind, secret_hash, created_at, note) VALUES (?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET secret_hash = excluded.secret_hash, actor = excluded.actor, note = excluded.note`)
+    .run(id, actor, kind, createHash('sha256').update(token).digest('hex'), new Date().toISOString(), note);
+}
+
+recordCredential('cred_operator', 'human:minh', 'bearer', rootToken,
+  'The token in <home>/token. Never handed to a browser.');
+// Slice 2 called the operator's credential `cred_root` and filed it under the actor
+// `service:root`. One actor, one row: the stale one goes.
+db.prepare("DELETE FROM credentials WHERE id = 'cred_root'").run();
+// And every agent token on disk, so the table is the record of what exists even if a
+// file is deleted by hand.
+for (const [token, who] of credentialCache) {
+  if (who.actor === 'human:minh') continue;
+  recordCredential('cred_' + who.label, who.actor, 'bearer', token,
+    'The token in <home>/agents/' + who.label + '.token, created by POST /v1/agents.');
+}
 
 // ── Shapes ──────────────────────────────────────────────────────────────────
 // Rows in, records out: the cockpit's shapes, with unknown fields restored from
@@ -226,6 +347,69 @@ const readProject = (id) => {
 };
 const readRun = () => rowToRun(db.prepare('SELECT * FROM runs WHERE id = 1').get());
 
+// ── Restoring what an event kept ────────────────────────────────────────────
+// A delete event holds the whole record, which is what makes "deletes are
+// recoverable" true rather than aspirational. These put a record back exactly as it
+// was — same id, same createdAt, same unknown fields — with a revision ahead of the
+// one it had, so nothing is holding a stale `ifRev` that would now match by accident.
+
+function insertTaskRecord(record, rev) {
+  const known = new Set(TYPED_TASK_FIELDS);
+  const extra = {};
+  Object.keys(record).forEach((k) => { if (!known.has(k)) extra[k] = record[k]; });
+  db.prepare(`INSERT INTO tasks (id, name, note, project_id, status, weight, start_day, deadline_day, gantt_row, order_index, created_at, rev, extra_json)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(record.id, record.name || 'Untitled task', record.note || '', record.project || null,
+      STATUSES.includes(record.status) ? record.status : 'backlog', validWeight(record.weight) ? Number(record.weight) : 1,
+      isRealDay(record.start) ? record.start : today(), record.deadline ? record.deadline : null,
+      record.ganttRow === undefined ? null : record.ganttRow,
+      Number.isFinite(Number(record.order)) ? Math.round(Number(record.order)) : 0,
+      record.createdAt || new Date().toISOString(), rev, JSON.stringify(extra));
+}
+
+function insertProjectRecord(record, rev) {
+  const known = new Set(TYPED_PROJECT_FIELDS);
+  const extra = {};
+  Object.keys(record).forEach((k) => { if (!known.has(k)) extra[k] = record[k]; });
+  db.prepare('INSERT INTO projects (id, name, description, created_at, archived_at, rev, extra_json) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(record.id, record.name || 'Untitled project', record.description || '',
+      record.createdAt || new Date().toISOString(), record.archivedAt || null, rev, JSON.stringify(extra));
+}
+
+function insertRunRecord(record) {
+  db.prepare('INSERT INTO runs (id, locked_at, target, total, rev, extra_json) VALUES (1, ?, ?, ?, 1, ?)')
+    .run(record.lockedAt || new Date().toISOString(), record.target || '', Number(record.total) || 0, JSON.stringify({}));
+  const insert = db.prepare('INSERT INTO run_members (run_id, task_id, position, name, weight, duration, starts_at, ends_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?)');
+  (record.members || []).forEach((m, i) => insert.run(m.id, i, m.name || '', Number(m.weight) || 1, Number(m.duration) || 0, Number(m.startsAt) || 0, Number(m.endsAt) || 0));
+}
+
+/** Put fields back on a task the way task.patch does, but from the log, not a client. */
+function applyTaskPatch(id, patch) {
+  const column = { name: 'name', note: 'note', project: 'project_id', weight: 'weight', start: 'start_day', deadline: 'deadline_day', ganttRow: 'gantt_row' };
+  const sets = [];
+  const params = [];
+  Object.keys(patch).forEach((field) => {
+    if (!column[field]) return;
+    sets.push(column[field] + ' = ?');
+    params.push(field === 'project' ? (patch[field] || null) : field === 'deadline' ? (patch[field] || null) : patch[field]);
+  });
+  if (!sets.length) return;
+  sets.push('rev = rev + 1');
+  db.prepare('UPDATE tasks SET ' + sets.join(', ') + ' WHERE id = ?').run(...params, id);
+}
+
+/** Back to a column, in front of whatever now holds the order it had. */
+function moveTaskBack(id, toStatus, order) {
+  db.prepare('UPDATE tasks SET status = ?, rev = rev + 1 WHERE id = ?').run(toStatus, id);
+  const rest = db.prepare('SELECT id, order_index FROM tasks WHERE status = ? AND id <> ? ORDER BY order_index, rowid').all(toStatus, id);
+  const anchor = rest.find((row) => row.order_index >= Number(order || 0));
+  const ids = rest.map((row) => row.id);
+  const index = anchor ? ids.indexOf(anchor.id) : -1;
+  if (index < 0) ids.push(id); else ids.splice(index, 0, id);
+  const renumber = db.prepare('UPDATE tasks SET order_index = ? WHERE id = ?');
+  ids.forEach((taskId, i) => renumber.run(i, taskId));
+}
+
 const TYPED_TASK_FIELDS = ['name', 'note', 'project', 'status', 'weight', 'start', 'deadline', 'ganttRow', 'order', 'createdAt', 'rev'];
 const TYPED_PROJECT_FIELDS = ['name', 'description', 'createdAt', 'archivedAt', 'rev'];
 const STATUSES = ['backlog', 'running', 'finished'];
@@ -266,6 +450,7 @@ const MESSAGES = {
   RUN_TARGET_INVALID: (d) => '“' + d.target + '” is not an instant in the future, so there is no horizon to lock.',
   RUN_ALREADY_LOCKED: () => 'A run is already locked. Unlock it before locking another.',
   WRITE_FAILED: (d) => 'The service could not write that (' + d.reason + '). Nothing was changed.',
+  ACTOR_MISMATCH: (d) => 'That command claims to be ' + d.claimed + ', and this credential is ' + d.actual + '. Nothing was changed.',
 };
 
 function refuse(code, details) {
@@ -643,8 +828,302 @@ const COMMANDS = {
     };
   },
 
-  'proposal.accept'(payload, ctx) { return refuse('COMMAND_NOT_IMPLEMENTED', { type: 'proposal.accept', slice: 'later' }); },
-  'history.revert'(payload, ctx) { return refuse('COMMAND_NOT_IMPLEMENTED', { type: 'history.revert', slice: 'later' }); },
+  'proposal.accept'(payload, ctx) { return refuse('COMMAND_NOT_IMPLEMENTED', { type: 'proposal.accept', slice: 'the creator chose frictionless: there is no approval queue to accept into' }); },
+
+  /**
+   * Undo what an actor did in a window of time.
+   *
+   * This is the safety net, not a nicety. An agent writes directly and without asking,
+   * so the only things standing between a bad minute and a bad board are attribution
+   * (who did it) and this (take it back). It works from the EVENT LOG rather than from
+   * diffs computed now, because the log is the only place that remembers what the
+   * values were before.
+   *
+   * It refuses rather than stamps: if a field the agent changed has since been changed
+   * by somebody else, that entity is reported as a conflict and left alone. Reverting
+   * over a human's edit would destroy work the human can see, which is worse than not
+   * reverting at all. Deletes ARE recoverable — the delete event keeps the whole
+   * record, so the entity comes back with its id, its createdAt and its unknown fields.
+   */
+  'history.revert'(payload, ctx) {
+    const actor = typeof payload.actor === 'string' && payload.actor ? payload.actor : null;
+    if (!actor) return refuse('PAYLOAD_INVALID', { type: 'history.revert', missing: ['actor'] });
+    const until = payload.until ? new Date(payload.until) : new Date();
+    const since = payload.since ? new Date(payload.since) : new Date(until.getTime() - 3600 * 1000);
+    if (Number.isNaN(since.getTime()) || Number.isNaN(until.getTime())) {
+      return refuse('DATE_INVALID', { field: 'since/until', value: String(payload.since || payload.until) });
+    }
+    const dryRun = payload.dryRun === true;
+
+    const events = db.prepare(`SELECT * FROM events
+                               WHERE actor = ? AND at >= ? AND at <= ?
+                                 AND type NOT IN ('history.revert', 'migration.entity', 'migration.complete')
+                               ORDER BY seq DESC`).all(actor, since.toISOString(), until.toISOString())
+      .map(rowToEvent);
+
+    const plan = [];
+    const conflicts = [];
+    const conflicted = new Set();
+    const skipped = [];
+
+    /**
+     * Has anybody else touched this record since that event — and did they touch the
+     * same FIELD?
+     *
+     * This is the conflict test, and it is about ORDER rather than about values: an
+     * agent's change can be taken back only while nothing else has happened to that
+     * field afterwards. Compensations run newest-first, so undoing one change makes
+     * the change before it applicable again — which is why this is asked per EVENT
+     * and not once per record. Skipping a record after its newest event would quietly
+     * leave the agent's earlier edits to it in place, which is not what "revert what
+     * the agent did" means.
+     *
+     * It is field-aware on purpose: a human who renamed a task while the agent was
+     * changing its weight has not touched anything the compensation would overwrite,
+     * so refusing that would throw away a good undo. Pass `fields = null` when the
+     * whole record is at stake (deleting what the agent created) — then ANY foreign
+     * touch refuses, because what is about to disappear is not one field.
+     */
+    const foreignSince = (kind, id, seq, fields) => {
+      const rows = db.prepare(
+        `SELECT actor, type, seq, after_json FROM events
+         WHERE entity_kind = ? AND entity_id = ? AND seq > ? AND actor <> ?
+         ORDER BY seq`).all(kind, id, seq, actor);
+      if (!rows.length) return null;
+      if (!fields) return { ...rows[0], fields: null };
+      const wanted = new Set(fields);
+      for (const row of rows) {
+        let after = null;
+        try { after = row.after_json ? JSON.parse(row.after_json) : null; } catch { after = null; }
+        const touched = after && typeof after === 'object' ? Object.keys(after) : [];
+        // An event we cannot read is treated as touching everything: an undo that
+        // guesses here would be exactly the silent stamping this test exists to stop.
+        if (!touched.length) return { ...row, fields: null };
+        const overlap = touched.filter((k) => wanted.has(k));
+        if (overlap.length) return { ...row, fields: overlap };
+      }
+      return null;
+    };
+
+    /** Report a refusal once per record, however many of its events hit it. */
+    const conflict = (event, why, fields) => {
+      const key = event.entity.kind + ':' + event.entity.id;
+      if (conflicted.has(key)) {
+        skipped.push({ seq: event.seq, entity: key, why: 'an earlier change to this record is already refused' });
+        return;
+      }
+      conflicted.add(key);
+      const current = event.entity.kind === 'task' ? readTask(event.entity.id) : readProject(event.entity.id);
+      conflicts.push({ seq: event.seq, entity: key, name: current ? current.name : null, fields, why });
+    };
+
+    /**
+     * What the record will hold once the compensations planned so far are applied.
+     *
+     * The plan is built newest-first and applied newest-first, so an older change to
+     * a field is checked against the value the newer compensation is ABOUT to put
+     * back — not against the rows as they stand now. Two agent edits to the same
+     * field in a row are the normal case, not an edge case: without this, the older
+     * one looks like somebody else overwrote it and the undo stops halfway.
+     */
+    const planned = new Map();                    // 'task:id' -> {field: value} | null
+    const plannedOf = (kind, id) => planned.get(kind + ':' + id);
+    const planState = (kind, id, values) => {
+      if (values === null) { planned.set(kind + ':' + id, null); return; }
+      const key = kind + ':' + id;
+      const known = planned.get(key);
+      planned.set(key, { ...(known || (kind === 'task' ? readTask(id) : readProject(id)) || {}), ...values });
+    };
+
+    const fieldConflict = (kind, id, after) => {
+      const current = planned.has(kind + ':' + id) ? plannedOf(kind, id) : (kind === 'task' ? readTask(id) : readProject(id));
+      if (!current) return null;
+      const differing = Object.keys(after || {}).filter((key) => {
+        if (key === 'beforeTaskId') return false;
+        return current[key] !== after[key] && String(current[key] ?? '') !== String(after[key] ?? '');
+      });
+      return differing.length ? differing : null;
+    };
+
+    for (const event of events) {
+      const key = event.entity.kind + ':' + event.entity.id;
+
+      if (event.entity.kind === 'task') {
+        const id = event.entity.id;
+        const current = readTask(id);
+        if (event.type === 'task.create') {
+          if (!current) { skipped.push({ seq: event.seq, entity: key, why: 'already gone' }); continue; }
+          // No field list: taking back a creation removes the record, so anybody
+          // else's touch of it — of any field — is a reason to refuse.
+          const foreign = foreignSince('task', id, event.seq, null);
+          if (foreign) {
+            conflict(event, 'changed by ' + foreign.actor + ' (' + foreign.type + ', seq ' + foreign.seq + ') after the agent created it', foreign.fields);
+            continue;
+          }
+          plan.push({ seq: event.seq, type: event.type, kind: 'task', id, apply: () => { db.prepare('DELETE FROM tasks WHERE id = ?').run(id); }, before: current, after: null });
+          planState('task', id, null);
+          continue;
+        }
+        if (event.type === 'task.delete') {
+          if (current) { skipped.push({ seq: event.seq, entity: key, why: 'something with that id exists again' }); continue; }
+          const record = event.before;
+          if (!record) { skipped.push({ seq: event.seq, entity: key, why: 'the event did not keep the record' }); continue; }
+          plan.push({
+            seq: event.seq, type: event.type, kind: 'task', id,
+            apply: () => { insertTaskRecord(record, (Number(record.rev) || 1) + 1); },
+            before: null, after: record,
+          });
+          planState('task', id, record);
+          continue;
+        }
+        if (!current) { skipped.push({ seq: event.seq, entity: key, why: 'the task is gone' }); continue; }
+        // Only the fields THIS event wrote: a later edit to a field the agent never
+        // touched is somebody else's work in somebody else's place, and putting the
+        // agent's field back does not disturb it.
+        const foreign = foreignSince('task', id, event.seq, Object.keys(event.after || {}).filter((k) => k !== 'beforeTaskId'));
+        if (foreign) {
+          conflict(event, 'changed by ' + foreign.actor + ' (' + foreign.type + ', seq ' + foreign.seq + ') after this change', foreign.fields);
+          continue;
+        }
+        // Belt and braces: even with nobody else in the log, the field must still hold
+        // what the agent set it to. A mismatch here means the log and the rows
+        // disagree, which is worth refusing over rather than stamping through.
+        const clash = fieldConflict('task', id, event.after);
+        if (clash) {
+          conflict(event, 'the stored value is not the one the agent set', clash);
+          continue;
+        }
+        if (event.type === 'task.patch') {
+          const patch = {};
+          Object.keys(event.after || {}).forEach((field) => { if (event.before && field in event.before) patch[field] = event.before[field]; });
+          if (!Object.keys(patch).length) { skipped.push({ seq: event.seq, entity: key, why: 'nothing to put back' }); continue; }
+          plan.push({ seq: event.seq, type: event.type, kind: 'task', id, apply: () => { applyTaskPatch(id, patch); }, before: event.after, after: patch });
+          planState('task', id, patch);
+          continue;
+        }
+        if (event.type === 'task.move') {
+          const toStatus = event.before ? event.before.status : null;
+          if (!toStatus) { skipped.push({ seq: event.seq, entity: key, why: 'the event does not say where it was' }); continue; }
+          const order = event.before.order;
+          plan.push({
+            seq: event.seq, type: event.type, kind: 'task', id,
+            apply: () => { moveTaskBack(id, toStatus, order); },
+            before: { status: current.status, order: current.order }, after: { status: toStatus, order: order },
+          });
+          planState('task', id, { status: toStatus, order });
+          continue;
+        }
+        if (event.type === 'task.layout') {
+          const rows = [];
+          Object.keys(event.after || {}).forEach((taskId) => {
+            const task = readTask(taskId);
+            if (task && task.ganttRow === event.after[taskId]) rows.push({ taskId, ganttRow: event.before ? event.before[taskId] : null });
+          });
+          if (!rows.length) { skipped.push({ seq: event.seq, entity: key, why: 'the layout has moved on' }); continue; }
+          plan.push({ seq: event.seq, type: event.type, kind: 'board', id: 'timeline', apply: () => { rows.forEach((r) => db.prepare('UPDATE tasks SET gantt_row = ?, rev = rev + 1 WHERE id = ?').run(r.ganttRow, r.taskId)); }, before: event.after, after: rows });
+          rows.forEach((r) => planState('task', r.taskId, { ganttRow: r.ganttRow }));
+          continue;
+        }
+        skipped.push({ seq: event.seq, entity: key, why: 'no compensation for ' + event.type });
+        continue;
+      }
+
+      if (event.entity.kind === 'project') {
+        const id = event.entity.id;
+        const current = readProject(id);
+        if (event.type === 'project.create') {
+          if (!current) { skipped.push({ seq: event.seq, entity: key, why: 'already gone' }); continue; }
+          const foreign = foreignSince('project', id, event.seq, null);
+          if (foreign) { conflict(event, 'changed by ' + foreign.actor + ' (' + foreign.type + ', seq ' + foreign.seq + ') after the agent created it', foreign.fields); continue; }
+          const orphans = db.prepare('SELECT id FROM tasks WHERE project_id = ?').all(id).map((r) => r.id);
+          plan.push({ seq: event.seq, type: event.type, kind: 'project', id, apply: () => { db.prepare('UPDATE tasks SET project_id = NULL WHERE project_id = ?').run(id); db.prepare('DELETE FROM projects WHERE id = ?').run(id); }, before: current, after: null, orphans });
+          planState('project', id, null);
+          continue;
+        }
+        if (event.type === 'project.delete') {
+          if (current) { skipped.push({ seq: event.seq, entity: key, why: 'something with that id exists again' }); continue; }
+          const record = event.before;
+          if (!record) { skipped.push({ seq: event.seq, entity: key, why: 'the event did not keep the record' }); continue; }
+          const orphans = (event.extra && event.extra.orphanedTaskIds) || [];
+          plan.push({
+            seq: event.seq, type: event.type, kind: 'project', id,
+            apply: () => {
+              insertProjectRecord(record, (Number(record.rev) || 1) + 1);
+              orphans.forEach((taskId) => { if (readTask(taskId)) db.prepare('UPDATE tasks SET project_id = ?, rev = rev + 1 WHERE id = ?').run(id, taskId); });
+            },
+            before: null, after: record, orphans,
+          });
+          planState('project', id, record);
+          continue;
+        }
+        if (!current) { skipped.push({ seq: event.seq, entity: key, why: 'the project is gone' }); continue; }
+        if (event.type === 'project.archive' || event.type === 'project.restore') {
+          const foreign = foreignSince('project', id, event.seq, ['archivedAt']);
+          if (foreign) { conflict(event, 'changed by ' + foreign.actor + ' (' + foreign.type + ', seq ' + foreign.seq + ') after this change', foreign.fields); continue; }
+          const was = event.before ? event.before.archivedAt : null;
+          plan.push({ seq: event.seq, type: event.type, kind: 'project', id, apply: () => { db.prepare('UPDATE projects SET archived_at = ?, rev = rev + 1 WHERE id = ?').run(was, id); }, before: { archivedAt: current.archivedAt }, after: { archivedAt: was } });
+          planState('project', id, { archivedAt: was });
+          continue;
+        }
+        skipped.push({ seq: event.seq, entity: key, why: 'no compensation for ' + event.type });
+        continue;
+      }
+
+      if (event.entity.kind === 'run') {
+        const run = readRun();
+        if (event.type === 'run.lock') {
+          if (!run) { skipped.push({ seq: event.seq, entity: key, why: 'the run is already over' }); continue; }
+          plan.push({ seq: event.seq, type: event.type, kind: 'run', id: 'run', apply: () => { db.prepare('DELETE FROM runs WHERE id = 1').run(); }, before: { lockedAt: run.lockedAt }, after: null });
+          continue;
+        }
+        if (event.type === 'run.unlock') {
+          const record = event.before;
+          if (!record || run) { skipped.push({ seq: event.seq, entity: key, why: run ? 'a run is locked again' : 'the event did not keep the plan' }); continue; }
+          plan.push({ seq: event.seq, type: event.type, kind: 'run', id: 'run', apply: () => { insertRunRecord(record); }, before: null, after: { lockedAt: record.lockedAt, memberIds: (record.members || []).map((m) => m.id) } });
+          continue;
+        }
+        skipped.push({ seq: event.seq, entity: key, why: 'no compensation for ' + event.type });
+        continue;
+      }
+
+      skipped.push({ seq: event.seq, entity: key, why: 'no compensation for ' + event.type });
+    }
+
+    const report = {
+      actor, since: since.toISOString(), until: until.toISOString(),
+      considered: events.length,
+      willRevert: plan.map((p) => ({ seq: p.seq, type: p.type, entity: p.kind + ':' + p.id })),
+      conflicts, skipped,
+    };
+    if (dryRun) {
+      return { ok: true, entity: { kind: 'board', id: 'history' }, dryRun: true, value: report, apply: () => ({ value: report, before: null, after: null, changed: false }) };
+    }
+    if (plan.length === 0) {
+      return { ok: true, entity: { kind: 'board', id: 'history' }, value: () => report, apply: () => ({ value: report, before: null, after: null, changed: false }) };
+    }
+    return {
+      ok: true,
+      entity: { kind: 'board', id: 'history' },
+      value: () => report,
+      apply() {
+        const reverted = [];
+        plan.forEach((item) => {
+          item.apply();
+          reverted.push({ seq: item.seq, type: item.type, entity: item.kind + ':' + item.id });
+        });
+        report.reverted = reverted;
+        return {
+          value: report,
+          // The revert is itself an event, so the log says who undid what and when —
+          // and the reverted entity is named in `after` so attribution can be updated.
+          before: { events: plan.map((p) => p.seq) },
+          after: { reverted },
+          extra: { actor, since: report.since, until: report.until, conflicts: conflicts.length },
+          attributes: reverted.map((r) => { const [kind, id] = r.entity.split(':'); return { kind, id }; }),
+        };
+      },
+    };
+  },
 };
 
 /**
@@ -652,15 +1131,27 @@ const COMMANDS = {
  * are written together or not at all: there is no window in which a change exists
  * without a record of who made it.
  */
-function runCommand(envelope) {
+function runCommand(envelope, who) {
   const env = envelope && typeof envelope === 'object' ? envelope : {};
   const type = String(env.type || '');
   const handler = COMMANDS[type];
   if (!handler) return { ...refuse('COMMAND_UNKNOWN', { type }), commandId: env.commandId || null };
   const payload = env.payload && typeof env.payload === 'object' ? env.payload : {};
   const commandId = typeof env.commandId === 'string' && env.commandId ? env.commandId : newId('cmd');
-  const actor = env.actor || 'human:minh';
-  const client = env.client || 'unknown';
+
+  // WHO YOU ARE COMES FROM THE CREDENTIAL, NOT FROM THE ENVELOPE.
+  //
+  // A request body is a claim; a token is evidence. When the two disagree the command
+  // is refused rather than quietly recorded under either name: an event log whose
+  // actor can be set by whoever is calling proves nothing, and in a frictionless
+  // system that log is the entire safety net.
+  if (env.actor && env.actor !== who.actor) {
+    return { ...refuse('ACTOR_MISMATCH', { claimed: env.actor, actual: who.actor }), commandId };
+  }
+  const actor = who.actor;
+  // A cockpit names its own window (`cockpit#window`); an agent is named by the
+  // credential it holds.
+  const client = who.kind === 'session' ? (env.client || who.client) : who.client;
   const print = fingerprint(type, payload);
 
   const seen = db.prepare('SELECT * FROM commands WHERE command_id = ?').get(commandId);
@@ -700,6 +1191,18 @@ function runCommand(envelope) {
           applied.before === undefined || applied.before === null ? null : jsonOf(applied.before),
           applied.after === undefined || applied.after === null ? null : jsonOf(applied.after),
           applied.extra ? jsonOf(applied.extra) : null);
+      // Who did it, on the record itself, in the same transaction as the change.
+      attributionUpdate(entity.kind, entity.id, actor, at, type, seq, Boolean(checked.created));
+      // A command with collateral effects names them, and they are attributed too —
+      // otherwise a task orphaned by a project delete would look untouched by it.
+      (applied.extra && applied.extra.orphanedTaskIds ? applied.extra.orphanedTaskIds : []).forEach((id) => {
+        attributionUpdate('task', id, actor, at, type, seq, false);
+      });
+      // A compensation names every record it put back, because a revert is a change
+      // like any other and the board must be able to say who did it.
+      (applied.attributes || []).forEach((target) => {
+        attributionUpdate(target.kind, target.id, actor, at, type, seq, false);
+      });
     }
     const value = applied.value;
     if (!changed) {
@@ -945,6 +1448,40 @@ function importLegacy({ origin, bytes, client }) {
   }
 }
 
+/**
+ * Who made this, and when. Derived columns maintained inside the command
+ * transaction rather than computed by scanning the log on every snapshot — the diff
+ * the reader sees must not be a guess, and it must survive a restart.
+ */
+function attributionUpdate(kind, id, actor, at, type, seq, isCreate) {
+  const table = kind === 'task' ? 'tasks' : kind === 'project' ? 'projects' : null;
+  if (!table) return;
+  if (isCreate) {
+    db.prepare('UPDATE ' + table + ' SET created_by = ?, last_actor = ?, last_at = ?, last_type = ?, last_seq = ? WHERE id = ?')
+      .run(actor, actor, at, type, seq, id);
+  } else {
+    db.prepare('UPDATE ' + table + ' SET last_actor = ?, last_at = ?, last_type = ?, last_seq = ? WHERE id = ?')
+      .run(actor, at, type, seq, id);
+  }
+}
+
+function attributionMap() {
+  const map = {};
+  db.prepare('SELECT id, created_by, last_actor, last_at, last_type, last_seq FROM tasks').all().forEach((row) => {
+    map['task:' + row.id] = {
+      createdBy: row.created_by || null, lastActor: row.last_actor || null,
+      lastAt: row.last_at || null, lastType: row.last_type || null, lastSeq: row.last_seq || null,
+    };
+  });
+  db.prepare('SELECT id, created_by, last_actor, last_at, last_type, last_seq FROM projects').all().forEach((row) => {
+    map['project:' + row.id] = {
+      createdBy: row.created_by || null, lastActor: row.last_actor || null,
+      lastAt: row.last_at || null, lastType: row.last_type || null, lastSeq: row.last_seq || null,
+    };
+  });
+  return map;
+}
+
 function snapshot() {
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -954,6 +1491,9 @@ function snapshot() {
       projects: db.prepare('SELECT * FROM projects ORDER BY name COLLATE NOCASE').all().map(rowToProject),
       tasks: db.prepare('SELECT * FROM tasks ORDER BY order_index, rowid').all().map(rowToTask),
       run: readRun(),
+      // Who touched what, kept beside the records rather than inside them: an entity
+      // is what the creator wrote, and provenance is a fact ABOUT it.
+      attribution: attributionMap(),
     },
   };
 }
@@ -1000,8 +1540,23 @@ function cookieOf(req, name) {
 
 function authorised(req, url) {
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  if (bearer && bearer.length === rootToken.length && timingSafeEqual(Buffer.from(bearer), Buffer.from(rootToken))) return { actor: 'human:minh', client: 'bearer' };
-  if (validSession(cookieOf(req, 'proxima_session'))) return { actor: 'human:minh', client: cookieOf(req, 'proxima_client') || 'cockpit' };
+  if (bearer) {
+    const who = actorForToken(bearer);
+    if (who) {
+      db.prepare('UPDATE credentials SET last_used_at = ? WHERE id = ?')
+        .run(new Date().toISOString(), who.actor === 'human:minh' ? 'cred_operator' : 'cred_' + who.label);
+      return {
+        actor: who.actor,
+        kind: 'bearer',
+        client: who.actor === 'human:minh' ? 'cli' : 'agent:' + who.label,
+      };
+    }
+  }
+  if (validSession(cookieOf(req, 'proxima_session'))) {
+    // The cockpit holds no token at all: its identity is the session, and it is
+    // always the human at this machine.
+    return { actor: 'human:minh', kind: 'session', client: cookieOf(req, 'proxima_client') || 'cockpit' };
+  }
   return null;
 }
 
@@ -1137,7 +1692,7 @@ const server = createServer(async (req, res) => {
       const raw = await readBody(req);
       let envelope;
       try { envelope = JSON.parse(raw || '{}'); } catch { return send(res, 400, { ...refuse('PAYLOAD_INVALID', { type: 'command', missing: ['a JSON body'] }) }); }
-      const result = runCommand(envelope);
+      const result = runCommand(envelope, who);
       // One event, broadcast once: a command that changed nothing has no event, and
       // a replay must not re-broadcast a change that already happened.
       if (result.ok && result.event) broadcast(result.event);
@@ -1168,6 +1723,65 @@ const server = createServer(async (req, res) => {
       const heartbeat = setInterval(() => { try { res.write(': keep-alive\n\n'); } catch { /* closing */ } }, 20000);
       req.on('close', () => { clearInterval(heartbeat); streams.delete(res); });
       return undefined;
+    }
+
+    if (url.pathname === '/v1/agents') {
+      if (req.method === 'GET') {
+        return send(res, 200, {
+          ok: true,
+          agents: db.prepare("SELECT id, actor, kind, created_at, last_used_at, note FROM credentials WHERE kind = 'bearer' ORDER BY actor").all()
+            .map((c) => ({ actor: c.actor, credential: c.id, createdAt: c.created_at, lastUsedAt: c.last_used_at, note: c.note }))
+            .filter((c) => c.actor !== 'human:minh'),
+          operator: TOKEN_PATH,
+        });
+      }
+      if (req.method === 'POST') {
+        // Only the operator may mint an agent, and only through this door: it is the
+        // one place a token is written, so the credentials table and the file on disk
+        // cannot drift apart.
+        if (!who || who.actor !== 'human:minh') {
+          return send(res, 403, { ok: false, code: 'OPERATOR_ONLY', message: 'Only the operator token may create an agent credential.' });
+        }
+        const raw = await readBody(req);
+        let body;
+        try { body = JSON.parse(raw || '{}'); } catch { return send(res, 400, { ...refuse('PAYLOAD_INVALID', { type: 'agent', missing: ['a JSON body'] }) }); }
+        const name = String(body.name || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
+        if (!name) return send(res, 400, { ...refuse('NAME_REQUIRED', {}) });
+        const path = join(AGENTS_DIR, name + '.token');
+        const token = existsSync(path) ? readTokenFile(path) : randomBytes(32).toString('hex');
+        writeTokenFile(path, token);
+        recordCredential('cred_' + name, 'agent:' + name, 'bearer', token,
+          'The token in <home>/agents/' + name + '.token, created by POST /v1/agents.');
+        recordActor('agent:' + name);
+        loadCredentials();
+        return send(res, 200, {
+          ok: true, actor: 'agent:' + name, tokenFile: path, token: token, existed: existsSync(path),
+          message: 'Agent “' + name + '” can now write as agent:' + name + '. Its token is in ' + path + ' — read it from disk, do not pass it on a command line.',
+        });
+      }
+      return send(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED' });
+    }
+
+    if (url.pathname === '/v1/log' && req.method === 'GET') {
+      // The read side of the log, for a cockpit that wants a diff of what moved while
+      // it was not looking. SSE is for staying current; this is for catching up.
+      //
+      // Two ways to bound it, because they answer different questions: `after` is a
+      // watermark ("everything since the last thing I read") and `since` is a time
+      // ("what an agent did in the last hour"). The undo control asks the second one,
+      // and asking it with a sequence number would mean guessing at a mapping between
+      // sequences and clock time that only the log itself knows.
+      const after = Number(url.searchParams.get('after') || 0);
+      const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') || 100)));
+      const actor = url.searchParams.get('actor');
+      const since = url.searchParams.get('since');
+      const clauses = ['seq > ?'];
+      const params = [after];
+      if (since) { clauses.push('at >= ?'); params.push(since); }
+      if (actor) { clauses.push('actor = ?'); params.push(actor); }
+      const rows = db.prepare('SELECT * FROM events WHERE ' + clauses.join(' AND ') + ' ORDER BY seq LIMIT ?')
+        .all(...params, limit);
+      return send(res, 200, { ok: true, after, since: since || null, headSeq: headSeq(), events: rows.map(rowToEvent) });
     }
 
     if (url.pathname === '/v1/imports' && req.method === 'GET') {

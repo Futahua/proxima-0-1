@@ -69,6 +69,21 @@ main { padding: 16px; max-width: 1200px; }
 .eyebrow { margin: 0; font-size: 11px; letter-spacing: .08em; color: var(--dim); }
 .boardhead h1 { margin: 2px 0 4px; font-size: 22px; }
 .sub { margin: 0; color: var(--dim); font-size: 13px; }
+
+/* What moved since the reader last looked. One line, on the board, quiet by
+   default — the count is the loud part and the agent's name is the handle that
+   offers to take its work back. */
+.activity { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 14px;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel-2); font-size: 12px; color: var(--dim); }
+.activity-lead { color: var(--ink); font-weight: 600; }
+.activity-actor { color: var(--dim); }
+.activity-agent { background: transparent; border: 1px solid var(--line); color: var(--accent);
+  border-radius: 999px; padding: 2px 10px; font-size: 12px; cursor: pointer; }
+.activity-agent:hover { border-color: var(--accent); }
+.activity-seen { margin-left: auto; background: transparent; border: none; color: var(--dim);
+  font-size: 12px; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.activity-seen:hover { color: var(--ink); }
 .counts { margin-left: auto; display: flex; align-items: center; gap: 14px; color: var(--dim); }
 
 .runbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; font-size: 13px; }
@@ -149,6 +164,11 @@ main { padding: 16px; max-width: 1200px; }
 .card h4 { margin: 4px 0 6px; font-size: 15px; text-transform: uppercase; letter-spacing: .02em; }
 .card p { margin: 0 0 8px; font-size: 13px; color: var(--dim); }
 .card .alloc { font-weight: 700; font-size: 13px; }
+/* A card an agent has touched says so where the reader is already looking. Small,
+   above the note, and never a second badge per change: the card has one
+   most-recent author and this names it. */
+.card .agentmark { margin: -2px 0 6px; font-size: 11px; color: var(--accent); letter-spacing: .02em; }
+.card .agentmark.made { color: var(--dim); }
 .card footer { display: flex; justify-content: space-between; font-size: 11px;
   color: var(--dim); border-top: 1px solid var(--line); padding-top: 8px; margin-top: auto; }
 /* A floor-height card has no room for the footer; it fades instead of spilling. */

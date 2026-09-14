@@ -161,6 +161,24 @@ const Store = (() => {
   const clientLabel = () => Cockpit.clientId + '#' + PAGE_ID;
 
   let board = { projects: [], tasks: [], run: null };
+  // Who touched what. Kept BESIDE the records rather than inside them — an entity is
+  // what the creator wrote, and provenance is a fact about it. Keyed `task:<id>` and
+  // `project:<id>`, exactly as the service sends it.
+  let attribution = {};
+  /**
+   * What moved since this reader last looked.
+   *
+   * An agent writes directly here, with no approval step, so the reader's first need
+   * is not a notification — it is a diff. `seenSeq` is the watermark this window last
+   * acknowledged; `recent` is every event after it, newest last. It is not a queue and
+   * nothing is delivered: it is a list that gets shorter when the reader says so.
+   */
+  const SEEN_KEY = 'proxima.seen.v1';
+  let seenSeq = 0;
+  let recent = [];
+  /** How far back the undo reaches. One number, used by the label and by the call. */
+  const UNDO_WINDOW_MS = 3600 * 1000;
+  let agentHour = [];
   let headSeq = 0;
   let schemaVersion = SCHEMA_VERSION;
   let instanceId = null;
@@ -197,7 +215,7 @@ const Store = (() => {
   function writeCache() {
     try {
       localStorage.setItem(CACHE_KEY, JSON.stringify({
-        at: new Date().toISOString(), headSeq, schemaVersion, instanceId, board,
+        at: new Date().toISOString(), headSeq, schemaVersion, instanceId, board, attribution,
       }));
       return true;
     } catch {
@@ -213,10 +231,38 @@ const Store = (() => {
       tasks: Array.isArray(cache.board.tasks) ? cache.board.tasks : [],
       run: cache.board.run || null,
     };
+    attribution = cache.attribution && typeof cache.attribution === 'object' ? cache.attribution : {};
     headSeq = Number(cache.headSeq) || 0;
     cachedAt = cache.at || null;
     instanceId = cache.instanceId || null;
     return true;
+  }
+
+  function readSeen() {
+    try { return Number(localStorage.getItem(SEEN_KEY)) || 0; } catch { return 0; }
+  }
+
+  function writeSeen() {
+    try { localStorage.setItem(SEEN_KEY, String(seenSeq)); } catch { /* a watermark that cannot be written is not a failure */ }
+  }
+
+  /**
+   * Record one event as something that moved.
+   *
+   * Capped: this is a diff of a session, not an archive. The log itself is the
+   * archive, and an agent that made ten thousand changes is a story for the log
+   * rather than a line on a page.
+   */
+  function noteEvent(event) {
+    if (!event || !Number.isFinite(Number(event.seq))) return;
+    if (Number(event.seq) <= seenSeq) return;
+    if (recent.some((e) => e.seq === event.seq)) return;
+    // Reverts are excluded for the same reason the service excludes them: undoing
+    // the agent's work is not more agent work, and counting it would make the line
+    // grow every time somebody used it.
+    if (String(event.type || '').startsWith('history.revert') || String(event.type || '').startsWith('migration.')) return;
+    recent.push(event);
+    if (recent.length > 200) recent = recent.slice(-200);
   }
 
   function setStatus(next, why) {
@@ -310,6 +356,7 @@ const Store = (() => {
       tasks: Array.isArray(body.board.tasks) ? body.board.tasks : [],
       run: body.board.run || null,
     };
+    attribution = body.board.attribution && typeof body.board.attribution === 'object' ? body.board.attribution : {};
     headSeq = Number(body.headSeq) || 0;
     schemaVersion = Number(body.schemaVersion) || SCHEMA_VERSION;
     instanceId = body.instanceId || instanceId;
@@ -336,7 +383,12 @@ const Store = (() => {
     source.onmessage = (event) => {
       let parsed = null;
       try { parsed = JSON.parse(event.data); } catch { return; }
-      if (!parsed || parsed.client === clientLabel()) return; // our own change, already applied
+      if (!parsed) return;
+      // Recorded BEFORE the own-change test, because the diff is about what moved on
+      // the board, not about who moved it: this window's own change is still a change
+      // the reader will want to see named next to the agent's.
+      noteEvent(parsed);
+      if (parsed.client === clientLabel()) { changed(); return; } // our own change, already applied
       scheduleRefresh();
     };
     source.onerror = () => {
@@ -395,6 +447,34 @@ const Store = (() => {
     }, 30);
   }
 
+  /**
+   * Read what happened while this window was not looking.
+   *
+   * SSE keeps a running cockpit current; it cannot say what it missed, because it
+   * was not connected. This is the read side of that: everything after the watermark
+   * the reader last acknowledged, straight out of the log.
+   */
+  async function catchUp() {
+    const result = await authed('GET', '/log?after=' + Math.max(0, seenSeq) + '&limit=200');
+    if (result.status !== 200 || !result.body || !Array.isArray(result.body.events)) return;
+    recent = [];
+    result.body.events.forEach(noteEvent);
+  }
+
+  /**
+   * What agents have done in the last hour, regardless of what the reader has already
+   * acknowledged.
+   *
+   * The diff empties when the reader says they have looked; the undo must not empty
+   * with it. This is the other question — "is there anything of an agent's in the
+   * window an undo would cover?" — asked of the log directly.
+   */
+  async function refreshAgentHour() {
+    const since = new Date(Date.now() - UNDO_WINDOW_MS).toISOString();
+    const result = await authed('GET', '/log?since=' + encodeURIComponent(since) + '&limit=200');
+    agentHour = result.status === 200 && result.body && Array.isArray(result.body.events) ? result.body.events : [];
+  }
+
   // ── Applying our own command results ──────────────────────────────────────
   // The fast path: our own change is already known, so it is applied without a
   // round trip. Anything else arrives as an event and goes through a refresh.
@@ -405,8 +485,39 @@ const Store = (() => {
     board.tasks.sort((a, b) => a.order - b.order);
   }
 
+  /**
+   * Who touched this, according to the event that just landed.
+   *
+   * Our own change is not re-fetched — the stream skips it — so without this the
+   * marker on a card would still name the agent after the reader edited the card
+   * themselves, which is the one thing attribution must never do.
+   */
+  function noteAttribution(event) {
+    if (!event || !event.entity) return;
+    const kind = event.entity.kind;
+    if (kind !== 'task' && kind !== 'project') return;
+    const key = kind + ':' + event.entity.id;
+    const previous = attribution[key] || {};
+    attribution[key] = {
+      createdBy: previous.createdBy || (event.type === kind + '.create' ? event.actor : null),
+      lastActor: event.actor || previous.lastActor || null,
+      lastAt: event.at || previous.lastAt || null,
+      lastType: event.type || previous.lastType || null,
+      lastSeq: event.seq ?? previous.lastSeq ?? null,
+    };
+  }
+
+  /**
+   * Apply our own command's result locally, without a round trip.
+   *
+   * Returns false when this command's effect is not one the cockpit can reproduce
+   * from its payload and the returned value alone — a revert touches records the
+   * command never names. The caller then re-reads instead of guessing, because a
+   * board that is subtly out of date is worse than one that is briefly late.
+   */
   function applyOwn(type, payload, result) {
     const value = result.value;
+    if (result.event) noteAttribution(result.event);
     if (type === 'task.create' || type === 'task.patch' || type === 'task.move') {
       if (value && value.id) upsertTask(value);
     } else if (type === 'task.delete') {
@@ -433,9 +544,12 @@ const Store = (() => {
       board.run = value && value.members ? value : board.run;
     } else if (type === 'run.unlock') {
       board.run = null;
+    } else {
+      return false;
     }
     headSeq = Math.max(headSeq, Number(result.seq) || 0);
     writeCache();
+    return true;
   }
 
   // ── The command boundary ──────────────────────────────────────────────────
@@ -492,8 +606,13 @@ const Store = (() => {
     const body = result.body || {};
     if (body.ok) {
       setStatus('online', '');
-      if (body.changed !== false) applyOwn(String(env.type || ''), payload, body);
-      else writeCache();
+      if (body.changed !== false) {
+        // A command the cockpit cannot replay locally (a revert, which touches
+        // records the command never named) is re-read rather than guessed at.
+        if (!applyOwn(String(env.type || ''), payload, body)) await refresh();
+      } else {
+        writeCache();
+      }
       changed();
       return body;
     }
@@ -544,11 +663,18 @@ const Store = (() => {
      */
     async bootstrap() {
       loadCache();
+      seenSeq = readSeen();
       if (cachedAt) setStatus('connecting', 'showing a cached copy while the service is contacted');
       changed();
       try {
         await establishSession();
         await refresh();
+        // A window that has never looked has nothing to catch up ON: "54 changes
+        // since you last looked" is not a diff, it is the whole history of the
+        // board, and a first visit that opens with it teaches the reader to ignore
+        // the line. The watermark starts at the board as it is.
+        if (seenSeq) await catchUp(); else { seenSeq = headSeq; writeSeen(); }
+        await refreshAgentHour();
         subscribe();
         setStatus('online', '');
         // How this cockpit looks, if the service remembers — a wiped browser profile
@@ -605,6 +731,81 @@ const Store = (() => {
     tasks: () => board.tasks.slice(),
     task: (taskId) => board.tasks.find((t) => t.id === taskId) ?? null,
     run: () => (board.run ? { ...board.run, members: board.run.members ? board.run.members.map((m) => ({ ...m })) : null } : null),
+
+    // ── Who touched what ─────────────────────────────────────────────────────
+    attributionFor: (kind, id) => {
+      const entry = attribution[kind + ':' + id];
+      return entry ? { ...entry } : null;
+    },
+
+    /**
+     * The diff since the reader last looked: what moved, how much of it each actor
+     * did, and the moment the window starts from.
+     *
+     * `byActor` is ordered by how much each actor moved, so an agent that has been
+     * busy is not buried under a long tail of one-line edits. `since` is returned
+     * because an undo has to name the window it covers, and the reader should be
+     * looking at the same window the undo will use.
+     *
+     * `agentsLastHour` is the undo's own question, kept separate because the two
+     * windows end at different moments: the diff starts when the reader last looked,
+     * and the undo covers a fixed hour back from now.
+     */
+    activity: () => {
+      const group = (events) => {
+        const byActor = {};
+        let oldest = null;
+        events.forEach((event) => {
+          const who = event.actor || 'unknown';
+          if (!byActor[who]) byActor[who] = { actor: who, count: 0, lastAt: event.at || null, types: {} };
+          byActor[who].count += 1;
+          byActor[who].lastAt = event.at || byActor[who].lastAt;
+          byActor[who].types[event.type] = (byActor[who].types[event.type] || 0) + 1;
+          if (!oldest || event.at < oldest) oldest = event.at;
+        });
+        return { actors: Object.values(byActor).sort((a, b) => b.count - a.count), oldest };
+      };
+      const diff = group(recent);
+      const hour = group(agentHour.filter((e) => String(e.actor || '').startsWith('agent:')));
+      return {
+        total: recent.length,
+        agents: diff.actors.filter((a) => a.actor.startsWith('agent:')),
+        humans: diff.actors.filter((a) => !a.actor.startsWith('agent:')),
+        since: diff.oldest,
+        agentsLastHour: hour.actors,
+        hourStart: new Date(Date.now() - UNDO_WINDOW_MS).toISOString(),
+        undoWindowMs: UNDO_WINDOW_MS,
+        seenSeq: seenSeq,
+        headSeq: headSeq,
+      };
+    },
+
+    /** The reader has looked: the diff starts again from here. */
+    markSeen() {
+      seenSeq = headSeq;
+      recent = [];
+      writeSeen();
+      changed();
+    },
+
+    /**
+     * Take back what one actor did in a window.
+     *
+     * `since` is passed in rather than derived so that a dry run and the real thing
+     * cover the SAME window — two calls that each computed "the last hour" would
+     * drift apart by however long the reader spent reading the confirmation, and the
+     * confirmation would then be a description of a different undo.
+     */
+    revert: (actor, since, dryRun) => command({
+      type: 'history.revert',
+      payload: { actor: actor, since: since, dryRun: Boolean(dryRun) },
+      commandId: 'cmd_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+    }).then(async (result) => {
+      // A revert changes what is left in the hour, so the answer to "is there
+      // anything of an agent's in the window" is stale the moment one lands.
+      if (result && result.ok && !dryRun) await refreshAgentHour();
+      return result;
+    }),
 
     // ── Writes: one command, one envelope, one result shape ──────────────────
     command: command,

@@ -652,6 +652,39 @@
     return group;
   }
 
+  /** `agent:scout` -> `scout`. Anything else is not an agent and gets no marker. */
+  function agentName(actor) {
+    return typeof actor === 'string' && actor.startsWith('agent:') ? actor.slice('agent:'.length) : null;
+  }
+
+  /**
+   * The mark a card carries when an agent has touched it.
+   *
+   * Agents write here directly, with no approval step, so the board itself has to
+   * answer "did a person or an agent do this" — a reader should never have to open a
+   * log to notice that a card changed under them. It names the agent and says which
+   * act it was, and it is one short line rather than a chip per change: the card is
+   * the record, and the record has one most-recent author.
+   */
+  function agentMarkFor(kind, id) {
+    const who = Store.attributionFor(kind, id);
+    if (!who) return null;
+    const last = agentName(who.lastActor);
+    const made = agentName(who.createdBy);
+    if (!last && !made) return null;
+    const mark = document.createElement('p');
+    mark.className = 'agentmark';
+    const name = last || made;
+    mark.textContent = '◆ ' + (last ? name + ' changed this' : name + ' made this');
+    const when = who.lastAt ? ' ' + ageLabel(who.lastAt, Date.now()) : '';
+    mark.title = (last
+      ? 'Last change by agent:' + last + ' — ' + (who.lastType || 'change') + when + '.'
+      : 'Made by agent:' + made + '. Last changed by ' + (who.lastActor || 'somebody') + when + '.') +
+      ' Reverting it is offered on the activity line above the board.';
+    if (!last) mark.classList.add('made');
+    return mark;
+  }
+
   function cardFor(task, allocatedMs, run, from, allocation) {
     const card = document.createElement('article');
     card.className = 'card ' + task.status;
@@ -686,6 +719,9 @@
     const title = document.createElement('h4');
     title.textContent = task.name;
     body.append(title);
+
+    const agentMark = agentMarkFor('task', task.id);
+    if (agentMark) body.append(agentMark);
 
     if (task.note) {
       const note = document.createElement('p');
@@ -2607,6 +2643,9 @@
     const board = surface === 'daily' || surface === 'project';
     ['#boardHead', '#runbar', '#columns', '#timekeeping']
       .forEach((sel) => { $(sel).hidden = !board; });
+    // The activity line belongs to the board and nowhere else: it is a diff of the
+    // tasks and projects, and the Hub is not the place either of those is read.
+    if (!board) $('#activityLine').hidden = true;
     $('#projectsHub').hidden = surface !== 'hub';
     $('#schedule').hidden = surface !== 'schedule';
     $('#routeMissing').hidden = surface !== 'missing';
@@ -2656,6 +2695,143 @@
   }
 
   /**
+   * The diff of what moved, and the way back from it.
+   *
+   * Two things are being said on one quiet line. First: what changed since the reader
+   * last looked, counted per actor, because an agent writes here without asking and
+   * the reader's question is "what did it do", not "is there a message for me".
+   * Second: an agent named on this line is a handle — clicking it offers to take that
+   * agent's last hour back. The undo lives here rather than in a menu because this is
+   * the only place the app knows an agent has been working.
+   *
+   * It says nothing at all when nothing moved and no agent has been active: an empty
+   * strip that says "no changes" is a notification centre with nothing to notify.
+   */
+  function renderActivity() {
+    const line = $('#activityLine');
+    if (!line) return;
+    const summary = Store.activity();
+    line.textContent = '';
+
+    // The line shows if there is a diff to read OR something of an agent's inside
+    // the window an undo would cover. The second case is what keeps the undo
+    // reachable after the reader has acknowledged everything.
+    const named = new Map();
+    summary.agents.forEach((entry) => named.set(entry.actor, { actor: entry.actor, count: entry.count, hour: 0 }));
+    summary.agentsLastHour.forEach((entry) => {
+      if (named.has(entry.actor)) named.get(entry.actor).hour = entry.count;
+      else named.set(entry.actor, { actor: entry.actor, count: 0, hour: entry.count });
+    });
+    if (!summary.total && named.size === 0) { line.hidden = true; return; }
+    line.hidden = false;
+
+    const lead = document.createElement('span');
+    lead.className = 'activity-lead';
+    if (summary.total) {
+      lead.textContent = (summary.total === 1 ? '1 change' : summary.total + ' changes') + ' since you last looked';
+    } else {
+      lead.textContent = 'Nothing new since you last looked';
+    }
+    line.append(lead);
+
+    // Every actor is counted the same way, agent or not: the diff is about what
+    // moved, and a line that only counted the agents would be a line about agents.
+    summary.agents.concat(summary.humans).forEach((entry) => {
+      const chip = document.createElement('span');
+      chip.className = 'activity-actor';
+      chip.textContent = entry.actor + ' ' + entry.count;
+      line.append(chip);
+    });
+
+    // The undo is offered WITHOUT a number.
+    //
+    // "Revert scout (9)" would be a count of what the agent did in the hour, and the
+    // reader would reasonably read it as what is about to happen — but some of those
+    // nine may be refused, and some may already have been put back. The honest number
+    // only exists after the dry run, so the button asks first and the dialog says it.
+    named.forEach((entry) => {
+      const name = entry.actor.slice('agent:'.length);
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'activity-agent';
+      button.textContent = 'Revert ' + name + '’s last hour';
+      button.title = 'Ask what taking back agent:' + name + '’s last hour would do, and then do it. ' +
+        'Changes whose fields somebody else has touched since are refused rather than stamped over.';
+      button.addEventListener('click', () => offerRevert(entry.actor, button));
+      line.append(button);
+    });
+
+    const seen = document.createElement('button');
+    seen.type = 'button';
+    seen.className = 'activity-seen';
+    seen.textContent = 'Mark as seen';
+    seen.title = 'Start the diff again from the newest change. Nothing is deleted — the log keeps everything.';
+    seen.addEventListener('click', () => { Store.markSeen(); renderActivity(); });
+    line.append(seen);
+  }
+
+  /**
+   * Offer to take an agent's last hour back, describing the undo before doing it.
+   *
+   * The dry run is not a preview feature — it is the same command with `dryRun`, so
+   * the sentence in the confirmation is produced by the code that will do the work.
+   * A separate "what would happen" implementation could disagree with the real one,
+   * and the disagreement would show up after the fact.
+   *
+   * The window is computed ONCE and passed to both calls. Computing "the last hour"
+   * twice would let the reader's own reading time shrink the window between the
+   * promise and the act.
+   */
+  async function offerRevert(actor, anchor) {
+    const since = new Date(Date.now() - Store.activity().undoWindowMs).toISOString();
+    const plan = await Store.revert(actor, since, true);
+    if (reportRefusal(plan, anchor)) return;
+    const report = (plan && plan.value) || {};
+    const willRevert = (report.willRevert || []).length;
+    const conflicts = report.conflicts || [];
+    const skipped = report.skipped || [];
+    const who = actor.replace(/^agent:/, '');
+    const window = 'since ' + new Date(since).toLocaleTimeString();
+
+    if (!willRevert) {
+      flash(conflicts.length
+        ? 'Nothing by ' + who + ' can be put back ' + window + ' — ' + conflicts.length +
+          ' change' + (conflicts.length === 1 ? ' was' : 's were') + ' refused because somebody changed the same field afterwards.'
+        : 'Nothing by ' + who + ' in the last hour to put back.',
+        anchor, { warn: true });
+      return;
+    }
+
+    $('#confirmTitle').textContent = 'Revert ' + who + '’s last hour?';
+    const parts = [
+      willRevert + (willRevert === 1 ? ' change will be put back' : ' changes will be put back') +
+        ' exactly as it was before agent:' + who + ' touched it, newest first.',
+    ];
+    if (conflicts.length) {
+      parts.push(conflicts.length + (conflicts.length === 1 ? ' change is refused' : ' changes are refused') +
+        ' because something else touched the same fields afterwards — ' +
+        conflicts.map((c) => (c.name || c.entity) + (c.fields && c.fields.length ? ' [' + c.fields.join(', ') + ']' : '')).join('; ') +
+        '. Those keep the value they have now.');
+    }
+    if (skipped.length) parts.push(skipped.length + ' cannot be compensated and will be left alone.');
+    parts.push('The revert is itself a change, so it can be seen in the log and reverted in turn.');
+    $('#confirmBody').textContent = parts.join(' ');
+    $('#confirmOk').textContent = 'Revert ' + willRevert + (willRevert === 1 ? ' change' : ' changes');
+
+    confirmDialog.__onOk = async () => {
+      const result = await Store.revert(actor, since, false);
+      if (reportRefusal(result, null)) return;
+      const done = (result.value && result.value.reverted ? result.value.reverted.length : 0);
+      const left = (result.value && result.value.conflicts ? result.value.conflicts.length : 0);
+      refreshAfterWrite();
+      flash(done + (done === 1 ? ' change by ' : ' changes by ') + who + ' put back' +
+        (left ? ', ' + left + ' refused — a later edit touched the same field' : '') + '.',
+        null, left ? { warn: true } : {});
+    };
+    confirmDialog.showModal();
+  }
+
+  /**
    * The one place the board's heading is written, because two routes mount the
    * board and each names itself: Daily is the whole board, and a project route is
    * that project's workspace, titled with the project's name either way.
@@ -2673,6 +2849,7 @@
 
   function renderDaily() {
     renderBoardHead(null);
+    renderActivity();
     render();
     renderTimekeeping();
   }
@@ -2685,6 +2862,7 @@
    */
   function renderProject(project) {
     renderBoardHead(project);
+    renderActivity();
     render();
     renderTimekeeping();
   }

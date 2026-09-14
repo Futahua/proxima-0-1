@@ -47,6 +47,12 @@
     </div>
   </section>
 
+  <!-- What moved since the reader last looked, and the way back from it.
+       Not a notification centre: nothing is delivered here and nothing expires. It
+       is a diff with a count per actor, the agents' names carry the undo, and it
+       goes away when the reader says they have looked. -->
+  <div class="activity" id="activityLine" role="status" hidden></div>
+
   <section class="runbar" id="runbar">
     <label>Execution target
       <input type="datetime-local" id="target">
