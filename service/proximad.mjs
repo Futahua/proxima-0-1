@@ -40,7 +40,7 @@
 
 import { createServer } from 'node:http';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, copyFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, copyFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
@@ -176,7 +176,15 @@ function actorForToken(token) {
   if (!token) return null;
   let found = credentialCache.get(token);
   if (!found) found = loadCredentials().get(token);   // a token added since we last looked
-  return found || null;
+  if (!found) return null;
+  // A token file that is gone is a revoked agent, even if this process still
+  // remembers it. Revocation by deleting the file must not need a restart to bite,
+  // which is the difference between a revoked credential and a hoped-for one.
+  if (found.actor !== 'human:minh' && !existsSync(tokenFileFor(found.actor))) {
+    credentialCache.delete(token);
+    found = loadCredentials().get(token) || null;
+  }
+  return found;
 }
 
 // ── The database ────────────────────────────────────────────────────────────
@@ -252,6 +260,72 @@ if (needsBackfill) {
 
 const headSeq = () => Number(db.prepare('SELECT COALESCE(MAX(seq), 0) AS s FROM events').get().s);
 const oldestSeq = () => Number(db.prepare('SELECT COALESCE(MIN(seq), 0) AS s FROM events').get().s);
+
+// ── Effects ─────────────────────────────────────────────────────────────────
+// What an event DID, record by record.
+//
+// An event used to name one entity and hope: a `task.move` renumbered every sibling
+// in the destination column and said nothing about them, and a `project.delete`
+// orphaned a dozen tasks silently. Compensation then had to infer those effects by
+// re-deriving them, and the inference was wrong in exactly the places that matter —
+// an undo could drag a task back into a project the human had since moved it out of.
+//
+// So an event now carries the list. Each effect is one record and one of three
+// things that can happen to it:
+//
+//   create   before null, after the whole record   — take it back by deleting it
+//   delete   before the whole record, after null   — take it back by restoring it
+//   update   before/after are the CHANGED FIELDS   — take it back by putting them back
+//
+// Conflict checking, compensation and attribution all read this list instead of
+// guessing from the event type, which is what makes "an agent moved a task" and "an
+// agent deleted a project" answerable in the same code.
+
+function makeEffect(kind, id, op, before, after) {
+  return { kind, id, op, before: before === undefined ? null : before, after: after === undefined ? null : after };
+}
+
+/** The fields an effect is about, or null when the whole record is at stake. */
+function effectFields(effect) {
+  if (!effect || effect.op !== 'update') return null;
+  const keys = new Set([...Object.keys(effect.before || {}), ...Object.keys(effect.after || {})]);
+  keys.delete('beforeTaskId');
+  return [...keys];
+}
+
+/**
+ * Rebuild an effect list for an event that predates the column, from what the event
+ * already recorded. Not a guess about history — the same reading the undo used before
+ * effects existed, written down once so the two cannot drift.
+ */
+function effectsFromLegacy(row) {
+  const parse = (v) => { try { return v === null || v === undefined ? null : JSON.parse(v); } catch { return null; } };
+  const before = parse(row.before_json);
+  const after = parse(row.after_json);
+  if (row.entity_kind === 'board' && row.type === 'task.layout') {
+    const ids = [...new Set([...Object.keys(before || {}), ...Object.keys(after || {})])];
+    return ids.map((taskId) => makeEffect('task', taskId, 'update',
+      { ganttRow: (before || {})[taskId] ?? null }, { ganttRow: (after || {})[taskId] ?? null }));
+  }
+  if (row.entity_kind === 'board') return [];
+  const op = row.type.endsWith('.create') ? 'create' : row.type.endsWith('.delete') ? 'delete' : 'update';
+  const effects = [makeEffect(row.entity_kind, row.entity_id, op, before, after)];
+  if (op === 'delete' && row.entity_kind === 'project') {
+    const extra = parse(row.extra_json) || {};
+    (extra.orphanedTaskIds || []).forEach((id) => {
+      effects.push(makeEffect('task', id, 'update', { project: row.entity_id }, { project: null }));
+    });
+  }
+  return effects;
+}
+
+const addedEffectsColumn = ensureColumn('events', 'effects_json', 'TEXT');
+if (addedEffectsColumn || Number(db.prepare('SELECT COUNT(*) AS n FROM events WHERE effects_json IS NULL').get().n) > 0) {
+  const rows = db.prepare('SELECT * FROM events WHERE effects_json IS NULL ORDER BY seq').all();
+  const write = db.prepare('UPDATE events SET effects_json = ? WHERE seq = ?');
+  rows.forEach((row) => write.run(JSON.stringify(effectsFromLegacy(row)), row.seq));
+  log('migrated: effects written for', rows.length, 'event(s) that predated the column');
+}
 
 function recordActor(actor) {
   const kind = String(actor).includes(':') ? String(actor).split(':')[0] : 'unknown';
@@ -383,31 +457,47 @@ function insertRunRecord(record) {
   (record.members || []).forEach((m, i) => insert.run(m.id, i, m.name || '', Number(m.weight) || 1, Number(m.duration) || 0, Number(m.startsAt) || 0, Number(m.endsAt) || 0));
 }
 
-/** Put fields back on a task the way task.patch does, but from the log, not a client. */
+/**
+ * Put fields back on a task the way task.patch does, but from the log, not a client.
+ *
+ * Status and order are here even though `task.patch` refuses them from a client: a
+ * compensation is not a client asking for a move, it is the log putting exact values
+ * back. That distinction matters — a "move back" would re-number the whole column,
+ * and the siblings' own effects already carry the exact order each of them had. Two
+ * mechanisms both claiming to restore the column is how the orders came back wrong:
+ * every sibling was put back correctly and then renumbered away from the value it
+ * had just been given.
+ */
 function applyTaskPatch(id, patch) {
-  const column = { name: 'name', note: 'note', project: 'project_id', weight: 'weight', start: 'start_day', deadline: 'deadline_day', ganttRow: 'gantt_row' };
+  const column = {
+    name: 'name', note: 'note', project: 'project_id', weight: 'weight',
+    start: 'start_day', deadline: 'deadline_day', ganttRow: 'gantt_row',
+    status: 'status', order: 'order_index',
+  };
+  const extra = {};
   const sets = [];
   const params = [];
   Object.keys(patch).forEach((field) => {
-    if (!column[field]) return;
+    if (!column[field]) { extra[field] = patch[field]; return; }
     sets.push(column[field] + ' = ?');
     params.push(field === 'project' ? (patch[field] || null) : field === 'deadline' ? (patch[field] || null) : patch[field]);
   });
+  // Unknown fields come back too: they are part of the record, and a compensation
+  // that restored the known half and dropped the rest would be a partial undo
+  // wearing a complete one's clothes.
+  if (Object.keys(extra).length) {
+    const row = db.prepare('SELECT extra_json FROM tasks WHERE id = ?').get(id);
+    if (row) {
+      const merged = { ...extraOf(row.extra_json), ...extra };
+      Object.keys(merged).forEach((k) => { if (merged[k] === null) delete merged[k]; });
+      db.prepare('UPDATE tasks SET extra_json = ? WHERE id = ?').run(JSON.stringify(merged), id);
+    }
+  }
   if (!sets.length) return;
-  sets.push('rev = rev + 1');
+  // The revision is not bumped here: the dispatcher moves it on for every record an
+  // `update` effect names, and two places doing it is how a revision ends up ahead
+  // of the thing it is supposed to describe.
   db.prepare('UPDATE tasks SET ' + sets.join(', ') + ' WHERE id = ?').run(...params, id);
-}
-
-/** Back to a column, in front of whatever now holds the order it had. */
-function moveTaskBack(id, toStatus, order) {
-  db.prepare('UPDATE tasks SET status = ?, rev = rev + 1 WHERE id = ?').run(toStatus, id);
-  const rest = db.prepare('SELECT id, order_index FROM tasks WHERE status = ? AND id <> ? ORDER BY order_index, rowid').all(toStatus, id);
-  const anchor = rest.find((row) => row.order_index >= Number(order || 0));
-  const ids = rest.map((row) => row.id);
-  const index = anchor ? ids.indexOf(anchor.id) : -1;
-  if (index < 0) ids.push(id); else ids.splice(index, 0, id);
-  const renumber = db.prepare('UPDATE tasks SET order_index = ? WHERE id = ?');
-  ids.forEach((taskId, i) => renumber.run(i, taskId));
 }
 
 const TYPED_TASK_FIELDS = ['name', 'note', 'project', 'status', 'weight', 'start', 'deadline', 'ganttRow', 'order', 'createdAt', 'rev'];
@@ -451,6 +541,10 @@ const MESSAGES = {
   RUN_ALREADY_LOCKED: () => 'A run is already locked. Unlock it before locking another.',
   WRITE_FAILED: (d) => 'The service could not write that (' + d.reason + '). Nothing was changed.',
   ACTOR_MISMATCH: (d) => 'That command claims to be ' + d.claimed + ', and this credential is ' + d.actual + '. Nothing was changed.',
+  FORBIDDEN: (d) => 'That is the operator’s to do: ' + (d.why || 'this credential may not') + '. Nothing was changed.',
+  REV_REQUIRED: (d) => 'An agent has to say which revision it read before changing ' + d.kind + ' “' + d.id + '” (send ifRev). Read it again, then act on what you read.',
+  RUN_MEMBER_LOCKED: (d) => '“' + (d.name || d.id) + '” is part of the locked plan, so its ' + d.field + ' is frozen until the run is unlocked.',
+  RUN_LOCKED: () => 'A run is locked, so its members cannot leave the running column and nothing else can join it. Unlock it first.',
 };
 
 function refuse(code, details) {
@@ -471,6 +565,12 @@ function fingerprint(type, payload) {
 
 const newId = (prefix) => prefix + '_' + Date.now().toString(36) + randomBytes(3).toString('hex');
 
+/** Commands that change a record that already exists: an agent must name the revision it read. */
+const REVISION_BOUND = new Set([
+  'task.patch', 'task.move', 'task.delete',
+  'project.archive', 'project.restore', 'project.delete',
+]);
+
 // ── Commands ────────────────────────────────────────────────────────────────
 // Each handler validates and returns a closure that applies the change. Nothing is
 // written until the whole command is known to be acceptable, so a refusal can never
@@ -482,6 +582,53 @@ function checkRev(ctx, kind, id, currentRev) {
   if (currentRev === null || currentRev === undefined) return refuse('ENTITY_NOT_FOUND', { kind, id });
   if (Number(ctx.ifRev) !== Number(currentRev)) {
     return refuse('ENTITY_REV_CONFLICT', { kind, id, expected: Number(ctx.ifRev), actual: Number(currentRev) });
+  }
+  return null;
+}
+
+/** Move one record's revision on. The dispatcher's job, for every effect it is told about. */
+function bumpRev(kind, id) {
+  if (kind === 'task') db.prepare('UPDATE tasks SET rev = rev + 1 WHERE id = ?').run(id);
+  else if (kind === 'project') db.prepare('UPDATE projects SET rev = rev + 1 WHERE id = ?').run(id);
+  else if (kind === 'run') db.prepare('UPDATE runs SET rev = rev + 1 WHERE id = 1').run();
+}
+
+const isHumanActor = (actor) => String(actor || '').startsWith('human:');
+
+// ── The locked plan ─────────────────────────────────────────────────────────
+// The cockpit has always enforced these by disabling controls. That made the rules
+// gestures rather than rules: an agent with a token could change a member's weight,
+// walk a member out of the running column, or fill the column with newcomers while
+// the horizon was frozen. They live here now, so both clients answer to the same
+// service instead of the UI being a policy and the API being a hole in it.
+
+const runMember = (taskId) => {
+  const run = readRun();
+  if (!run) return null;
+  return run.members.find((m) => m.id === taskId) || null;
+};
+
+/** Refuse a change that would rewrite a frozen plan. Returns null when it is fine. */
+function checkRunInvariants(kind, id, detail) {
+  const run = readRun();
+  if (!run) return null;
+  const member = run.members.find((m) => m.id === id) || null;
+  if (kind === 'weight' && member) {
+    return refuse('RUN_MEMBER_LOCKED', { id, name: member.name, field: 'weight' });
+  }
+  if (kind === 'move') {
+    const toStatus = detail && detail.toStatus;
+    if (member && toStatus !== 'running') {
+      return refuse('RUN_MEMBER_LOCKED', { id, name: member.name, field: 'column' });
+    }
+    if (!member && toStatus === 'running') {
+      return refuse('RUN_LOCKED', { id });
+    }
+  }
+  if (kind === 'delete' && member && run.members.length === 1) {
+    // Allowed: deleting the last member ends the run, and the command says so in its
+    // effects. Refusing would trap a task the reader has decided is not happening.
+    return null;
   }
   return null;
 }
@@ -529,7 +676,10 @@ const COMMANDS = {
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .run(task.id, task.name, task.note, task.project, task.status, task.weight, task.start, task.deadline,
             task.ganttRow, task.order, task.createdAt, task.rev, JSON.stringify(task.extra));
-        return { value: readTask(task.id), before: null, after: readTask(task.id) };
+        return {
+          value: readTask(task.id), before: null, after: readTask(task.id),
+          effects: [makeEffect('task', task.id, 'create', null, readTask(task.id))],
+        };
       },
     };
   },
@@ -576,9 +726,18 @@ const COMMANDS = {
     if (changed.length === 0 && unknown.length === 0) {
       return { ok: true, entity: { kind: 'task', id: before.id }, value: () => before, apply: () => ({ value: before, before: null, after: null, changed: false }) };
     }
+    if (changed.includes('weight')) {
+      const locked = checkRunInvariants('weight', before.id);
+      if (locked) return locked;
+    }
     const beforeDiff = {};
     const afterDiff = {};
     changed.forEach((k) => { beforeDiff[k] = stored[k]; afterDiff[k] = next[k]; });
+    // Unknown fields are a real edit and are recorded as one: they used to land in
+    // extra_json while the event's diff stayed empty, so an agent's change to a field
+    // this service does not know about audited as nothing at all and could not be
+    // put back. The record is restored wholesale on undo, so the value is enough.
+    unknown.forEach((k) => { beforeDiff[k] = stored[k] === undefined ? null : stored[k]; afterDiff[k] = patch[k]; });
     return {
       ok: true,
       entity: { kind: 'task', id: before.id },
@@ -598,7 +757,10 @@ const COMMANDS = {
           unknown.forEach((k) => { extra[k] = patch[k]; });
           db.prepare('UPDATE tasks SET extra_json = ? WHERE id = ?').run(JSON.stringify(extra), before.id);
         }
-        return { value: readTask(before.id), before: beforeDiff, after: afterDiff };
+        return {
+          value: readTask(before.id), before: beforeDiff, after: afterDiff,
+          effects: [makeEffect('task', before.id, 'update', beforeDiff, afterDiff)],
+        };
       },
     };
   },
@@ -609,6 +771,8 @@ const COMMANDS = {
     const conflict = checkRev(ctx, 'task', payload.taskId, task.rev);
     if (conflict) return conflict;
     if (!STATUSES.includes(payload.toStatus)) return refuse('STATUS_UNKNOWN', { value: payload.toStatus, allowed: STATUSES });
+    const locked = checkRunInvariants('move', task.id, { toStatus: payload.toStatus });
+    if (locked) return locked;
     const anchorId = payload.beforeTaskId || null;
     if (anchorId) {
       const anchor = readTask(anchorId);
@@ -621,6 +785,14 @@ const COMMANDS = {
       return { ok: true, entity: { kind: 'task', id: task.id }, value: () => task, apply: () => ({ value: task, before: null, after: null, changed: false }) };
     }
     const beforeOrder = task.order;
+    // Who else is about to be renumbered. A move rewrites the order of every task
+    // between the old slot and the new one, and those are changes: the event names
+    // them so undo can put each back and conflict checking can see that a human
+    // reordered the same column afterwards.
+    const destinationBefore = db.prepare('SELECT id, order_index FROM tasks WHERE status = ? AND id <> ? ORDER BY order_index, rowid')
+      .all(payload.toStatus, task.id).map((r) => ({ id: r.id, order: r.order_index }));
+    const sourceBefore = fromStatus === payload.toStatus ? [] : db.prepare('SELECT id, order_index FROM tasks WHERE status = ? ORDER BY order_index, rowid')
+      .all(fromStatus).map((r) => ({ id: r.id, order: r.order_index }));
     return {
       ok: true,
       entity: { kind: 'task', id: task.id },
@@ -633,7 +805,21 @@ const COMMANDS = {
         const renumber = db.prepare('UPDATE tasks SET order_index = ? WHERE id = ?');
         rest.forEach((id, i) => renumber.run(i, id));
         const after = readTask(task.id);
-        return { value: after, before: { status: fromStatus, order: beforeOrder }, after: { status: after.status, order: after.order, beforeTaskId: anchorId } };
+        const effects = [makeEffect('task', task.id, 'update',
+          { status: fromStatus, order: beforeOrder },
+          { status: after.status, order: after.order, beforeTaskId: anchorId })];
+        // The siblings that actually moved. Reading the new order back rather than
+        // predicting it means the list is what happened, not what was intended.
+        const moved = new Map();
+        destinationBefore.forEach((s) => moved.set(s.id, s.order));
+        sourceBefore.forEach((s) => { if (!moved.has(s.id)) moved.set(s.id, s.order); });
+        moved.forEach((was, id) => {
+          const now = db.prepare('SELECT order_index FROM tasks WHERE id = ?').get(id);
+          if (now && now.order_index !== was) {
+            effects.push(makeEffect('task', id, 'update', { order: was }, { order: now.order_index }));
+          }
+        });
+        return { value: after, before: { status: fromStatus, order: beforeOrder }, after: { status: after.status, order: after.order, beforeTaskId: anchorId }, effects };
       },
     };
   },
@@ -662,7 +848,15 @@ const COMMANDS = {
         const after = {};
         const stmt = db.prepare('UPDATE tasks SET gantt_row = ? WHERE id = ?');
         pending.forEach((p) => { stmt.run(p.to, p.id); before[p.id] = p.from; after[p.id] = p.to; });
-        return { value: { placed: pending.length, skipped }, before, after, extra: skipped.length ? { skipped } : undefined };
+        return {
+          value: { placed: pending.length, skipped }, before, after,
+          extra: skipped.length ? { skipped } : undefined,
+          // One effect PER TASK: the event is named after the board because a layout
+          // pass is one gesture, but what it changes is a row on each of these tasks.
+          // Naming only `board:timeline` is why this command could be listed as
+          // supported and still not be undoable.
+          effects: pending.map((p) => makeEffect('task', p.id, 'update', { ganttRow: p.from }, { ganttRow: p.to })),
+        };
       },
     };
   },
@@ -672,13 +866,31 @@ const COMMANDS = {
     if (!task) return refuse('ENTITY_NOT_FOUND', { kind: 'task', id: payload.taskId });
     const conflict = checkRev(ctx, 'task', payload.taskId, task.rev);
     if (conflict) return conflict;
+    // A plan whose last member is deleted is over. The cockpit ends it too, but a
+    // headless agent has no cockpit, and a locked run with an empty roster is a
+    // horizon nobody is working to.
+    const run = readRun();
+    const endsRun = Boolean(run && run.members.some((m) => m.id === task.id) && run.members.length === 1);
     return {
       ok: true,
       entity: { kind: 'task', id: task.id },
-      value: () => ({ id: task.id }),
+      value: () => ({ id: task.id, endedRun: endsRun }),
       apply() {
         db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
-        return { value: { id: task.id }, before: task, after: null };
+        // The run going with it is a change like any other, so the event names it —
+        // and undo can put both back rather than leaving a phantom plan behind.
+        const effects = [makeEffect('task', task.id, 'delete', task, null)];
+        effects[0].createdBy = createdByOf('task', task.id);
+        if (endsRun) {
+          db.prepare('DELETE FROM runs WHERE id = 1').run();
+          effects.push(makeEffect('run', run.lockedAt, 'delete', run, null));
+        }
+        return {
+          value: { id: task.id, endedRun: endsRun },
+          before: task, after: null,
+          ...(endsRun ? { extra: { endedRun: true } } : {}),
+          effects,
+        };
       },
     };
   },
@@ -703,7 +915,10 @@ const COMMANDS = {
       apply() {
         db.prepare(`INSERT INTO projects (id, name, description, created_at, archived_at, rev, extra_json) VALUES (?, ?, ?, ?, NULL, 1, ?)`)
           .run(project.id, project.name, project.description, project.createdAt, JSON.stringify(project.extra));
-        return { value: readProject(project.id), before: null, after: readProject(project.id) };
+        return {
+          value: readProject(project.id), before: null, after: readProject(project.id),
+          effects: [makeEffect('project', project.id, 'create', null, readProject(project.id))],
+        };
       },
     };
   },
@@ -757,7 +972,7 @@ const COMMANDS = {
       apply() {
         // The tasks are NOT deleted. Deleting a container must not quietly destroy
         // the work inside it, and the confirmation says how many are affected first.
-        const orphan = db.prepare('UPDATE tasks SET project_id = NULL, rev = rev + 1 WHERE project_id = ?');
+        const orphan = db.prepare('UPDATE tasks SET project_id = NULL WHERE project_id = ?');
         orphan.run(project.id);
         db.prepare('DELETE FROM projects WHERE id = ?').run(project.id);
         return {
@@ -765,6 +980,13 @@ const COMMANDS = {
           before: project,
           after: null,
           extra: orphans.length ? { orphanedTaskIds: orphans } : undefined,
+          // The project went, AND each of its tasks lost its project. Undo has to put
+          // both back — and has to refuse if the human has since filed one of those
+          // tasks somewhere else on purpose.
+          effects: [
+            Object.assign(makeEffect('project', project.id, 'delete', project, null), { createdBy: createdByOf('project', project.id) }),
+            ...orphans.map((id) => makeEffect('task', id, 'update', { project: project.id }, { project: null })),
+          ],
         };
       },
     };
@@ -809,6 +1031,7 @@ const COMMANDS = {
           // The event carries the whole plan, so a client can apply it without a
           // round trip and the log says exactly what was frozen.
           after: { lockedAt: lockedIso, target: payload.target, memberIds: frozen.map((m) => m.id), total, members: frozen },
+          effects: [makeEffect('run', lockedIso, 'create', null, readRun())],
         };
       },
     };
@@ -823,7 +1046,10 @@ const COMMANDS = {
       value: () => ({ ended: run }),
       apply() {
         db.prepare('DELETE FROM runs WHERE id = 1').run();
-        return { value: { ended: run }, before: run, after: null };
+        return {
+          value: { ended: run }, before: run, after: null,
+          effects: [makeEffect('run', run.lockedAt, 'delete', run, null)],
+        };
       },
     };
   },
@@ -848,18 +1074,38 @@ const COMMANDS = {
   'history.revert'(payload, ctx) {
     const actor = typeof payload.actor === 'string' && payload.actor ? payload.actor : null;
     if (!actor) return refuse('PAYLOAD_INVALID', { type: 'history.revert', missing: ['actor'] });
+    // CONTROL PLANE. Rewriting history on somebody else's behalf is not the same act
+    // as writing a task, and it is the one place where an agent could destroy work it
+    // never made. An agent may at most take back its own.
+    if (actor !== ctx.actor && !isHumanActor(ctx.actor)) {
+      return refuse('FORBIDDEN', {
+        command: 'history.revert', actor: ctx.actor, target: actor,
+        why: 'an agent may only revert its own changes; reverting somebody else’s is the operator’s',
+      });
+    }
     const until = payload.until ? new Date(payload.until) : new Date();
     const since = payload.since ? new Date(payload.since) : new Date(until.getTime() - 3600 * 1000);
     if (Number.isNaN(since.getTime()) || Number.isNaN(until.getTime())) {
       return refuse('DATE_INVALID', { field: 'since/until', value: String(payload.since || payload.until) });
     }
     const dryRun = payload.dryRun === true;
+    /**
+     * The frozen bound. A dry run answers with the sequence it planned against, and
+     * the execution is given it back — so the undo that runs is the undo that was
+     * described. Without it, "the last hour" is re-read at execution time and every
+     * change in between silently joins a set the reader never saw.
+     */
+    const throughSeq = payload.throughSeq === undefined || payload.throughSeq === null || payload.throughSeq === ''
+      ? null : Number(payload.throughSeq);
+    if (throughSeq !== null && !Number.isFinite(throughSeq)) {
+      return refuse('PAYLOAD_INVALID', { type: 'history.revert', missing: ['throughSeq as a number'] });
+    }
 
-    const events = db.prepare(`SELECT * FROM events
-                               WHERE actor = ? AND at >= ? AND at <= ?
-                                 AND type NOT IN ('history.revert', 'migration.entity', 'migration.complete')
-                               ORDER BY seq DESC`).all(actor, since.toISOString(), until.toISOString())
-      .map(rowToEvent);
+    const clauses = ["actor = ?", 'at >= ?', 'at <= ?', "type NOT IN ('history.revert', 'migration.entity', 'migration.complete')"];
+    const params = [actor, since.toISOString(), until.toISOString()];
+    if (throughSeq !== null) { clauses.push('seq <= ?'); params.push(throughSeq); }
+    const events = db.prepare('SELECT * FROM events WHERE ' + clauses.join(' AND ') + ' ORDER BY seq DESC')
+      .all(...params).map(rowToEvent);
 
     const plan = [];
     const conflicts = [];
@@ -867,232 +1113,215 @@ const COMMANDS = {
     const skipped = [];
 
     /**
-     * Has anybody else touched this record since that event — and did they touch the
-     * same FIELD?
+     * What everybody ELSE did, after each of these changes.
      *
-     * This is the conflict test, and it is about ORDER rather than about values: an
-     * agent's change can be taken back only while nothing else has happened to that
-     * field afterwards. Compensations run newest-first, so undoing one change makes
-     * the change before it applicable again — which is why this is asked per EVENT
-     * and not once per record. Skipping a record after its newest event would quietly
-     * leave the agent's earlier edits to it in place, which is not what "revert what
-     * the agent did" means.
+     * The conflict test is about order, not about values: a change can be taken back
+     * only while nothing else has happened to that field afterwards. It is read from
+     * the other events' EFFECTS, not from their headline entity — which is the whole
+     * point of effects. An event that renumbered a sibling by moving some other task
+     * used to be invisible here; now it is a row in this index.
      *
-     * It is field-aware on purpose: a human who renamed a task while the agent was
-     * changing its weight has not touched anything the compensation would overwrite,
-     * so refusing that would throw away a good undo. Pass `fields = null` when the
-     * whole record is at stake (deleting what the agent created) — then ANY foreign
-     * touch refuses, because what is about to disappear is not one field.
+     * Note the bound: every foreign event after the oldest one being reverted, with no
+     * time limit. A human edit five minutes after the window is exactly what must
+     * still refuse the undo, so this deliberately reaches past `until`.
      */
-    const foreignSince = (kind, id, seq, fields) => {
-      const rows = db.prepare(
-        `SELECT actor, type, seq, after_json FROM events
-         WHERE entity_kind = ? AND entity_id = ? AND seq > ? AND actor <> ?
-         ORDER BY seq`).all(kind, id, seq, actor);
-      if (!rows.length) return null;
-      if (!fields) return { ...rows[0], fields: null };
-      const wanted = new Set(fields);
-      for (const row of rows) {
-        let after = null;
-        try { after = row.after_json ? JSON.parse(row.after_json) : null; } catch { after = null; }
-        const touched = after && typeof after === 'object' ? Object.keys(after) : [];
-        // An event we cannot read is treated as touching everything: an undo that
-        // guesses here would be exactly the silent stamping this test exists to stop.
-        if (!touched.length) return { ...row, fields: null };
-        const overlap = touched.filter((k) => wanted.has(k));
-        if (overlap.length) return { ...row, fields: overlap };
+    const foreignByRecord = new Map();
+    const oldestRelevant = events.length ? Math.min(...events.map((e) => e.seq)) : headSeq() + 1;
+    db.prepare('SELECT * FROM events WHERE seq > ? AND actor <> ? ORDER BY seq')
+      .all(oldestRelevant, actor)
+      .forEach((row) => {
+        const other = rowToEvent(row);
+        (other.effects || []).forEach((effect) => {
+          if (!effect || !effect.kind || !effect.id) return;
+          const key = effect.kind + ':' + effect.id;
+          if (!foreignByRecord.has(key)) foreignByRecord.set(key, []);
+          foreignByRecord.get(key).push({ seq: other.seq, actor: other.actor, type: other.type, fields: effectFields(effect) });
+        });
+      });
+
+    const foreignAfter = (kind, id, seq, fields) => {
+      const list = foreignByRecord.get(kind + ':' + id);
+      if (!list) return null;
+      for (const entry of list) {
+        if (entry.seq <= seq) continue;
+        // `fields === null` means the whole record is at stake (it is about to be
+        // deleted or was restored); then any touch at all refuses.
+        if (!fields) return { ...entry, overlap: null };
+        if (!entry.fields) return { ...entry, overlap: null };
+        const overlap = entry.fields.filter((k) => fields.includes(k));
+        if (overlap.length) return { ...entry, overlap };
       }
       return null;
     };
 
-    /** Report a refusal once per record, however many of its events hit it. */
-    const conflict = (event, why, fields) => {
-      const key = event.entity.kind + ':' + event.entity.id;
+    /** Report a refusal once per record, however many of its changes hit it. */
+    const conflict = (event, key, why, fields) => {
       if (conflicted.has(key)) {
         skipped.push({ seq: event.seq, entity: key, why: 'an earlier change to this record is already refused' });
         return;
       }
       conflicted.add(key);
-      const current = event.entity.kind === 'task' ? readTask(event.entity.id) : readProject(event.entity.id);
+      const current = key.startsWith('task:') ? readTask(key.slice(5)) : key.startsWith('project:') ? readProject(key.slice(5)) : null;
       conflicts.push({ seq: event.seq, entity: key, name: current ? current.name : null, fields, why });
     };
 
     /**
-     * What the record will hold once the compensations planned so far are applied.
+     * What each record will hold once the plan so far is applied.
      *
-     * The plan is built newest-first and applied newest-first, so an older change to
-     * a field is checked against the value the newer compensation is ABOUT to put
-     * back — not against the rows as they stand now. Two agent edits to the same
-     * field in a row are the normal case, not an edge case: without this, the older
-     * one looks like somebody else overwrote it and the undo stops halfway.
+     * Compensations run newest-first, so an older change to a field is checked against
+     * the value the newer compensation is ABOUT to put back — not against the rows as
+     * they stand now. Two agent edits to the same field in a row are the normal case,
+     * not an edge case. And the lifecycle branches read it too: an agent that created
+     * a task and then deleted it must plan restore-then-delete, or the undo leaves
+     * behind a task that existed neither before nor after.
      */
-    const planned = new Map();                    // 'task:id' -> {field: value} | null
-    const plannedOf = (kind, id) => planned.get(kind + ':' + id);
+    const liveRecord = (kind, id) => {
+      if (kind === 'task') return readTask(id);
+      if (kind === 'project') return readProject(id);
+      // A run is identified by WHEN it was locked, not by a row id: there is only
+      // ever one, so "the run I locked" and "whatever run exists now" are different
+      // questions and only the first one is the one an undo may act on.
+      if (kind === 'run') { const run = readRun(); return run && run.lockedAt === id ? run : null; }
+      return null;
+    };
+    const planned = new Map();                    // 'kind:id' -> record | null (gone)
+    const stateOf = (kind, id) => (planned.has(kind + ':' + id) ? planned.get(kind + ':' + id) : liveRecord(kind, id));
     const planState = (kind, id, values) => {
       if (values === null) { planned.set(kind + ':' + id, null); return; }
-      const key = kind + ':' + id;
-      const known = planned.get(key);
-      planned.set(key, { ...(known || (kind === 'task' ? readTask(id) : readProject(id)) || {}), ...values });
+      const known = planned.has(kind + ':' + id) ? planned.get(kind + ':' + id) : liveRecord(kind, id);
+      planned.set(kind + ':' + id, { ...(known || {}), ...values });
     };
 
-    const fieldConflict = (kind, id, after) => {
-      const current = planned.has(kind + ':' + id) ? plannedOf(kind, id) : (kind === 'task' ? readTask(id) : readProject(id));
-      if (!current) return null;
-      const differing = Object.keys(after || {}).filter((key) => {
-        if (key === 'beforeTaskId') return false;
-        return current[key] !== after[key] && String(current[key] ?? '') !== String(after[key] ?? '');
-      });
-      return differing.length ? differing : null;
+    /** Put one compensating effect on the plan, and move the shadow state with it. */
+    const schedule = (event, effect, undo) => {
+      plan.push({ seq: event.seq, type: event.type, effect, undo });
+      if (effect.op === 'delete') planState(effect.kind, effect.id, null);
+      else if (effect.op === 'create') planState(effect.kind, effect.id, effect.after);
+      else planState(effect.kind, effect.id, effect.after);
+    };
+
+    const deleteRecord = (kind, id) => {
+      if (kind === 'task') db.prepare('DELETE FROM tasks WHERE id = ?').run(id);
+      else if (kind === 'project') { db.prepare('UPDATE tasks SET project_id = NULL WHERE project_id = ?').run(id); db.prepare('DELETE FROM projects WHERE id = ?').run(id); }
+      else if (kind === 'run') db.prepare('DELETE FROM runs WHERE id = 1').run();
+    };
+    const restoreRecord = (kind, effect) => {
+      const record = effect.before;
+      if (kind === 'task') insertTaskRecord(record, (Number(record.rev) || 1) + 1);
+      else if (kind === 'project') insertProjectRecord(record, (Number(record.rev) || 1) + 1);
+      else if (kind === 'run') insertRunRecord(record);
+    };
+    const putFieldsBack = (kind, id, fields) => {
+      if (kind === 'task') { applyTaskPatch(id, fields); return; }
+      if (kind === 'project') {
+        const sets = [];
+        const args = [];
+        if ('archivedAt' in fields) { sets.push('archived_at = ?'); args.push(fields.archivedAt || null); }
+        if ('name' in fields) { sets.push('name = ?'); args.push(fields.name); }
+        if ('description' in fields) { sets.push('description = ?'); args.push(fields.description || ''); }
+        if (sets.length) db.prepare('UPDATE projects SET ' + sets.join(', ') + ' WHERE id = ?').run(...args, id);
+      }
     };
 
     for (const event of events) {
-      const key = event.entity.kind + ':' + event.entity.id;
+      // The effects in the order the command made them: the headline record first,
+      // then what it did to everything else. A project delete is [project, its
+      // tasks], and undoing it has to restore the project before the tasks that
+      // point at it.
+      for (const effect of (event.effects || [])) {
+        const key = effect.kind + ':' + effect.id;
+        const state = stateOf(effect.kind, effect.id);
 
-      if (event.entity.kind === 'task') {
-        const id = event.entity.id;
-        const current = readTask(id);
-        if (event.type === 'task.create') {
-          if (!current) { skipped.push({ seq: event.seq, entity: key, why: 'already gone' }); continue; }
-          // No field list: taking back a creation removes the record, so anybody
-          // else's touch of it — of any field — is a reason to refuse.
-          const foreign = foreignSince('task', id, event.seq, null);
+        if (effect.op === 'create') {
+          // Taking back a creation means removing the record.
+          if (!state) { skipped.push({ seq: event.seq, entity: key, why: 'already gone' }); continue; }
+          const foreign = foreignAfter(effect.kind, effect.id, event.seq, null);
           if (foreign) {
-            conflict(event, 'changed by ' + foreign.actor + ' (' + foreign.type + ', seq ' + foreign.seq + ') after the agent created it', foreign.fields);
+            conflict(event, key, 'changed by ' + foreign.actor + ' (' + foreign.type + ', seq ' + foreign.seq + ') after the agent created it', foreign.overlap);
             continue;
           }
-          plan.push({ seq: event.seq, type: event.type, kind: 'task', id, apply: () => { db.prepare('DELETE FROM tasks WHERE id = ?').run(id); }, before: current, after: null });
-          planState('task', id, null);
-          continue;
-        }
-        if (event.type === 'task.delete') {
-          if (current) { skipped.push({ seq: event.seq, entity: key, why: 'something with that id exists again' }); continue; }
-          const record = event.before;
-          if (!record) { skipped.push({ seq: event.seq, entity: key, why: 'the event did not keep the record' }); continue; }
-          plan.push({
-            seq: event.seq, type: event.type, kind: 'task', id,
-            apply: () => { insertTaskRecord(record, (Number(record.rev) || 1) + 1); },
-            before: null, after: record,
+          // A project takes its tasks' project field with it (the foreign key nulls
+          // it). Those are changes, so they are planned as effects — conflict-checked
+          // one by one, because a task the human has since filed there on purpose must
+          // not be quietly unfiled by an undo.
+          const collateral = effect.kind === 'project'
+            ? db.prepare('SELECT id FROM tasks WHERE project_id = ?').all(effect.id).map((r) => r.id)
+            : [];
+          let blocked = null;
+          for (const taskId of collateral) {
+            const touched = foreignAfter('task', taskId, event.seq, ['project']);
+            if (touched) { blocked = { taskId, touched }; break; }
+          }
+          if (blocked) {
+            conflict(event, 'task:' + blocked.taskId,
+              'changed by ' + blocked.touched.actor + ' (' + blocked.touched.type + ', seq ' + blocked.touched.seq + ') after the agent filed it under ' + effect.id,
+              blocked.touched.overlap);
+            continue;
+          }
+          schedule(event, makeEffect(effect.kind, effect.id, 'delete', state, null),
+            () => deleteRecord(effect.kind, effect.id));
+          collateral.forEach((taskId) => {
+            const fields = { project: '' };
+            schedule(event, makeEffect('task', taskId, 'update', { project: effect.id }, fields),
+              () => putFieldsBack('task', taskId, { project: '' }));
           });
-          planState('task', id, record);
           continue;
         }
-        if (!current) { skipped.push({ seq: event.seq, entity: key, why: 'the task is gone' }); continue; }
-        // Only the fields THIS event wrote: a later edit to a field the agent never
-        // touched is somebody else's work in somebody else's place, and putting the
-        // agent's field back does not disturb it.
-        const foreign = foreignSince('task', id, event.seq, Object.keys(event.after || {}).filter((k) => k !== 'beforeTaskId'));
+
+        if (effect.op === 'delete') {
+          // Taking back a delete means putting the record back.
+          //
+          // For a run, "gone" and "no row" are different questions: there is only ever
+          // one row in `runs`, so a plan that restores the run the agent unlocked has
+          // to check that NO run is locked — otherwise it collides with whatever the
+          // human locked since, and the whole undo fails on a UNIQUE constraint.
+          const busy = effect.kind === 'run' ? Boolean(readRun()) : Boolean(state);
+          if (busy) { skipped.push({ seq: event.seq, entity: key, why: 'something with that id exists again' }); continue; }
+          if (!effect.before) { skipped.push({ seq: event.seq, entity: key, why: 'the event did not keep the record' }); continue; }
+          // Symmetrical with the branch above, and it is the one that stops an undo
+          // undoing itself: if somebody else has touched this record since it was
+          // deleted — the usual case being an earlier revert that took the record away
+          // again — then putting it back would resurrect state that a later decision
+          // removed. Restoring is a change like any other and answers to the same test.
+          const foreign = foreignAfter(effect.kind, effect.id, event.seq, null);
+          if (foreign) {
+            conflict(event, key, 'changed by ' + foreign.actor + ' (' + foreign.type + ', seq ' + foreign.seq + ') after it was deleted', foreign.overlap);
+            continue;
+          }
+          const restored = makeEffect(effect.kind, effect.id, 'create', null, effect.before);
+          restored.restored = true;                       // put back, not created by the undoer
+          if (effect.createdBy) restored.createdBy = effect.createdBy;
+          schedule(event, restored, () => restoreRecord(effect.kind, effect));
+          continue;
+        }
+
+        // An update: put the named fields back.
+        if (!state) { skipped.push({ seq: event.seq, entity: key, why: 'the record is gone' }); continue; }
+        const fields = effectFields(effect) || [];
+        if (!fields.length) { skipped.push({ seq: event.seq, entity: key, why: 'nothing to put back' }); continue; }
+        const foreign = foreignAfter(effect.kind, effect.id, event.seq, fields);
         if (foreign) {
-          conflict(event, 'changed by ' + foreign.actor + ' (' + foreign.type + ', seq ' + foreign.seq + ') after this change', foreign.fields);
+          conflict(event, key, 'changed by ' + foreign.actor + ' (' + foreign.type + ', seq ' + foreign.seq + ') after this change', foreign.overlap || fields);
           continue;
         }
         // Belt and braces: even with nobody else in the log, the field must still hold
-        // what the agent set it to. A mismatch here means the log and the rows
-        // disagree, which is worth refusing over rather than stamping through.
-        const clash = fieldConflict('task', id, event.after);
-        if (clash) {
-          conflict(event, 'the stored value is not the one the agent set', clash);
-          continue;
-        }
-        if (event.type === 'task.patch') {
-          const patch = {};
-          Object.keys(event.after || {}).forEach((field) => { if (event.before && field in event.before) patch[field] = event.before[field]; });
-          if (!Object.keys(patch).length) { skipped.push({ seq: event.seq, entity: key, why: 'nothing to put back' }); continue; }
-          plan.push({ seq: event.seq, type: event.type, kind: 'task', id, apply: () => { applyTaskPatch(id, patch); }, before: event.after, after: patch });
-          planState('task', id, patch);
-          continue;
-        }
-        if (event.type === 'task.move') {
-          const toStatus = event.before ? event.before.status : null;
-          if (!toStatus) { skipped.push({ seq: event.seq, entity: key, why: 'the event does not say where it was' }); continue; }
-          const order = event.before.order;
-          plan.push({
-            seq: event.seq, type: event.type, kind: 'task', id,
-            apply: () => { moveTaskBack(id, toStatus, order); },
-            before: { status: current.status, order: current.order }, after: { status: toStatus, order: order },
-          });
-          planState('task', id, { status: toStatus, order });
-          continue;
-        }
-        if (event.type === 'task.layout') {
-          const rows = [];
-          Object.keys(event.after || {}).forEach((taskId) => {
-            const task = readTask(taskId);
-            if (task && task.ganttRow === event.after[taskId]) rows.push({ taskId, ganttRow: event.before ? event.before[taskId] : null });
-          });
-          if (!rows.length) { skipped.push({ seq: event.seq, entity: key, why: 'the layout has moved on' }); continue; }
-          plan.push({ seq: event.seq, type: event.type, kind: 'board', id: 'timeline', apply: () => { rows.forEach((r) => db.prepare('UPDATE tasks SET gantt_row = ?, rev = rev + 1 WHERE id = ?').run(r.ganttRow, r.taskId)); }, before: event.after, after: rows });
-          rows.forEach((r) => planState('task', r.taskId, { ganttRow: r.ganttRow }));
-          continue;
-        }
-        skipped.push({ seq: event.seq, entity: key, why: 'no compensation for ' + event.type });
-        continue;
+        // what the agent set it to. A mismatch means the log and the rows disagree,
+        // which is worth refusing over rather than stamping through.
+        const clash = fields.filter((f) => state[f] !== effect.after[f] && String(state[f] ?? '') !== String(effect.after[f] ?? ''));
+        if (clash.length) { conflict(event, key, 'the stored value is not the one the agent set', clash); continue; }
+        const back = {};
+        fields.forEach((f) => { back[f] = effect.before ? effect.before[f] : null; });
+        schedule(event, makeEffect(effect.kind, effect.id, 'update', effect.after, back),
+          () => putFieldsBack(effect.kind, effect.id, back));
       }
-
-      if (event.entity.kind === 'project') {
-        const id = event.entity.id;
-        const current = readProject(id);
-        if (event.type === 'project.create') {
-          if (!current) { skipped.push({ seq: event.seq, entity: key, why: 'already gone' }); continue; }
-          const foreign = foreignSince('project', id, event.seq, null);
-          if (foreign) { conflict(event, 'changed by ' + foreign.actor + ' (' + foreign.type + ', seq ' + foreign.seq + ') after the agent created it', foreign.fields); continue; }
-          const orphans = db.prepare('SELECT id FROM tasks WHERE project_id = ?').all(id).map((r) => r.id);
-          plan.push({ seq: event.seq, type: event.type, kind: 'project', id, apply: () => { db.prepare('UPDATE tasks SET project_id = NULL WHERE project_id = ?').run(id); db.prepare('DELETE FROM projects WHERE id = ?').run(id); }, before: current, after: null, orphans });
-          planState('project', id, null);
-          continue;
-        }
-        if (event.type === 'project.delete') {
-          if (current) { skipped.push({ seq: event.seq, entity: key, why: 'something with that id exists again' }); continue; }
-          const record = event.before;
-          if (!record) { skipped.push({ seq: event.seq, entity: key, why: 'the event did not keep the record' }); continue; }
-          const orphans = (event.extra && event.extra.orphanedTaskIds) || [];
-          plan.push({
-            seq: event.seq, type: event.type, kind: 'project', id,
-            apply: () => {
-              insertProjectRecord(record, (Number(record.rev) || 1) + 1);
-              orphans.forEach((taskId) => { if (readTask(taskId)) db.prepare('UPDATE tasks SET project_id = ?, rev = rev + 1 WHERE id = ?').run(id, taskId); });
-            },
-            before: null, after: record, orphans,
-          });
-          planState('project', id, record);
-          continue;
-        }
-        if (!current) { skipped.push({ seq: event.seq, entity: key, why: 'the project is gone' }); continue; }
-        if (event.type === 'project.archive' || event.type === 'project.restore') {
-          const foreign = foreignSince('project', id, event.seq, ['archivedAt']);
-          if (foreign) { conflict(event, 'changed by ' + foreign.actor + ' (' + foreign.type + ', seq ' + foreign.seq + ') after this change', foreign.fields); continue; }
-          const was = event.before ? event.before.archivedAt : null;
-          plan.push({ seq: event.seq, type: event.type, kind: 'project', id, apply: () => { db.prepare('UPDATE projects SET archived_at = ?, rev = rev + 1 WHERE id = ?').run(was, id); }, before: { archivedAt: current.archivedAt }, after: { archivedAt: was } });
-          planState('project', id, { archivedAt: was });
-          continue;
-        }
-        skipped.push({ seq: event.seq, entity: key, why: 'no compensation for ' + event.type });
-        continue;
-      }
-
-      if (event.entity.kind === 'run') {
-        const run = readRun();
-        if (event.type === 'run.lock') {
-          if (!run) { skipped.push({ seq: event.seq, entity: key, why: 'the run is already over' }); continue; }
-          plan.push({ seq: event.seq, type: event.type, kind: 'run', id: 'run', apply: () => { db.prepare('DELETE FROM runs WHERE id = 1').run(); }, before: { lockedAt: run.lockedAt }, after: null });
-          continue;
-        }
-        if (event.type === 'run.unlock') {
-          const record = event.before;
-          if (!record || run) { skipped.push({ seq: event.seq, entity: key, why: run ? 'a run is locked again' : 'the event did not keep the plan' }); continue; }
-          plan.push({ seq: event.seq, type: event.type, kind: 'run', id: 'run', apply: () => { insertRunRecord(record); }, before: null, after: { lockedAt: record.lockedAt, memberIds: (record.members || []).map((m) => m.id) } });
-          continue;
-        }
-        skipped.push({ seq: event.seq, entity: key, why: 'no compensation for ' + event.type });
-        continue;
-      }
-
-      skipped.push({ seq: event.seq, entity: key, why: 'no compensation for ' + event.type });
     }
 
     const report = {
       actor, since: since.toISOString(), until: until.toISOString(),
+      throughSeq: throughSeq !== null ? throughSeq : headSeq(),
+      frozen: throughSeq !== null,
       considered: events.length,
-      willRevert: plan.map((p) => ({ seq: p.seq, type: p.type, entity: p.kind + ':' + p.id })),
+      willRevert: plan.map((p) => ({ seq: p.seq, type: p.type, entity: p.effect.kind + ':' + p.effect.id, op: p.effect.op, fields: effectFields(p.effect) })),
       conflicts, skipped,
     };
     if (dryRun) {
@@ -1108,18 +1337,19 @@ const COMMANDS = {
       apply() {
         const reverted = [];
         plan.forEach((item) => {
-          item.apply();
-          reverted.push({ seq: item.seq, type: item.type, entity: item.kind + ':' + item.id });
+          item.undo();
+          reverted.push({ seq: item.seq, type: item.type, entity: item.effect.kind + ':' + item.effect.id, op: item.effect.op });
         });
         report.reverted = reverted;
         return {
           value: report,
           // The revert is itself an event, so the log says who undid what and when —
-          // and the reverted entity is named in `after` so attribution can be updated.
+          // and every record it put back is named as an effect, so it is attributed
+          // and can be reverted in turn.
           before: { events: plan.map((p) => p.seq) },
           after: { reverted },
-          extra: { actor, since: report.since, until: report.until, conflicts: conflicts.length },
-          attributes: reverted.map((r) => { const [kind, id] = r.entity.split(':'); return { kind, id }; }),
+          extra: { actor, since: report.since, until: report.until, throughSeq: report.throughSeq, conflicts: conflicts.length },
+          effects: plan.map((p) => p.effect),
         };
       },
     };
@@ -1161,6 +1391,21 @@ function runCommand(envelope, who) {
     return { ok: true, commandId, replayed: true, changed: false, seq: seen.seq, rev: null, value: JSON.parse(seen.result_json) };
   }
 
+  // AN AGENT HAS TO SAY WHICH REVISION IT READ.
+  //
+  // This is optimistic concurrency, not permission: a person watching the board acts
+  // on what is on their screen, and so does an agent — except an agent's screen can be
+  // an hour old. Without this, an agent that read a task at revision 12 and acted after
+  // a human had taken it to 13 overwrote the human's edit with a change computed from a
+  // world that no longer existed. With it, the stale agent is refused, re-reads, and
+  // acts on what is really there.
+  if (String(actor).startsWith('agent:') && REVISION_BOUND.has(type) && (env.ifRev === undefined || env.ifRev === null)) {
+    return { ...refuse('REV_REQUIRED', {
+      kind: type.startsWith('task') ? 'task' : 'project',
+      id: (type.startsWith('task') ? payload.taskId : payload.projectId) || null,
+    }), commandId };
+  }
+
   const checked = handler(payload, { actor, client, ifRev: env.ifRev, commandId });
   if (!checked.ok) return { ...checked, commandId };
 
@@ -1174,37 +1419,52 @@ function runCommand(envelope, who) {
     const changed = applied.changed !== false && (applied.before !== null || applied.after !== null);
     if (changed) {
       seq = seq + 1;
+      // Every record this command touched, in the order it touched them. A handler
+      // that does not describe its own effects gets the single obvious one, so a new
+      // command is attributable and revertible by default rather than by memory.
+      const effects = Array.isArray(applied.effects) && applied.effects.length
+        ? applied.effects
+        : [makeEffect(entity.kind, entity.id,
+          checked.created ? 'create' : (applied.after === null || applied.after === undefined ? 'delete' : 'update'),
+          applied.before === undefined ? null : applied.before,
+          applied.after === undefined ? null : applied.after)];
       // A creation IS revision 1 — the first version of the record — so it does not
-      // bump. Everything else moves the revision on by one, which is what makes an
-      // `ifRev` from a client that has seen this event meaningful.
-      if (!checked.created) {
-        if (entity.kind === 'task') db.prepare('UPDATE tasks SET rev = rev + 1 WHERE id = ?').run(entity.id);
-        else if (entity.kind === 'project') db.prepare('UPDATE projects SET rev = rev + 1 WHERE id = ?').run(entity.id);
-        else if (entity.kind === 'run') db.prepare('UPDATE runs SET rev = rev + 1 WHERE id = 1').run();
+      // bump. Every record an `update` effect names does, which is what makes an
+      // `ifRev` from a client that has seen this event meaningful — including for a
+      // sibling renumbered by somebody else's move, which used to change without the
+      // revision moving at all.
+      effects.forEach((effect) => {
+        if (effect.op === 'update') bumpRev(effect.kind, effect.id);
+      });
+      if (checked.created && !effects.some((e) => e.op === 'create')) {
+        bumpRev(entity.kind, entity.id);
       }
       rev = entity.kind === 'task' ? (readTask(entity.id) || {}).rev
         : entity.kind === 'project' ? (readProject(entity.id) || {}).rev
           : entity.kind === 'run' ? ((readRun() || {}).rev ?? null) : null;
-      db.prepare(`INSERT INTO events (seq, at, type, command_id, actor, client, entity_kind, entity_id, before_json, after_json, extra_json)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      db.prepare(`INSERT INTO events (seq, at, type, command_id, actor, client, entity_kind, entity_id, before_json, after_json, extra_json, effects_json)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(seq, at, type, commandId, actor, client, entity.kind, entity.id,
           applied.before === undefined || applied.before === null ? null : jsonOf(applied.before),
           applied.after === undefined || applied.after === null ? null : jsonOf(applied.after),
-          applied.extra ? jsonOf(applied.extra) : null);
-      // Who did it, on the record itself, in the same transaction as the change.
-      attributionUpdate(entity.kind, entity.id, actor, at, type, seq, Boolean(checked.created));
-      // A command with collateral effects names them, and they are attributed too —
-      // otherwise a task orphaned by a project delete would look untouched by it.
-      (applied.extra && applied.extra.orphanedTaskIds ? applied.extra.orphanedTaskIds : []).forEach((id) => {
-        attributionUpdate('task', id, actor, at, type, seq, false);
-      });
-      // A compensation names every record it put back, because a revert is a change
-      // like any other and the board must be able to say who did it.
-      (applied.attributes || []).forEach((target) => {
-        attributionUpdate(target.kind, target.id, actor, at, type, seq, false);
+          applied.extra ? jsonOf(applied.extra) : null,
+          jsonOf(effects));
+      // Who did it, on every record it happened to, in the same transaction as the
+      // change. A task orphaned by a project delete, or a sibling renumbered by a
+      // move, is a record somebody changed — leaving it unattributed is how the board
+      // ends up unable to say who moved it.
+      effects.forEach((effect) => {
+        attributionUpdate(effect.kind, effect.id, actor, at, type, seq, effect.op === 'create' && !effect.restored, effect.createdBy || null);
       });
     }
-    const value = applied.value;
+    // Read the answer AFTER the revision has moved: a handler that returns a live
+    // record used to hand back the revision from before its own bump, which is the
+    // one number a client is most likely to chain `ifRev` from.
+    let value = typeof applied.value === 'function' ? applied.value() : applied.value;
+    if (changed && value && typeof value === 'object' && value.id === entity.id) {
+      const fresh = entity.kind === 'task' ? readTask(entity.id) : entity.kind === 'project' ? readProject(entity.id) : null;
+      if (fresh) value = fresh;
+    }
     if (!changed) {
       // A command that changed nothing still answers with the revision the record is
       // at, so a client can chain `ifRev` from it without another read.
@@ -1238,6 +1498,8 @@ function rowToEvent(row) {
     entity: { kind: row.entity_kind, id: row.entity_id },
     before: parse(row.before_json),
     after: parse(row.after_json),
+    // Every record this event touched, not just the one it is named after.
+    effects: parse(row.effects_json) || [],
     ...(row.extra_json ? { extra: parse(row.extra_json) } : {}),
   };
 }
@@ -1453,12 +1715,25 @@ function importLegacy({ origin, bytes, client }) {
  * transaction rather than computed by scanning the log on every snapshot — the diff
  * the reader sees must not be a guess, and it must survive a restart.
  */
-function attributionUpdate(kind, id, actor, at, type, seq, isCreate) {
+function createdByOf(kind, id) {
+  const table = kind === 'task' ? 'tasks' : kind === 'project' ? 'projects' : null;
+  if (!table) return null;
+  const row = db.prepare('SELECT created_by FROM ' + table + ' WHERE id = ?').get(id);
+  return row ? (row.created_by || null) : null;
+}
+
+function attributionUpdate(kind, id, actor, at, type, seq, isCreate, createdBy) {
   const table = kind === 'task' ? 'tasks' : kind === 'project' ? 'projects' : null;
   if (!table) return;
   if (isCreate) {
     db.prepare('UPDATE ' + table + ' SET created_by = ?, last_actor = ?, last_at = ?, last_type = ?, last_seq = ? WHERE id = ?')
       .run(actor, actor, at, type, seq, id);
+  } else if (createdBy) {
+    // A record put back by an undo keeps the creator it had: the person undoing a
+    // delete did not make the thing, and COALESCE means a record that already knows
+    // its creator is never rewritten.
+    db.prepare('UPDATE ' + table + ' SET created_by = COALESCE(created_by, ?), last_actor = ?, last_at = ?, last_type = ?, last_seq = ? WHERE id = ?')
+      .run(createdBy, actor, at, type, seq, id);
   } else {
     db.prepare('UPDATE ' + table + ' SET last_actor = ?, last_at = ?, last_type = ?, last_seq = ? WHERE id = ?')
       .run(actor, at, type, seq, id);
@@ -1558,6 +1833,27 @@ function authorised(req, url) {
     return { actor: 'human:minh', kind: 'session', client: cookieOf(req, 'proxima_client') || 'cockpit' };
   }
   return null;
+}
+
+/**
+ * The control plane.
+ *
+ * Data plane — create, edit, move, delete — is open to every credential: the creator
+ * chose frictionless, and an agent that had to ask would not be one. The control
+ * plane is different in kind: importing bytes records mutations the undo cannot see,
+ * minting a credential is how authority is handed out, and reverting somebody else's
+ * work is rewriting history that is not yours. Those are the operator's, and saying so
+ * is not permission friction — it is the difference between an agent and an owner.
+ */
+function operatorOnly(req, res, who, what) {
+  if (who && isHumanActor(who.actor)) return false;
+  send(res, 403, {
+    ok: false,
+    code: 'FORBIDDEN',
+    message: 'That is the operator’s to do: ' + what + '. Nothing was changed.',
+    details: { actor: who ? who.actor : null, endpoint: req.url },
+  });
+  return true;
 }
 
 function send(res, status, body, headers) {
@@ -1739,9 +2035,7 @@ const server = createServer(async (req, res) => {
         // Only the operator may mint an agent, and only through this door: it is the
         // one place a token is written, so the credentials table and the file on disk
         // cannot drift apart.
-        if (!who || who.actor !== 'human:minh') {
-          return send(res, 403, { ok: false, code: 'OPERATOR_ONLY', message: 'Only the operator token may create an agent credential.' });
-        }
+        if (operatorOnly(req, res, who, 'create an agent credential')) return undefined;
         const raw = await readBody(req);
         let body;
         try { body = JSON.parse(raw || '{}'); } catch { return send(res, 400, { ...refuse('PAYLOAD_INVALID', { type: 'agent', missing: ['a JSON body'] }) }); }
@@ -1760,6 +2054,37 @@ const server = createServer(async (req, res) => {
         });
       }
       return send(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED' });
+    }
+
+    if (url.pathname === '/v1/agents/revoke' && req.method === 'POST') {
+      if (operatorOnly(req, res, who, 'revoke an agent credential')) return undefined;
+      const raw = await readBody(req);
+      let body;
+      try { body = JSON.parse(raw || '{}'); } catch { return send(res, 400, { ...refuse('PAYLOAD_INVALID', { type: 'revoke', missing: ['a JSON body'] }) }); }
+      const name = String(body.name || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
+      if (!name) return send(res, 400, { ...refuse('NAME_REQUIRED', {}) });
+      const actor = 'agent:' + name;
+      const path = join(AGENTS_DIR, name + '.token');
+      // All three, together, or the revocation is only a story: a file left behind is
+      // a working credential, and a row left behind is one that still looks alive.
+      const fileRemoved = existsSync(path);
+      if (fileRemoved) { try { unlinkSync(path); } catch { /* reported below */ } }
+      const removed = db.prepare('DELETE FROM credentials WHERE actor = ?').run(actor).changes;
+      for (const [token, entry] of [...credentialCache]) {
+        if (entry.actor === actor) credentialCache.delete(token);
+      }
+      loadCredentials();
+      const stillThere = existsSync(path);
+      return send(res, stillThere ? 500 : 200, {
+        ok: !stillThere,
+        actor,
+        tokenFile: path,
+        fileRemoved: fileRemoved && !stillThere,
+        credentialsRemoved: removed,
+        message: stillThere
+          ? 'The token file could not be removed, so ' + actor + ' can still write. Nothing else was changed.'
+          : actor + ' is revoked: token file gone, credentials row gone, cached credential dropped. What it already wrote stays, and stays attributed to it.',
+      });
     }
 
     if (url.pathname === '/v1/log' && req.method === 'GET') {
@@ -1785,6 +2110,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === '/v1/imports' && req.method === 'GET') {
+      if (operatorOnly(req, res, who, 'read what has been imported')) return undefined;
       return send(res, 200, {
         ok: true,
         backups: readdirSync(BACKUPS_DIR).filter((f) => f.endsWith('.json') && !f.endsWith('.meta.json')),
@@ -1796,6 +2122,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === '/v1/import/inspect' && req.method === 'POST') {
+      if (operatorOnly(req, res, who, 'inspect a legacy board for import')) return undefined;
       const raw = await readBody(req);
       let body;
       try { body = JSON.parse(raw || '{}'); } catch { return send(res, 400, { ...refuse('PAYLOAD_INVALID', { type: 'legacy inspect', missing: ['a JSON body'] }) }); }
@@ -1816,6 +2143,10 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === '/v1/import' && req.method === 'POST') {
+      // Import writes rows that carry no actor of their own and are excluded from
+      // every undo, which is exactly why it is not an agent's to do: it would be a
+      // door into the board that attribution and history.revert both look away from.
+      if (operatorOnly(req, res, who, 'import a legacy board')) return undefined;
       const raw = await readBody(req);
       let body;
       try { body = JSON.parse(raw || '{}'); } catch { return send(res, 400, { ...refuse('PAYLOAD_INVALID', { type: 'legacy import', missing: ['a JSON body'] }) }); }

@@ -23,6 +23,13 @@
     <a class="surf" id="navProject" href="#/project/" data-route="project" hidden></a>
   </nav>
   <span class="spacer"></span>
+  <!-- What the agents have been doing, on every route.
+       The board's own activity line is a diff and only exists where the board does;
+       the creator standing on This is Minh — the place they go to watch the
+       portfolio — was told nothing. This is the same fact in the shell: one quiet
+       handle, no badge count to chase, and the panel behind it says what KIND of
+       work happened rather than how many rows moved. -->
+  <button id="activityBtn" class="ghost activity-btn" type="button" hidden></button>
   <!-- The project lens, not page identity: it is the Daily board's own filter, so
        it is hidden everywhere the board is not the thing on screen. -->
   <label class="projpick" id="lensPick">Project
@@ -239,6 +246,18 @@
       <button value="later" id="migrateLater" class="ghost" formnovalidate>Not now — keep it in the browser</button>
       <span class="spacer"></span>
       <button value="import" id="migrateConfirm" class="primary">Import into the service</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="activityDialog">
+  <form method="dialog" id="activityForm">
+    <h3>What the agents did</h3>
+    <p class="confirm-body" id="activityIntro"></p>
+    <div class="activity-rows" id="activityRows"></div>
+    <menu>
+      <span class="spacer"></span>
+      <button value="close" class="ghost" formnovalidate>Close</button>
     </menu>
   </form>
 </dialog>

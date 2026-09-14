@@ -82,7 +82,8 @@ schema change the first time either lands.
 | `POST /v1/commands` | one command: the envelope below, the same refusals back |
 | `GET /v1/events?after=N` | server-sent events; resumes from `Last-Event-ID` |
 | `GET /v1/log` | the log as JSON: `?after=<seq>` (a watermark) or `?since=<iso>` (a time), plus `?actor`, `?limit` |
-| `GET`/`POST /v1/agents` | list agent credentials; `POST { name }` mints one |
+| `GET`/`POST /v1/agents` | list agent credentials; `POST { name }` mints one (operator only) |
+| `POST /v1/agents/revoke` | `{ name }` — file, credentials row and cached credential, together (operator only) |
 | `POST /v1/session` | mint the cockpit's session cookie |
 | `GET`/`PUT /v1/preferences/:client` | how a cockpit looks |
 | `POST /v1/import/inspect` | what a legacy store would bring, and what conflicts |
@@ -126,6 +127,25 @@ log is the whole safety net, and an event log whose actor can be set by whoever 
 calling proves nothing. A token is read from a file, never passed on a command line —
 a command line is visible in the process table.
 
+### The control plane is the operator's
+
+The creator chose frictionless, so **the data plane is open to every credential**:
+create, edit, move, delete — an agent that had to ask would not be one. Four things
+are not data, and are refused to an agent with `FORBIDDEN`:
+
+| Act | Why it is not an agent's |
+| --- | --- |
+| `POST /v1/import`, `/v1/import/inspect` | It writes rows attributed to `migration:localstorage`, which `history.revert` excludes — a door into the board that both attribution and undo look away from. |
+| `POST /v1/agents`, `/v1/agents/revoke` | Handing out or taking away authority is not writing a task. |
+| `history.revert` for another actor | Rewriting somebody else's history. **An agent may at most revert itself**; the operator may revert anyone. |
+| anything else the service later grows that is not a board change | The test is "is this a change to the board", not "is this dangerous". |
+
+Revocation is one call and it is immediate: `POST /v1/agents/revoke` removes the token
+file, deletes the `credentials` row and drops the cached credential in the same
+request. A token file deleted by hand is also honoured on the next request — the
+credential cache re-checks that the file still exists — because a revoked credential
+that keeps working until a restart is not revoked.
+
 A cockpit served from somewhere else (a dev static server) is trusted by naming its
 origin at startup: `--allow-origin http://127.0.0.1:4180`. Without that flag the
 cockpit must be served by the service itself. On Windows the 0600 mode is advisory —
@@ -154,6 +174,13 @@ than assumed.
   cannot choose its actor**: it is resolved from the token or the session, and a
   mismatch is `ACTOR_MISMATCH`. A session may name its `client`; a bearer token's
   client is fixed by the credential.
+- **`ifRev` is required of an agent** on any command that changes a record which
+  already exists: `task.patch`, `task.move`, `task.delete`, `project.archive`,
+  `project.restore`, `project.delete`. Missing it is `REV_REQUIRED`; stale is
+  `ENTITY_REV_CONFLICT`. This is optimistic concurrency, not permission: a person acts
+  on what is on their screen, and so does an agent — except an agent's screen can be an
+  hour old, and without this a change computed from a world that no longer exists
+  overwrites one that does.
 
 | Command | Payload | Notes |
 | --- | --- | --- |
@@ -179,32 +206,37 @@ values were before.
 - **Selection** is by actor and time window: `actor` is required, `since`/`until`
   default to the last hour. `history.revert` and `migration.*` events are excluded —
   undoing the agent's work is not more agent work, and counting it would make the line
-  grow every time somebody used it.
-- **Compensation is per event, in reverse order**, not per record. Two agent edits to
-  the same field in a row are the normal case; stopping after the newest one would
-  leave the older edit in place, which is not what "revert what the agent did" means.
-  Because the plan is built newest-first and applied newest-first, an older change is
-  checked against the value the newer compensation is *about to* put back, not against
-  the rows as they stand.
+  grow every time somebody used it. An agent may only revert **itself**.
+- **The set is frozen between the plan and the act.** A dry run answers with the
+  sequence it planned against (`throughSeq`), and the execution is given it back. Two
+  calls that each computed "the last hour" would let everything that happened while the
+  reader was reading the confirmation join a set nobody described. Later *human* edits
+  still take part in conflict checking — but a later agent event cannot silently join
+  the undo.
+- **Compensation is per EFFECT, newest first.** Two agent edits to the same field in a
+  row are the normal case, not an edge case; the plan walks every effect of every
+  event, and a shadow state records what each record will hold once the plan so far is
+  applied — so both the conflict test and the lifecycle branches read the value the
+  newer compensation is *about to* put back, not the row as it stands.
+- **Lifecycle branches read that shadow state too.** An agent that created a task and
+  then deleted it plans restore-then-delete, so the board ends where it started. Reading
+  the live rows instead left a task that existed neither before nor after the agent.
 - **Conflicts refuse; they never stamp.** If somebody else has changed *the same field*
-  since that event, that change is reported in `conflicts` and left alone — reverting
-  over a person's edit would destroy work they can see, which is worse than not
-  reverting. The test is field-aware on purpose: a human who renamed a task while the
-  agent was changing its weight has not touched anything the compensation would
-  overwrite. Where the whole record is at stake — taking back a creation, which means
-  deleting it — any foreign touch refuses, because what is about to disappear is not
-  one field.
+  since that effect, it is reported in `conflicts` and left alone. Field-aware on
+  purpose: a human who renamed a task while the agent was changing its weight has not
+  touched anything the compensation would overwrite. Where the whole record is at stake
+  — deleting what the agent created, or restoring what it deleted — any foreign touch
+  refuses, because what is about to appear or disappear is not one field.
 - **Deletes are recoverable.** `task.delete` and `project.delete` keep the whole record
-  in `before`, so the record comes back with its id, its `createdAt` and its unknown
-  fields, at revision + 1.
+  in the effect, so it comes back with its id, its `createdAt`, its unknown fields and
+  the creator it had.
 - **`dryRun: true`** returns the same report without writing. The cockpit's
   confirmation is produced by this call, so the sentence describing the undo and the
-  undo itself are the same code — a separate "what would happen" implementation could
-  disagree with the real one, and the disagreement would show up after the fact.
-- The revert is itself an event, attributed to whoever asked for it, so the log says
-  who undid what and the undo can be undone in turn.
-- The report is `{ considered, willRevert, reverted?, conflicts, skipped }`, each entry
-  naming the sequence, the entity and the reason.
+  undo itself are the same code.
+- The revert is itself an event with effects, attributed to whoever asked for it, so
+  the log says who undid what and the undo can be undone in turn. Re-running an undo
+  that already happened refuses rather than re-applying: the earlier revert is a
+  foreign event like any other.
 
 ### Results
 
@@ -224,7 +256,25 @@ accepted with nothing to do: no event, no revision, no new sequence number.
 `DATE_INVALID`, `DEADLINE_BEFORE_START`, `WEIGHT_INVALID`, `STATUS_UNKNOWN`,
 `PROJECT_NOT_FOUND`, `GANTT_ROW_INVALID`, `FIELD_NOT_PATCHABLE`,
 `MOVE_ANCHOR_NOT_IN_COLUMN`, `RUN_HAS_NO_MEMBERS`, `RUN_TARGET_INVALID`,
-`RUN_ALREADY_LOCKED`, `ACTOR_MISMATCH`, `WRITE_FAILED`.
+`RUN_ALREADY_LOCKED`, `RUN_MEMBER_LOCKED`, `RUN_LOCKED`, `ACTOR_MISMATCH`,
+`REV_REQUIRED`, `FORBIDDEN`, `WRITE_FAILED`.
+
+### The locked plan is the service's rule, not the cockpit's
+
+A locked run freezes a plan, and the cockpit has always enforced that by disabling
+things: planned cards are not draggable, their weight steppers are disabled, drops into
+Running are refused. That made the rules *gestures* rather than rules — an agent with a
+token could change a member's weight, walk a member out of the running column, fill the
+column with newcomers, or delete the last member and leave a plan with nobody in it.
+Both clients answer to the service now:
+
+- Changing the **weight** of a planned member → `RUN_MEMBER_LOCKED`.
+- Moving a planned member **out of** the running column → `RUN_MEMBER_LOCKED`.
+- Moving anything else **into** the running column while a run is locked → `RUN_LOCKED`.
+- Reordering a member *within* the column stays allowed: it does not touch the frozen
+  plan, and the plan snapshots its own order.
+- Deleting the last member **ends the run**, and the delete event names the run it
+  ended — so the undo puts both back rather than leaving a plan with nobody in it.
 
 Each carries `message` (a sentence for the reader) and `details` (fields for a
 client). The cockpit prevalidates for feel; the refusal is authoritative.
@@ -235,6 +285,39 @@ Every committed command writes its state change, its command row and its event i
 transaction. The event carries a monotonic `seq`, the time, the type, the command id,
 the actor, the client, the entity, and before/after values. A creation is revision 1;
 everything else moves the revision on by one.
+
+### Effects: what an event actually did
+
+An event used to name one entity and hope. A `task.move` renumbered every sibling in
+the destination column and said nothing about them; a `project.delete` orphaned a dozen
+tasks silently. Compensation then had to *infer* those effects, and the inference was
+wrong exactly where it mattered — an undo could drag a task back into a project the
+human had since moved it out of, or renumber a column away from the values it had just
+restored.
+
+So every event carries `effects_json`: the list of records it touched, each with one of
+three ops.
+
+| op | before / after | taken back by |
+| --- | --- | --- |
+| `create` | `null` / the whole record | deleting the record |
+| `delete` | the whole record / `null` | restoring it, with its id, `createdAt` and unknown fields |
+| `update` | the CHANGED FIELDS only | putting those fields back |
+
+Handlers describe their own effects — a move names the siblings it renumbered, a
+project delete names every task it orphaned, a layout pass names each task whose row
+moved, and deleting the last member of a locked plan names the run that ended with it.
+A handler that describes nothing gets the single obvious effect, so a new command is
+attributable and revertible by default rather than by memory.
+
+Three things read that list and nothing else:
+
+- **Attribution** — every record in it is stamped, in the same transaction.
+- **Revisions** — every `update` effect's record has its revision moved on. A sibling
+  renumbered by somebody else's move used to change with no revision movement at all,
+  which is precisely the change an `ifRev` is supposed to catch.
+- **Undo** — conflict checking and compensation both walk effects, so "did anyone else
+  touch this field" is answerable for a record the event never named.
 
 ### Attribution
 
@@ -277,7 +360,7 @@ their layout. The route and the Daily lens are pure view state and are stored no
 ### Seeing what an agent did, and taking it back
 
 Because there is no approval step, the board has to answer "was this a person or an
-agent" without being asked. Two places do it:
+agent" without being asked. Three places do it:
 
 - **On the card.** A task an agent created or last changed carries one short line
   naming it (`◆ scout changed this`), from `board.attribution`. One line, not a badge
@@ -286,21 +369,28 @@ agent" without being asked. Two places do it:
   skips a window's own changes — without that, a marker would still name the agent
   after the reader had edited the card themselves, which is the one thing attribution
   must never do.
+- **In the shell, on every route** — a handle that names the busiest agent in the last
+  hour and opens a panel of **what kind of work** it did: `9 changes — 3 new, 2 edits,
+  2 moves, 1 delete, 1 plan change · last 5m ago`, with deletes marked in the danger
+  colour wherever they appear. Counting is not summarising: "23 changes" does not tell
+  the creator whether their coworker spent the hour tidying or deleting. It is on every
+  route because attribution is the FIRST line of defence — the creator standing on the
+  Hub, watching the portfolio, is exactly who needs it — while the board's own line
+  exists only where the board does.
 - **On the activity line**, above the board: a **diff, not a notification centre**.
   Nothing is delivered and nothing expires. It counts what moved since this window
   last looked, per actor; the watermark (`proxima.seen.v1`) is this window's, and
   `Mark as seen` moves it. The SSE stream and a `GET /v1/log?after=` catch-up at boot
-  both feed it, so a change made while the page is open appears without a reload.
+  both feed it — **in pages**, and if the paging bound is ever reached the line says
+  how many it did not read rather than reporting a quiet hour.
 
-Each agent named on that line is a handle: `Revert scout's last hour` dry-runs the
+Each agent named in either place is a handle: `Revert scout's last hour` dry-runs the
 revert, states exactly what will be put back and what will be refused (naming the
 fields), and only then does it. The button carries **no number** — the honest count
 only exists after the dry run, and a button that promised three and took back nine
-would make the reader distrust every number on the page. Both calls share one
-`since`, computed once, so the reader's own reading time cannot shrink the window
-between the promise and the act. The line stays while an agent has been active in the
-last hour even if the reader has acknowledged everything, so the undo does not
-disappear with the diff.
+would make the reader distrust every number on the page. Both calls share one window
+AND one `throughSeq`, computed once, so neither the reader's reading time nor a busy
+agent can change what the confirmation described.
 
 ### Migration
 
@@ -342,22 +432,28 @@ node service/proxima-client.mjs lock <YYYY-MM-DDTHH:MM> <taskId>…  |  unlock
 node service/proxima-client.mjs log [--since <iso>] [--actor <actor>] [--limit 50]
 node service/proxima-client.mjs activity [--hours 1]
 node service/proxima-client.mjs undo --actor agent:scout [--hours 1] [--dry-run]
-node service/proxima-client.mjs agents [add <name>]
-node service/proxima-client.mjs raw <type> '<json payload>'
+node service/proxima-client.mjs agents [add <name> | revoke <name>]
+node service/proxima-client.mjs raw <type> '<json payload>' [--ifRev <n>]
 ```
 
 **Who you are comes from which token file is read**, never from a flag: `--as scout`
-reads `<home>/agents/scout.token` and the service decides who that is. A token on a
-command line would be visible in the process table.
+reads `<home>/agents/scout.token` and the service decides who that is. There is no
+`--token` and there will not be: a command line is visible in the process table, and
+a per-agent credential exists so that it is not something anyone waves around.
+
+**Mutations of an existing record read first, then act** — `patch`, `move`, `delete`,
+`archive`, `restore` and `project delete` all fetch the revision they are acting on
+and send it as `ifRev`. That is the same requirement the service puts on an agent
+(`REV_REQUIRED`), done for the caller so the honest path is the easy one.
 
 ---
 
 ## What is not built, and why that is next
 
-- **Per-operation permission policy.** An agent may do anything the vocabulary can do.
-  There is no "this agent may not delete" — the creator chose frictionless, and the
-  answers that exist instead are attribution and undo. A second *human*, and the
-  question of what an agent may do that a human may not, is still open.
+- **Per-operation permission policy.** Agents may write anything the vocabulary can
+  write — the creator chose frictionless, and what stands in for a policy is
+  attribution, `ifRev` and undo. The control plane (import, credentials, reverting
+  somebody else) is the operator's; see above. A second *human* is still open.
 - **Compaction.** The log keeps everything; `RESYNC_REQUIRED` is implemented for the
   day it does not.
 - **Attachments.** The table exists; nothing writes to `files/` yet, because file

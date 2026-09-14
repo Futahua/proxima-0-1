@@ -179,6 +179,7 @@ const Store = (() => {
   /** How far back the undo reaches. One number, used by the label and by the call. */
   const UNDO_WINDOW_MS = 3600 * 1000;
   let agentHour = [];
+  let truncated = 0;
   let headSeq = 0;
   let schemaVersion = SCHEMA_VERSION;
   let instanceId = null;
@@ -240,6 +241,44 @@ const Store = (() => {
 
   function readSeen() {
     try { return Number(localStorage.getItem(SEEN_KEY)) || 0; } catch { return 0; }
+  }
+
+  /**
+   * What kind of act an event was, in words a reader uses.
+   *
+   * Counting is not summarising: "23 changes" tells the creator nothing about whether
+   * their coworker spent the hour tidying or deleting. The categories are coarse on
+   * purpose — five words cover the vocabulary and a reader can hold five.
+   */
+  const emptyKinds = () => ({ created: 0, edits: 0, moves: 0, deleted: 0, projects: 0, plans: 0, layouts: 0 });
+
+  function tally(kinds, type) {
+    const t = String(type || '');
+    if (t === 'task.create') kinds.created += 1;
+    else if (t === 'task.patch') kinds.edits += 1;
+    else if (t === 'task.move') kinds.moves += 1;
+    else if (t === 'task.delete') kinds.deleted += 1;
+    else if (t.startsWith('project.')) kinds.projects += 1;
+    else if (t.startsWith('run.')) kinds.plans += 1;
+    else if (t === 'task.layout') kinds.layouts += 1;
+  }
+
+  /** "14 edits, 7 moves, 2 deletes" — in parts, so a caller can style one of them. */
+  function kindParts(kinds) {
+    // [key, word, does the word take an s]
+    const order = [
+      ['created', 'new', false], ['edits', 'edit', true], ['moves', 'move', true], ['deleted', 'delete', true],
+      ['projects', 'project change', false], ['plans', 'plan change', false], ['layouts', 'layout pass', false],
+    ];
+    return order.filter(([key]) => kinds[key] > 0).map(([key, word, plural]) => ({
+      key: key,
+      count: kinds[key],
+      label: kinds[key] + ' ' + word + (plural && kinds[key] !== 1 ? 's' : ''),
+    }));
+  }
+
+  function describeKinds(kinds) {
+    return kindParts(kinds).map((part) => part.label).join(', ');
   }
 
   function writeSeen() {
@@ -388,6 +427,7 @@ const Store = (() => {
       // the board, not about who moved it: this window's own change is still a change
       // the reader will want to see named next to the agent's.
       noteEvent(parsed);
+      noteAgentHour(parsed);
       if (parsed.client === clientLabel()) { changed(); return; } // our own change, already applied
       scheduleRefresh();
     };
@@ -455,10 +495,38 @@ const Store = (() => {
    * the reader last acknowledged, straight out of the log.
    */
   async function catchUp() {
-    const result = await authed('GET', '/log?after=' + Math.max(0, seenSeq) + '&limit=200');
-    if (result.status !== 200 || !result.body || !Array.isArray(result.body.events)) return;
+    const page = await fetchLog({ after: Math.max(0, seenSeq) });
     recent = [];
-    result.body.events.forEach(noteEvent);
+    page.events.forEach(noteEvent);
+    // Said out loud rather than swallowed: a diff that quietly stops at a page
+    // boundary reads exactly like a quiet hour.
+    truncated = page.complete ? 0 : Math.max(0, page.headSeq - (page.events.length ? page.events[page.events.length - 1].seq : seenSeq));
+  }
+
+  /**
+   * Read the log in pages.
+   *
+   * Both callers used to ask for one page of 200 and keep whatever came back, so a
+   * busy day silently lost everything past the first page — the diff said "nothing
+   * since you last looked" while four hundred changes sat in the log. The loop is
+   * bounded (not unbounded), and when it stops at the bound the caller is told.
+   */
+  async function fetchLog(params) {
+    const limit = 200;
+    const out = [];
+    let after = Number(params.after) || 0;
+    let head = after;
+    for (let page = 0; page < 25; page++) {
+      const query = '/log?after=' + after + '&limit=' + limit + (params.since ? '&since=' + encodeURIComponent(params.since) : '');
+      const result = await authed('GET', query);
+      if (result.status !== 200 || !result.body || !Array.isArray(result.body.events)) return { events: out, complete: false, headSeq: head };
+      const batch = result.body.events;
+      head = Number(result.body.headSeq) || head;
+      out.push(...batch);
+      if (batch.length < limit) return { events: out, complete: true, headSeq: head };
+      after = batch[batch.length - 1].seq;
+    }
+    return { events: out, complete: false, headSeq: head };
   }
 
   /**
@@ -471,8 +539,18 @@ const Store = (() => {
    */
   async function refreshAgentHour() {
     const since = new Date(Date.now() - UNDO_WINDOW_MS).toISOString();
-    const result = await authed('GET', '/log?since=' + encodeURIComponent(since) + '&limit=200');
-    agentHour = result.status === 200 && result.body && Array.isArray(result.body.events) ? result.body.events : [];
+    const page = await fetchLog({ since });
+    agentHour = page.events.filter((e) => String(e.actor || '').startsWith('agent:'));
+  }
+
+  /** Keep the hour current from the stream, or the handle vanishes when the diff does. */
+  function noteAgentHour(event) {
+    if (!event || !String(event.actor || '').startsWith('agent:')) return;
+    const type = String(event.type || '');
+    if (type.startsWith('history.revert') || type.startsWith('migration.')) return;
+    const cutoff = Date.now() - UNDO_WINDOW_MS;
+    agentHour = agentHour.filter((e) => e.seq !== event.seq && new Date(e.at).getTime() >= cutoff);
+    agentHour.push(event);
   }
 
   // ── Applying our own command results ──────────────────────────────────────
@@ -738,6 +816,10 @@ const Store = (() => {
       return entry ? { ...entry } : null;
     },
 
+    /** "14 edits, 7 moves, 2 deletes" for one actor's entry, biggest first. */
+    describeKinds: describeKinds,
+    kindParts: kindParts,
+
     /**
      * The diff since the reader last looked: what moved, how much of it each actor
      * did, and the moment the window starts from.
@@ -757,10 +839,11 @@ const Store = (() => {
         let oldest = null;
         events.forEach((event) => {
           const who = event.actor || 'unknown';
-          if (!byActor[who]) byActor[who] = { actor: who, count: 0, lastAt: event.at || null, types: {} };
+          if (!byActor[who]) byActor[who] = { actor: who, count: 0, lastAt: event.at || null, types: {}, kinds: emptyKinds() };
           byActor[who].count += 1;
           byActor[who].lastAt = event.at || byActor[who].lastAt;
           byActor[who].types[event.type] = (byActor[who].types[event.type] || 0) + 1;
+          tally(byActor[who].kinds, event.type);
           if (!oldest || event.at < oldest) oldest = event.at;
         });
         return { actors: Object.values(byActor).sort((a, b) => b.count - a.count), oldest };
@@ -775,6 +858,7 @@ const Store = (() => {
         agentsLastHour: hour.actors,
         hourStart: new Date(Date.now() - UNDO_WINDOW_MS).toISOString(),
         undoWindowMs: UNDO_WINDOW_MS,
+        truncated: truncated,
         seenSeq: seenSeq,
         headSeq: headSeq,
       };

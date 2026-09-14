@@ -20,14 +20,19 @@
  *   proxima log [--since <iso>] [--actor <actor>] [--limit 50] [--json]
  *   proxima activity [--hours 1]                        a human-readable diff, newest first
  *   proxima undo --actor agent:scout [--hours 1] [--dry-run]
- *   proxima agents [add <name>]                         list, or mint a credential
+ *   proxima agents [add <name> | revoke <name>]        list, mint, or revoke
  *   proxima raw <type> '<json payload>'
  *
- * Options: --as <agent>, --url <url>, --home <dir>, --token <token>, --json
+ * Options: --as <agent>, --url <url>, --home <dir>, --json
  *
  * The actor comes from WHICH TOKEN FILE IS READ, never from a flag: `--as scout`
- * reads <home>/agents/scout.token and the service decides who that is. A command
- * line is visible in the process table, so a token never appears on one.
+ * reads <home>/agents/scout.token and the service decides who that is. There is no
+ * --token: a command line is visible in the process table, so a token never appears
+ * on one — that is the whole reason each agent has its own file.
+ *
+ * Mutations of an existing record send the revision this command read (patch, move,
+ * delete, archive, restore, project delete). The service requires it of an agent: act
+ * on what you have actually seen, or be refused and read again.
  */
 
 import { readFileSync, existsSync } from 'node:fs';
@@ -40,7 +45,6 @@ for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--url') flags.url = argv[++i];
   else if (a === '--home') flags.home = argv[++i];
-  else if (a === '--token') flags.token = argv[++i];
   else if (a === '--as') flags.as = argv[++i];
   else if (a === '--json') flags.json = true;
   else positional.push(a);
@@ -64,18 +68,25 @@ function tokenPath() {
   }
   const path = join(dataHome(), 'token');
   if (!existsSync(path)) {
-    console.error('No operator token at ' + path + '. Start proximad first, or pass --home/--token.');
+    console.error('No operator token at ' + path + '. Start proximad first, or pass --home.');
     process.exit(2);
   }
   return path;
 }
 
+/**
+ * The token is READ FROM A FILE, always.
+ *
+ * There is deliberately no `--token`: a command line is visible in the process table
+ * to anything else running as this user, and the whole point of a per-agent credential
+ * is that it is not something you wave around. This used to accept one, which made the
+ * documentation a lie in the one place it mattered.
+ */
 function token() {
-  if (flags.token) return flags.token;
   return readFileSync(tokenPath(), 'utf8').trim();
 }
 
-const tokenFile = () => (flags.token ? '(from --token)' : tokenPath());
+const tokenFile = () => tokenPath();
 
 async function api(method, path, body) {
   const response = await fetch(flags.url + path, {
@@ -98,6 +109,25 @@ const send = (type, payload, extra) => api('POST', '/v1/commands', {
   ...(extra && extra.ifRev !== undefined ? { ifRev: extra.ifRev } : {}),
   client: 'cli',
 });
+
+/**
+ * Read the revision of a record, then act on it.
+ *
+ * This is the read-then-write the service now insists on for an agent: act on what you
+ * have actually seen. An agent that read a task an hour ago and writes anyway is
+ * refused, re-reads here, and goes again — which is the whole point of asking.
+ */
+async function revOf(kind, entityId) {
+  const { body } = await api('GET', '/v1/snapshot');
+  const record = kind === 'task'
+    ? (body.board.tasks || []).find((t) => t.id === entityId)
+    : (body.board.projects || []).find((p) => p.id === entityId);
+  if (!record) {
+    console.error('No ' + kind + ' ' + entityId + ' to act on.');
+    process.exit(1);
+  }
+  return record.rev;
+}
 
 /** `create` takes its fields as flags; everything else is positional. */
 function flagsOf(args) {
@@ -203,7 +233,8 @@ async function main() {
       const [taskId, field, ...valueParts] = bare(rest);
       const value = valueParts.join(' ');
       if (!taskId || !field) throw new Error('patch needs <taskId> <field> <value>');
-      const { body } = await send('task.patch', { taskId, patch: { [field]: field === 'weight' ? Number(value) : value } });
+      const ifRev = await revOf('task', taskId);
+      const { body } = await send('task.patch', { taskId, patch: { [field]: field === 'weight' ? Number(value) : value } }, { ifRev });
       if (!body.ok) { show(body); process.exit(1); }
       if (flags.json) { show(body); return undefined; }
       console.log('patched ' + taskId + '  ' + field + ' → ' + JSON.stringify(body.value[field]) + '  (rev ' + body.rev + ')');
@@ -212,7 +243,8 @@ async function main() {
 
     case 'move': {
       const [taskId, toStatus, beforeTaskId] = bare(rest);
-      const { body } = await send('task.move', { taskId, toStatus, beforeTaskId: beforeTaskId || null });
+      const ifRev = await revOf('task', taskId);
+      const { body } = await send('task.move', { taskId, toStatus, beforeTaskId: beforeTaskId || null }, { ifRev });
       if (!body.ok) { show(body); process.exit(1); }
       if (flags.json) { show(body); return undefined; }
       console.log('moved ' + taskId + ' to ' + body.value.status + (beforeTaskId ? ' before ' + beforeTaskId : ' (end of the column)'));
@@ -221,10 +253,12 @@ async function main() {
 
     case 'delete': {
       const taskId = bare(rest)[0];
-      const { body } = await send('task.delete', { taskId });
+      const ifRev = await revOf('task', taskId);
+      const { body } = await send('task.delete', { taskId }, { ifRev });
       if (!body.ok) { show(body); process.exit(1); }
       if (flags.json) { show(body); return undefined; }
-      console.log('deleted ' + taskId + ' — recoverable with:  proxima undo --actor ' +
+      console.log('deleted ' + taskId + (body.value && body.value.endedRun ? ' (the plan had no members left, so the run ended with it)' : '') +
+        ' — recoverable with:  proxima undo --actor ' +
         (flags.as ? 'agent:' + String(flags.as).replace(/^agent:/, '') : 'human:minh'));
       return undefined;
     }
@@ -267,22 +301,53 @@ async function main() {
     case 'undo': {
       if (!f.actor) throw new Error('undo needs --actor (for example --actor agent:scout). Reverting a whole board is not something this does.');
       const hours = Number(f.hours || 1);
-      const payload = {
-        actor: f.actor,
-        since: f.since || new Date(Date.now() - hours * 3600 * 1000).toISOString(),
-        until: f.until || new Date().toISOString(),
+      const since = f.since || new Date(Date.now() - hours * 3600 * 1000).toISOString();
+      const until = f.until || new Date().toISOString();
+      const window = { actor: f.actor, since, until };
+      const isDry = rest.includes('--dry-run') || f['dry-run'] !== undefined;
+
+      /**
+       * Plan first, always — even when the caller did not ask for a dry run.
+       *
+       * The plan names the sequence it planned against, and the real undo is given
+       * that same bound. Two calls that each computed "the last hour" would let
+       * everything that happened while the caller was reading the plan join a set
+       * nobody described. With a frozen bound, what runs is what was planned.
+       */
+      const planned = await send('history.revert', { ...window, dryRun: true });
+      if (!planned.body.ok) { show(planned.body); process.exit(1); }
+      const plan = planned.body.value;
+      const print = (report, verb) => {
+        // A finished report carries both what it did and what it planned; only one of
+        // them is news, and printing both reads as though everything happened twice.
+        (report.reverted || []).forEach((r) => console.log('  ' + verb + '  ' + r.entity + '  (' + r.op + ', from seq ' + r.seq + ')'));
+        if (!report.reverted) (report.willRevert || []).forEach((w) => console.log('  would put back  ' + w.entity + '  (' + w.op + ', from seq ' + w.seq + ')'));
+        report.conflicts.forEach((c) => console.log('  REFUSED   ' + c.entity + ' — ' + c.why + (c.fields && c.fields.length ? ' [' + c.fields.join(', ') + ']' : '')));
+        report.skipped.forEach((s) => console.log('  skipped   ' + s.entity + ' — ' + s.why));
       };
-      if (rest.includes('--dry-run') || f['dry-run'] !== undefined) payload.dryRun = true;
-      const { body } = await send('history.revert', payload);
+
+      if (isDry) {
+        if (flags.json) { show(planned.body); return undefined; }
+        console.log('0 of ' + plan.considered + ' change(s) by ' + plan.actor + ' reverted  (dry run — nothing was written)');
+        console.log('  window ' + plan.since + ' → ' + plan.until + ', frozen at seq ' + plan.throughSeq);
+        print(plan, 'would put back');
+        return undefined;
+      }
+
+      if (!(plan.willRevert || []).length) {
+        if (flags.json) { show(planned.body); return undefined; }
+        console.log('Nothing by ' + plan.actor + ' in that window can be put back (' + plan.conflicts.length + ' refused).');
+        print(plan, 'would put back');
+        return undefined;
+      }
+
+      const { body } = await send('history.revert', { ...window, throughSeq: plan.throughSeq });
       if (!body.ok) { show(body); process.exit(1); }
       const report = body.value;
       if (flags.json) { show(body); return undefined; }
-      console.log((report.reverted ? report.reverted.length : 0) + ' of ' + report.considered + ' change(s) by ' + report.actor + ' reverted' +
-        (payload.dryRun ? '  (dry run — nothing was written)' : ''));
-      (report.reverted || []).forEach((r) => console.log('  put back  ' + r.entity + '  (from seq ' + r.seq + ')'));
-      report.conflicts.forEach((c) => console.log('  REFUSED   ' + c.entity + ' — ' + c.why + (c.fields ? ' [' + c.fields.join(', ') + ']' : '')));
-      report.skipped.forEach((s) => console.log('  skipped   ' + s.entity + ' — ' + s.why));
-      if (report.willRevert && !report.reverted) report.willRevert.forEach((w) => console.log('  would put back  ' + w.entity + '  (from seq ' + w.seq + ')'));
+      console.log((report.reverted ? report.reverted.length : 0) + ' of ' + report.considered + ' change(s) by ' + report.actor +
+        ' reverted  (frozen at seq ' + report.throughSeq + ')');
+      print(report, 'put back');
       return undefined;
     }
 
@@ -295,6 +360,12 @@ async function main() {
         console.log('It writes as ' + body.actor + '; every change it makes is attributed to that.');
         return undefined;
       }
+      if (sub === 'revoke') {
+        const { body } = await api('POST', '/v1/agents/revoke', { name });
+        if (!body.ok) { show(body); process.exit(1); }
+        console.log(body.message);
+        return undefined;
+      }
       const { body } = await api('GET', '/v1/agents');
       if (flags.json) { show(body); return undefined; }
       if (!body.agents.length) { console.log('No agents yet. Mint one with:  proxima agents add scout'); return undefined; }
@@ -305,7 +376,10 @@ async function main() {
 
     case 'raw': {
       const [type, json] = rest;
-      const { body } = await send(type, json ? JSON.parse(json) : {});
+      // The escape hatch still has to say what it read when the actor is an agent:
+      // pass --ifRev <n>, or put it in the envelope yourself.
+      const ifRev = f.ifRev === undefined ? undefined : Number(f.ifRev);
+      const { body } = await send(type, json ? JSON.parse(json) : {}, { ifRev });
       show(body);
       if (!body.ok) process.exit(1);
       return undefined;

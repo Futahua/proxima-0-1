@@ -1137,6 +1137,10 @@
   });
 
   $('#newTaskBtn').addEventListener('click', () => openTask(null));
+  $('#activityBtn').addEventListener('click', () => {
+    renderActivityDialog();
+    $('#activityDialog').showModal();
+  });
   $('#newProjectBtn').addEventListener('click', () => projectDialog.showModal());
   $('#hubNewProject').addEventListener('click', () => projectDialog.showModal());
   $('#hubShowArchived').addEventListener('change', (event) => {
@@ -2695,6 +2699,85 @@
   }
 
   /**
+   * The agent handle in the shell, on every route.
+   *
+   * Attribution is the first line of defence and undo is only the second, so the
+   * first line cannot be a line that is only on one page. It says one thing — which
+   * agent, how much, how recently — and opens the panel that says what KIND of work
+   * it was. No badge, no count to clear, nothing that piles up: a dashboard, not a
+   * queue.
+   */
+  function renderGlobalActivity() {
+    const button = $('#activityBtn');
+    if (!button) return;
+    const summary = Store.activity();
+    const agents = summary.agentsLastHour.length
+      ? summary.agentsLastHour
+      : summary.agents.map((a) => ({ ...a, kinds: a.kinds || {} }));
+    if (!agents.length && !summary.total) { button.hidden = true; return; }
+    button.hidden = false;
+    const busiest = agents[0];
+    if (busiest) {
+      const name = busiest.actor.replace(/^agent:/, '');
+      button.textContent = '◆ ' + name + ' · ' + busiest.count + (busiest.lastAt ? ' · ' + ageLabel(busiest.lastAt, Date.now()) : '');
+      button.title = 'agent:' + name + ' made ' + busiest.count + ' change(s) in the last hour. Click for what kind, and to take them back.';
+    } else {
+      button.textContent = '◆ activity';
+      button.title = 'What moved since you last looked.';
+    }
+    button.classList.toggle('busy', agents.some((a) => (a.kinds.deleted || 0) > 0));
+  }
+
+  /** The panel behind that handle: per agent, what kind of work, and the undo. */
+  function renderActivityDialog() {
+    const intro = $('#activityIntro');
+    const rows = $('#activityRows');
+    if (!intro || !rows) return;
+    const summary = Store.activity();
+    const agents = summary.agentsLastHour;
+    intro.textContent = agents.length
+      ? 'In the last hour. Changes are attributed to the credential that made them; the service refuses a revert that would overwrite somebody else’s edit to the same field.'
+      : 'No agent has written in the last hour.';
+    rows.textContent = '';
+    agents.forEach((entry) => {
+      const name = entry.actor.replace(/^agent:/, '');
+      const row = document.createElement('div');
+      row.className = 'activity-row';
+      const who = document.createElement('p');
+      who.className = 'who';
+      who.textContent = name;
+      const what = document.createElement('p');
+      what.className = 'what';
+      what.append(entry.count + (entry.count === 1 ? ' change — ' : ' changes — '));
+      // Each kind is its own span so a delete can be coloured where it stands rather
+      // than repeated as a separate badge at the end of the sentence.
+      const parts = Store.kindParts(entry.kinds);
+      if (!parts.length) what.append('nothing recorded');
+      parts.forEach((part, i) => {
+        const span = document.createElement('span');
+        span.className = part.key === 'deleted' ? 'kind del-flag' : 'kind';
+        span.textContent = part.label;
+        what.append(span);
+        if (i < parts.length - 1) what.append(', ');
+      });
+      what.append(entry.lastAt ? ' · last ' + ageLabel(entry.lastAt, Date.now()) : '');
+      const undo = document.createElement('button');
+      undo.type = 'button';
+      undo.className = 'activity-agent';
+      undo.textContent = 'Revert ' + name + '’s last hour';
+      undo.addEventListener('click', () => { $('#activityDialog').close(); offerRevert(entry.actor, undo); });
+      row.append(who, what, undo);
+      rows.append(row);
+    });
+    if (summary.truncated) {
+      const note = document.createElement('p');
+      note.className = 'activity-truncated';
+      note.textContent = 'This is the most recent ' + summary.total + ' changes; ' + summary.truncated + ' older ones were not read.';
+      rows.append(note);
+    }
+  }
+
+  /**
    * The diff of what moved, and the way back from it.
    *
    * Two things are being said on one quiet line. First: what changed since the reader
@@ -2850,6 +2933,7 @@
   function renderDaily() {
     renderBoardHead(null);
     renderActivity();
+    renderGlobalActivity();
     render();
     renderTimekeeping();
   }
@@ -2863,6 +2947,7 @@
   function renderProject(project) {
     renderBoardHead(project);
     renderActivity();
+    renderGlobalActivity();
     render();
     renderTimekeeping();
   }
@@ -3000,6 +3085,7 @@
   const P1_WEIGHT = 5;
 
   function renderHub() {
+    renderGlobalActivity();
     const tasks = Store.tasks();
     const now = Date.now();
     const projects = Store.projects().slice().sort((a, b) =>
