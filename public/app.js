@@ -429,10 +429,29 @@
     return (task.weight / totalWeight) * allocation.available;
   }
 
+  /** The project shown by the Daily board's lens. Never page identity. */
+  const lensProjectId = () => projectFilter.value;
+
+  /**
+   * The project the mounted board is scoped to; '' means everything.
+   *
+   * One scoping rule with two ways to set it: a project route's scope is the
+   * address, and Daily's is the lens dropdown. Nothing caches the result, so the
+   * two can never disagree about what is on screen.
+   */
+  function activeScopeId() {
+    const r = route();
+    if (r.name === 'project' && Store.project(r.id)) return r.id;
+    return lensProjectId();
+  }
+
+  /**
+   * Tasks the board and Timekeeping are looking at.
+   */
   function visibleTasks() {
-    const filter = projectFilter.value;
+    const scope = activeScopeId();
     return Store.tasks()
-      .filter((t) => !filter || t.project === filter)
+      .filter((t) => !scope || t.project === scope)
       .sort((a, b) => a.order - b.order);
   }
 
@@ -539,8 +558,6 @@
     $$('.cards').forEach((c) => c.classList.remove('over'));
 
     $('#taskCount').textContent = tasks.length + (tasks.length === 1 ? ' task' : ' tasks');
-    const active = Store.projects().find((p) => p.id === projectFilter.value);
-    $('#scopeLabel').textContent = active ? active.name.toUpperCase() : 'ALL PROJECTS';
 
     ['backlog', 'running', 'finished'].forEach((status) => {
       const host = $('.cards[data-drop="' + status + '"]');
@@ -849,7 +866,10 @@
     refreshProjectOptions();
     taskForm.elements.name.value = task ? task.name : '';
     taskForm.elements.note.value = task ? task.note : '';
-    taskForm.elements.project.value = task ? task.project : (projectFilter.value || '');
+    // A new task lands in whatever the mounted board is scoped to, so creating one
+    // inside a project's workspace files it there rather than in the lens the reader
+    // happened to leave set on Daily.
+    taskForm.elements.project.value = task ? task.project : activeScopeId();
     taskForm.elements.status.value = task ? task.status : 'backlog';
     taskForm.elements.weight.value = task ? task.weight : 1;
     taskForm.elements.deadline.value = task ? task.deadline : '';
@@ -891,7 +911,7 @@
     if (action === 'cancel' || action === 'delete') {
       if (action === 'delete') {
         if (editingId) Store.deleteTask(editingId);
-        queueMicrotask(renderEverything);
+        queueMicrotask(renderRoute);
       }
       return;
     }
@@ -915,7 +935,7 @@
     if (editingId) Store.updateTask(editingId, fields);
     else Store.addTask(fields);
     taskDialog.close();
-    queueMicrotask(renderEverything);
+    queueMicrotask(renderRoute);
     // Editing a plan member's status is how it leaves the run. If that was the
     // last one, the run is over and says so rather than ticking against nobody.
     queueMicrotask(endRunIfEmpty);
@@ -944,7 +964,7 @@
     error.hidden = true;
     projectDialog.close();
     if (!created) return; // the store refused the write and has already said so
-    queueMicrotask(() => { refreshProjectOptions(); renderEverything(); });
+    queueMicrotask(() => { refreshProjectOptions(); renderRoute(); });
   });
 
   // A cancelled, dismissed or completed create leaves nothing behind — no stored
@@ -977,9 +997,9 @@
     showArchived = event.currentTarget.checked;
     renderHub();
   });
-  // The project filter scopes the whole page, board, Timekeeping and Hub alike.
-  // Nothing else caches the scope, so all three always agree on it.
-  projectFilter.addEventListener('change', renderEverything);
+  // The lens scopes the Daily board. On a project route it is hidden and the
+  // address decides, so this handler can only ever fire on Daily.
+  projectFilter.addEventListener('change', renderRoute);
   // A new target is a new horizon: every proportional share changes with it.
   targetInput.addEventListener('change', render);
   // A resize only changes how tall the running column is, so restyle rather than
@@ -1080,8 +1100,17 @@
    * One second of a live run. A tick rewrites card heights, wipe heights and the
    * countdown line, and touches nothing else — no node is created, replaced or
    * removed, so the running column keeps its scroll position while it grows.
+   *
+   * Guarded, rather than stopped and started around navigation: only Daily and a
+   * project route mount the board, and a tick against unmounted sections would be
+   * painting nodes nobody is looking at. Nothing is lost by not painting — the run
+   * is measured from wall-clock timestamps, so the single render on return is
+   * already caught up. One interval for the life of the page is also the version
+   * that cannot go wrong: stopping and restarting is how a second interval gets
+   * started by accident, and then every later tick happens twice.
    */
   function tick() {
+    if (!boardMounted()) return;
     paint();
   }
 
@@ -2036,8 +2065,16 @@
     });
 
     if (!tlCentered) {
-      tlCentered = true;
-      scrollTimelineToToday(false);
+      // The opening scroll can only happen on a viewport that has layout. While the
+      // panels are hidden — an empty store, or a route that does not mount them —
+      // this element measures zero and a `scrollLeft` write is silently dropped, so
+      // latching "already centred" there would park the timeline at the start of its
+      // window for the rest of the session: thirty days of empty past and today off
+      // screen. The flag therefore waits for a render that can actually move.
+      if (tlViewport.clientWidth > 0) {
+        tlCentered = true;
+        scrollTimelineToToday(false);
+      }
     } else {
       tickTimekeeping();
     }
@@ -2156,6 +2193,10 @@
    * a scrolled timeline and a half-collapsed countdown list survive every tick.
    */
   function tickTimekeeping() {
+    // Same guard, same reason as the board's tick: the panels below the board are
+    // mounted by the same two routes, and a tick that rebuilt a hidden countdown
+    // group would do so against a box that measures zero.
+    if (!boardMounted()) return;
     if (!deadlineTasks().length) return;
     const now = Date.now();
 
@@ -2237,17 +2278,214 @@
     ['overdue', 'today', 'soon', 'week', 'later'].forEach((key) => chip.classList.toggle('urgency-' + key, key === urgency));
   }
 
-  // ── One page ──────────────────────────────────────────────────────────────
-  // The board and Timekeeping are a single scroll, not two surfaces: there is no
-  // switcher and no surface state to keep. Both are on screen at once, so a pass
-  // renders both and every change to the task set goes through renderEverything.
+  // ══ Routes ═════════════════════════════════════════════════════════════════
+  // What is on screen, decided by the address.
+  //
+  // The fragment, not the History API: there is no server here to rewrite a path,
+  // so a refresh must land on the one document and let the fragment decide which
+  // surface it mounts. `#/hub` survives F5 and a bookmark; `/hub` would be a 404.
   //
   // `hidden` is honoured throughout — see the [hidden] rule in app.css, which is
   // what stops an element that sets its own `display` from ignoring the attribute.
-  function renderEverything() {
+
+  const ROUTE_HOME = '#/';
+
+  /**
+   * Read a route out of an address. Parsed on every call rather than cached in a
+   * variable, for the same reason the Daily lens is read from its own control
+   * instead of mirrored: a copy is a second source of truth, and this one would
+   * disagree with the address bar the first time somebody pressed Back.
+   *
+   * The route stays semantic — `#/project/<id>` — and is never derived from a
+   * project's display name, which the reader can edit: a rename must not break a
+   * bookmark, and two renamed projects must not be able to collide.
+   */
+  function parseRoute(hash) {
+    const raw = String(hash || '').replace(/^#/, '');
+    const path = raw.replace(/^\/+/, '').replace(/\/+$/, '');
+    if (path === '') return { name: 'daily', id: '' };
+    if (path === 'hub') return { name: 'hub', id: '' };
+    if (path === 'schedule') return { name: 'schedule', id: '' };
+    if (path.indexOf('project/') === 0) {
+      let id = '';
+      try {
+        id = decodeURIComponent(path.slice('project/'.length));
+      } catch (err) {
+        // A malformed escape is not an id; it falls through to "no such page".
+        return { name: 'missing', id: '', bad: raw };
+      }
+      if (id) return { name: 'project', id: id };
+    }
+    return { name: 'missing', id: '', bad: raw };
+  }
+
+  function route() {
+    return parseRoute(location.hash);
+  }
+
+  /**
+   * The surface actually shown. A project id that resolves to nothing is not a
+   * workspace, it is a dead link, and it says so rather than quietly mounting the
+   * whole board — a fallback would look like the project's own page with
+   * suspiciously broad contents.
+   */
+  function currentSurface() {
+    const r = route();
+    if (r.name === 'project') return Store.project(r.id) ? 'project' : 'missing';
+    return r.name;
+  }
+
+  /** The two surfaces that mount the board and Timekeeping. */
+  function boardMounted() {
+    const name = currentSurface();
+    return name === 'daily' || name === 'project';
+  }
+
+  const lensPick = $('#lensPick');
+  const navProject = $('#navProject');
+
+  function setRouteVisibility(surface, project) {
+    const board = surface === 'daily' || surface === 'project';
+    ['#boardHead', '#runbar', '#columns', '#timekeeping']
+      .forEach((sel) => { $(sel).hidden = !board; });
+    $('#projectsHub').hidden = surface !== 'hub';
+    $('#schedule').hidden = surface !== 'schedule';
+    $('#routeMissing').hidden = surface !== 'missing';
+
+    // The lens lives on the Daily board only. On the Hub it would do nothing, and
+    // on a project route the address has already decided — a control that means
+    // something different on every page is worse than no control.
+    lensPick.hidden = surface !== 'daily';
+
+    // The open project's own nav item exists only while its workspace does.
+    navProject.hidden = surface !== 'project';
+    if (project) {
+      navProject.textContent = project.name;
+      navProject.href = '#/project/' + encodeURIComponent(project.id);
+      // Says which address it points at, since the label is editable and the
+      // address is not.
+      navProject.title = 'This project’s workspace — #/project/' + project.id;
+    } else {
+      // Empty rather than merely hidden: an item left over from the last project
+      // would still be a link to it, and this one can outlive the project.
+      navProject.textContent = '';
+      navProject.removeAttribute('href');
+      navProject.removeAttribute('title');
+    }
+
+    // `aria-current` marks the one nav item that is this page. A dead link marks
+    // none: the reader is not on any of the surfaces the nav can offer.
+    $$('.surfaces a[data-route]').forEach((link) => {
+      const here = link.dataset.route === surface;
+      if (here) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
+    });
+  }
+
+  /** Say which address failed, in the reader's terms rather than in HTTP's. */
+  function describeMissingRoute() {
+    const r = route();
+    if (r.name === 'project') {
+      $('#routeMissingTitle').textContent = 'That project is not in this store';
+      $('#routeMissingBody').textContent = 'Nothing here has the id “' + r.id +
+        '”. It may have been deleted, or the link may come from a store this browser no longer has. Nothing has been changed.';
+      return;
+    }
+    $('#routeMissingTitle').textContent = 'That address is not a page';
+    $('#routeMissingBody').textContent = '“' + (r.bad || '') +
+      '” is not one of this app’s destinations. The links below go to the ones that exist.';
+  }
+
+  /**
+   * The one place the board's heading is written, because two routes mount the
+   * board and each names itself: Daily is the whole board, and a project route is
+   * that project's workspace, titled with the project's name either way.
+   */
+  function renderBoardHead(project) {
+    const lens = project ? null : Store.projects().find((p) => p.id === lensProjectId());
+    $('#scopeLabel').textContent = project
+      ? (project.archivedAt ? 'PROJECT · ARCHIVED' : 'PROJECT')
+      : (lens ? lens.name.toUpperCase() : 'ALL PROJECTS');
+    $('#boardTitle').textContent = project ? project.name : 'Elastic Boards';
+    $('#boardSub').textContent = project
+      ? (project.description || 'Board and Timekeeping for this project.')
+      : 'Backlog, live execution and finished work.';
+  }
+
+  function renderDaily() {
+    renderBoardHead(null);
     render();
     renderTimekeeping();
-    renderHub();
+  }
+
+  /**
+   * A project's workspace: the same board and Timekeeping, scoped by the ROUTE.
+   * The lens dropdown is not touched — it is hidden here, and its value stays the
+   * Daily board's own filter, which is why walking back to Daily is not a
+   * surprise.
+   */
+  function renderProject(project) {
+    renderBoardHead(project);
+    render();
+    renderTimekeeping();
+  }
+
+  function renderSchedule() {
+    // Deliberately empty. The Schedule is a destination, not a surface: it says in
+    // static markup that it is not built, and derives nothing to draw. The branch
+    // exists so the dispatch has one arm per surface instead of a silent
+    // fall-through that would read as an oversight.
+  }
+
+  /**
+   * Render the surface the address names, and only that one.
+   *
+   * This is what replaced renderEverything(). "Everything" stopped being true the
+   * moment the app had more than one surface: a pass that repaints unmounted
+   * sections is wasted work, and — because a hidden element measures zero — it is
+   * also a way to get an invented measurement onto the screen.
+   */
+  function renderRoute() {
+    const surface = currentSurface();
+    if (surface === 'daily') renderDaily();
+    else if (surface === 'project') renderProject(Store.project(route().id));
+    else if (surface === 'hub') renderHub();
+    else if (surface === 'schedule') renderSchedule();
+    // 'missing' draws nothing: the section is a statement, written once on entry.
+  }
+
+  /**
+   * Enter a route: reveal first, render second, re-measure third.
+   *
+   * A hidden element measures zero, and two numbers in this app fall back to
+   * invented ones when they read zero — the running column to its 300px baseline
+   * and the timeline viewport to 600px. So rendering while hidden and revealing
+   * afterwards would paint the board at the fallback height and the timeline at the
+   * fallback width, and both would look plausible, which is the worst kind of
+   * wrong. Visibility is therefore set first, and the render that follows reads
+   * elements the browser has really laid out (reading clientWidth/clientHeight
+   * forces that layout).
+   *
+   * The frame after that re-measures once more: the cards this pass inserted can
+   * change the height their own column resolves to, so the number read before they
+   * existed is not the number the proportional ratios should be applied to. This is
+   * the same reset-then-repaint the window resize handler does, for the same reason.
+   */
+  function applyRoute() {
+    const surface = currentSurface();
+    const project = surface === 'project' ? Store.project(route().id) : null;
+    setRouteVisibility(surface, project);
+    if (surface === 'missing') describeMissingRoute();
+    runningHeight = 0;
+    renderRoute();
+    if (surface !== 'daily' && surface !== 'project') return;
+    requestAnimationFrame(() => {
+      // The route can change again inside a frame — a quick Back then Forward would
+      // otherwise settle the numbers on a surface that is no longer mounted.
+      if (!boardMounted()) return;
+      runningHeight = 0;
+      paint();
+    });
   }
 
   // ══ Projects Hub ═══════════════════════════════════════════════════════════
@@ -2324,13 +2562,6 @@
    */
   const P1_WEIGHT = 5;
 
-  /**
-   * The project the page is currently scoped to. Derived from the filter itself
-   * rather than mirrored in a second variable — a copy is a second source of truth
-   * and will eventually disagree with the control the reader is actually using.
-   */
-  const scopedProjectId = () => projectFilter.value;
-
   function renderHub() {
     const tasks = Store.tasks();
     const now = Date.now();
@@ -2364,7 +2595,6 @@
     const card = document.createElement('article');
     card.className = 'hub-card' + (project.archivedAt ? ' archived' : '');
     card.dataset.id = project.id;
-    if (scopedProjectId() === project.id) card.classList.add('scoped');
     card.style.setProperty('--hue', String(projectHue(project)));
 
     // Identity: a monogram block in the project's own colour, then name, then the
@@ -2427,27 +2657,32 @@
     const acts = document.createElement('div');
     acts.className = 'hub-acts';
 
-    const open = document.createElement('button');
+    // A card ENTERS the project: it is a destination, and this is a link, so the
+    // address it goes to can be read, copied, bookmarked or opened in a new tab.
+    // It used to set the project dropdown and re-render the page under the reader —
+    // filtering dressed as navigation, which left them on the same page with a
+    // changed control and a note telling them how to change it back.
+    const open = document.createElement('a');
     open.className = 'primary';
-    open.textContent = scopedProjectId() === project.id ? 'Showing this project' : 'Open project';
-    open.title = 'Scope the board and Timekeeping to this project';
-    open.disabled = scopedProjectId() === project.id;
-    open.addEventListener('click', () => scopeToProject(project.id));
+    open.href = '#/project/' + encodeURIComponent(project.id);
+    open.textContent = 'Open project';
+    open.title = 'Open this project’s own workspace';
     acts.append(open);
 
     if (project.archivedAt) {
       acts.append(hubAction('Restore', 'Return this project to the active list', () => {
         Store.setArchived(project.id, false);
-        // The scope dropdown labels archived projects, so it is rebuilt with them.
+        // The lens labels archived projects, so it is rebuilt with them.
         refreshProjectOptions();
         refreshAfterWrite();
       }));
     } else {
       acts.append(hubAction('Archive', 'Hide from the Hub without touching its tasks', () => {
         Store.setArchived(project.id, true);
-        // Archiving the project you are scoped to would leave the page scoped to
-        // something the Hub no longer lists, so the scope is released with it.
-        if (scopedProjectId() === project.id) scopeToProject('');
+        // A lens pointing at a project that has just been archived is a state the
+        // reader never asked for, so the lens is released with it. Only the lens:
+        // which project the page IS is the address's business now.
+        clearLensIf(project.id);
         refreshProjectOptions();
         refreshAfterWrite();
       }));
@@ -2490,7 +2725,8 @@
     $('#confirmOk').textContent = stats.total === 0 ? 'Delete project' : 'Delete project, keep ' + stats.total + ' ' + taskWord;
     confirmDialog.__onOk = () => {
       const result = Store.deleteProject(project.id);
-      if (scopedProjectId() === project.id) scopeToProject('');
+      clearLensIf(project.id);
+      refreshProjectOptions();
       refreshAfterWrite();
       if (result) {
         flash('Deleted “' + project.name + '”. ' + (result.orphaned
@@ -2502,25 +2738,19 @@
   }
 
   /**
-   * Scope the whole page to one project — the destination a card leads to. This
-   * reuses the existing project filter rather than inventing a second scoping
-   * mechanism, so the board, Timekeeping and the Hub always agree on what is being
-   * looked at, and clearing it is the ordinary "All Projects" choice.
+   * Release the Daily lens when the project it points at stops being listed.
+   *
+   * Only the lens. Which project the page IS belongs to the address now, so a
+   * project disappearing can no longer leave the page showing something that is
+   * not there — and a stale address says so in its own words (see the missing
+   * route) instead of silently falling back to the whole board.
    */
-  function scopeToProject(projectId) {
-    const select = projectFilter;
-    if (select.value === projectId) return;
-    select.value = projectId;
-    renderEverything();
-    const project = projectId ? Store.project(projectId) : null;
-    flash(project
-      ? 'Showing “' + project.name + '” only. Set Project back to All Projects to see everything again.'
-      : 'Showing all projects again.', projectId ? $('#boardHead') : select, {});
+  function clearLensIf(projectId) {
+    if (projectFilter.value === projectId) projectFilter.value = '';
   }
 
-
-  /** A write landed: re-read it everywhere it can show up. */
-  const refreshAfterWrite = renderEverything;
+  /** A write landed: re-read it on the surface that is actually mounted. */
+  const refreshAfterWrite = renderRoute;
 
   $$('.tk-toggle').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -2688,10 +2918,15 @@
   ensureTarget();
   refreshProjectOptions();
   if (Store.run()) ticker = setInterval(tick, 1000);
-  renderEverything();
-  // Said after the board is drawn, so the reader sees the app and the explanation
+  // The address decides what is mounted, here and on every later hash change.
+  // Launching into `#/project/...` or `#/hub` is therefore the same code path as
+  // walking there, and a refresh lands on the surface it names.
+  window.addEventListener('hashchange', applyRoute);
+  applyRoute();
+  // Said after the surface is drawn, so the reader sees the app and the explanation
   // together rather than a notice over a blank page.
   reportLoadStatus();
-  // One clock for the whole page. Nothing about a tick writes or rebuilds.
+  // One clock for the whole page. Nothing about a tick writes or rebuilds, and both
+  // ticks leave a surface they are not mounted on alone.
   setInterval(tickTimekeeping, 1000);
 })();

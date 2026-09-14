@@ -16,18 +16,26 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 .topbar { display: flex; align-items: center; gap: 16px; padding: 12px 16px;
   background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
-.brand { display: flex; align-items: center; gap: 10px; }
-.badge { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
-  background: #7b5cf0; font-weight: 700; }
-.brand h1 { margin: 0; font-size: 17px; }
-.brand p { margin: 0; font-size: 11px; color: var(--dim); }
+
+/* Navigation carries the current position, so the current one is the only one that
+   shouts: same accent treatment the panel toggles use, so "you are here" looks the
+   same everywhere in the app. */
+.surfaces { display: flex; gap: 6px; align-items: center; }
+.surf { color: var(--dim); text-decoration: none; padding: 6px 12px; border-radius: 6px;
+  border: 1px solid transparent; font-weight: 600; }
+.surf:hover { color: var(--ink); background: var(--panel-2); }
+.surf[aria-current="page"] { background: var(--accent); color: #1d2129;
+  border-color: var(--accent); }
+/* The open project's own item: present only while its workspace is mounted, so the
+   nav never carries a link to something that is not on screen. */
+#navProject { max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
 
 .seg { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
   padding: 6px 14px; cursor: pointer; }
 .seg.active { background: var(--accent); color: #1d2129; border-color: var(--accent); font-weight: 600; }
 .seg[disabled] { opacity: .45; cursor: not-allowed; }
 .seg.small { padding: 5px 12px; font-size: 13px; }
-.surfaces { display: flex; gap: 8px; }
 .projpick { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); }
 .projpick select, .runbar input { background: var(--panel-2); border: 1px solid var(--line);
   border-radius: 6px; padding: 6px 10px; }
@@ -35,14 +43,24 @@ button, input, select, textarea { font: inherit; color: inherit; }
   padding: 6px 12px; cursor: pointer; }
 .primary { background: transparent; border: 1px solid var(--accent); color: var(--accent);
   border-radius: 6px; padding: 6px 14px; cursor: pointer; font-weight: 600; }
+/* A navigation control that happens to be painted like a button — the Hub card's
+   way into a project. It is a link because it navigates, and the browser's own
+   affordances (middle click, copy the address, open in a new tab) come with it. */
+a.primary, a.ghost { display: inline-block; text-decoration: none; }
 .danger { background: transparent; border: 1px solid var(--danger); color: var(--danger);
   border-radius: 6px; padding: 6px 12px; cursor: pointer; }
 
 main { padding: 16px; max-width: 1200px; }
+/* A route with nothing derived to draw: a title and a sentence. Narrower than the
+   board, because a paragraph set 1200px wide is unreadable. */
+.stub { max-width: 680px; }
+.stub h1, .boardhead h1, .tk-bar h1 { margin: 2px 0 4px; font-size: 22px; }
+.stub .sub + .sub { margin-top: 10px; }
+.stub a { color: var(--accent); }
 .subtabs { display: flex; gap: 8px; margin-bottom: 18px; }
 .boardhead { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 14px; }
 .eyebrow { margin: 0; font-size: 11px; letter-spacing: .08em; color: var(--dim); }
-.boardhead h2 { margin: 2px 0 4px; font-size: 22px; }
+.boardhead h1 { margin: 2px 0 4px; font-size: 22px; }
 .sub { margin: 0; color: var(--dim); font-size: 13px; }
 .counts { margin-left: auto; display: flex; align-items: center; gap: 14px; color: var(--dim); }
 
@@ -99,9 +117,16 @@ main { padding: 16px; max-width: 1200px; }
    — max(125, (w/totalWeight)H) — is still applied explicitly. Flow and weighted
    heights are both kept; only the positioning had to go. */
 .col[data-status="running"] { display: flex; flex-direction: column; align-self: stretch; }
+/* The column is stretched to the row by the grid; this box fills it, so the height
+   the cards are given is the space the board really has. It used to be `height:
+   300px` here, which quietly made the app's "measure the column, never a constant"
+   claim untrue: that constant was the only number the measurement could ever read,
+   so every card sat on its 125px floor and the column stopped filling its row as
+   soon as the board grew. The floor stays as a minimum, which is what the original's
+   300px baseline is for. */
 .cards[data-drop="running"] {
   position: relative; display: flex; flex-direction: column; gap: 8px;
-  height: 300px; overflow-y: auto;
+  flex: 1 1 auto; min-height: 300px; overflow-y: auto;
 }
 /* Flex must not resize a card: the inline height is the whole answer, and the
    floor lives here so it survives a pass that has not run yet. */
@@ -165,7 +190,7 @@ main { padding: 16px; max-width: 1200px; }
 .tk-bar { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap;
   margin: 22px 0 12px; padding: 12px 0 10px; border-top: 1px solid var(--line);
   position: sticky; top: 0; z-index: 5; background: var(--bg); }
-.tk-bar h2 { margin: 2px 0 0; font-size: 22px; }
+.tk-bar h1 { margin: 2px 0 0; font-size: 22px; }
 .tk-bar .eyebrow { margin: 0; }
 .tk-count { font-size: 12px; color: var(--dim); white-space: nowrap; }
 
@@ -365,7 +390,6 @@ body[data-shift-pressed="true"] .tk-tl-bar.hover-right-half { box-shadow: inset 
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
   border-top: 3px solid hsl(var(--hue, 90), 45%, 52%); padding: 14px; }
 .hub-card.archived { opacity: .72; border-top-color: var(--line); }
-.hub-card.scoped { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(184, 208, 74, .3); }
 
 .hub-head { display: flex; align-items: center; gap: 10px; }
 .hub-mark { width: 34px; height: 34px; flex: 0 0 34px; border-radius: 8px; display: grid;

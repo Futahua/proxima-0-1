@@ -10,15 +10,24 @@
 <!-- One quiet channel for every refused action. A refusal is a sentence the
      reader needs once, near the thing they touched — not a page-level alarm. -->
 <div class="flash" id="flash" role="status" aria-live="polite" hidden></div>
+<!-- Navigation and controls, nothing else. The brand block that used to sit here
+     (monogram, wordmark, "local store") is gone: it carried the app's name twice
+     and the only page title was the board's. Each route now titles itself.
+     The links are real <a href="#/..."> because they are navigation: the fragment
+     is the state, a refresh lands on the same surface, and Back works. -->
 <header class="topbar">
-  <div class="brand"><span class="badge">P</span><div><h1>Proxima</h1><p id="storeLine">local store</p></div></div>
-  <nav class="surfaces" aria-label="Sections of this page">
-    <span class="segnote">Board · Timekeeping · Projects Hub</span>
+  <nav class="surfaces" aria-label="Surfaces">
+    <a class="surf" href="#/" data-route="daily">Daily</a>
+    <a class="surf" href="#/hub" data-route="hub">This is Minh</a>
+    <a class="surf" href="#/schedule" data-route="schedule">Schedule</a>
+    <a class="surf" id="navProject" href="#/project/" data-route="project" hidden></a>
   </nav>
-  <label class="projpick">Project
+  <span class="spacer"></span>
+  <!-- The project lens, not page identity: it is the Daily board's own filter, so
+       it is hidden everywhere the board is not the thing on screen. -->
+  <label class="projpick" id="lensPick">Project
     <select id="projectFilter"><option value="">-- All Projects --</option></select>
   </label>
-  <span class="spacer"></span>
   <button id="newProjectBtn" class="ghost">+ Project</button>
 </header>
 
@@ -26,7 +35,7 @@
   <section class="boardhead" id="boardHead">
     <div>
       <p class="eyebrow" id="scopeLabel">ALL PROJECTS</p>
-      <h2 id="boardTitle">Elastic Boards</h2>
+      <h1 id="boardTitle">Elastic Boards</h1>
       <p class="sub" id="boardSub">Backlog, live execution and finished work.</p>
     </div>
     <div class="counts"><span id="taskCount">0 tasks</span>
@@ -122,7 +131,10 @@
     <div class="tk-bar">
       <div>
         <p class="eyebrow">PROJECTS</p>
-        <h2>Projects Hub</h2>
+        <!-- The creator's own name for this surface (the original's
+             plugin.settings.mainPageHeader, App.svelte:15-19 and :86). It is the
+             name of the Hub, not a new label for the app. -->
+        <h1>This is Minh</h1>
       </div>
       <span class="spacer"></span>
       <span class="tk-count" id="hubCount"></span>
@@ -136,6 +148,29 @@
     <p class="tk-empty" id="hubEmpty" hidden>No projects yet. Create one and its tasks will gather here.</p>
 
     <div class="hub-grid" id="hubGrid" hidden></div>
+  </section>
+
+  <!-- A destination, not a surface. The original's Schedule runs calendar events
+       rather than tasks; there is no event model and no event store here, so this
+       route says exactly that instead of showing an empty imitation of one. -->
+  <section class="stub" id="schedule" hidden>
+    <p class="eyebrow">SURFACE</p>
+    <h1>Schedule</h1>
+    <p class="sub">Not built yet. The original&rsquo;s third surface schedules calendar events, not tasks:
+      it has its own project type, its own store and its own views. None of that
+      exists here yet, so this page is a destination rather than an imitation
+      &mdash; there is nothing on it to try.</p>
+    <p class="sub"><a href="#/">Go to Daily</a> for the board and Timekeeping, which are real.</p>
+  </section>
+
+  <!-- A route that resolves to nothing says so, rather than falling back to a
+       surface the reader did not ask for. Reached by a hand-typed hash, or by a
+       link to a project this store no longer has. -->
+  <section class="stub" id="routeMissing" hidden>
+    <p class="eyebrow">NO SUCH PAGE</p>
+    <h1 id="routeMissingTitle">That address is not a page</h1>
+    <p class="sub" id="routeMissingBody"></p>
+    <p class="sub"><a href="#/">Daily</a> &middot; <a href="#/hub">This is Minh</a></p>
   </section>
 </main>
 
