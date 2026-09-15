@@ -6,7 +6,7 @@
   "secrets": [
     {
       "id": "operator",
-      "file": "D:\\Letters\\MatTroiSeConMoc\\Proxima Data Home\\token",
+      "file": "D:\\Letters\\MatTroiSeConMoc\\Products\\Papers\\Runtime\\Backpack projects\\Proxima 0.1\\.papers-local\\operator.token",
       "header": "authorization",
       "scheme": "Bearer"
     }
