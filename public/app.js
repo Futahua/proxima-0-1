@@ -1148,6 +1148,7 @@
     showArchived = event.currentTarget.checked;
     renderHub();
   });
+  $('#schedUpcoming').addEventListener('change', renderSchedule);
   // The lens scopes the Daily board. On a project route it is hidden and the
   // address decides, so this handler can only ever fire on Daily.
   projectFilter.addEventListener('change', renderRoute);
@@ -2972,6 +2973,66 @@
    * board and each names itself: Daily is the whole board, and a project route is
    * that project's workspace, titled with the project's name either way.
    */
+  // ── Opening a folder: the one thing a page cannot do ──────────────────────
+  // A project can be a place on this machine. The page can neither read nor open a
+  // path — that is the point of it being a page — so it ASKS PAPERS, which can, and
+  // reports exactly what came back. If nothing comes back, this page is not inside
+  // Papers, and it says so with the path instead of pretending it opened something.
+
+  const hostRequests = new Map();
+
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    try { if (event.origin !== location.origin) return; } catch { return; }
+    const data = event.data;
+    if (!data || data.type !== 'papers:host:result' || typeof data.requestId !== 'string') return;
+    const settle = hostRequests.get(data.requestId);
+    if (!settle) return;
+    hostRequests.delete(data.requestId);
+    settle(data);
+  });
+
+  function askHost(message, timeoutMs) {
+    return new Promise((resolve) => {
+      const requestId = 'proxima-host-' + Math.random().toString(36).slice(2, 10);
+      const timer = window.setTimeout(() => { hostRequests.delete(requestId); resolve(null); }, timeoutMs || 2000);
+      hostRequests.set(requestId, (reply) => { window.clearTimeout(timer); resolve(reply); });
+      try { window.postMessage({ ...message, requestId }, location.origin); }
+      catch { window.clearTimeout(timer); hostRequests.delete(requestId); resolve(null); }
+    });
+  }
+
+  /**
+   * Open a project's folder the way the machine opens it — Explorer, or whatever
+   * application owns the file.
+   *
+   * The shortcut is matched by TARGET, not by a name this app invented: Papers
+   * declares what can be opened, and a link is only openable while its path is one of
+   * those declarations. A missing shortcut is reported as a missing shortcut.
+   */
+  async function openProjectLink(project, anchor) {
+    const link = project && project.link;
+    if (!link || !link.path) { flash('That project has no folder to open.', anchor, { warn: true }); return; }
+    const state = await askHost({ type: 'papers:project:as-you-go-load' }, 1500);
+    if (!state) {
+      flash('This page is not inside Papers, so it cannot open a folder. The folder is ' + link.path, anchor, { warn: true, hold: 9000 });
+      return;
+    }
+    let shortcuts = [];
+    try { shortcuts = (JSON.parse(state.state || '{}').shortcuts) || []; } catch { shortcuts = []; }
+    const wanted = String(link.path).toLowerCase();
+    const match = shortcuts.find((entry) => entry && typeof entry.target === 'string' && entry.target.toLowerCase() === wanted);
+    if (!match) {
+      flash('Papers has no shortcut for that folder, so nothing was opened. It is at ' + link.path, anchor, { warn: true, hold: 9000 });
+      return;
+    }
+    const launched = await askHost({ type: 'papers:project:as-you-go-launch', actionId: match.id }, 4000);
+    if (!launched || launched.ok !== true) {
+      flash('Papers could not open that folder' + (launched && launched.error ? ' — ' + launched.error : '') +
+        '. It is at ' + link.path, anchor, { warn: true, hold: 9000 });
+    }
+  }
+
   function renderBoardHead(project) {
     const lens = project ? null : Store.projects().find((p) => p.id === lensProjectId());
     $('#scopeLabel').textContent = project
@@ -2981,6 +3042,16 @@
     $('#boardSub').textContent = project
       ? (project.description || 'Board and Timekeeping for this project.')
       : 'Backlog, live execution and finished work.';
+    // A project that is a folder on this machine offers to open it. Hidden otherwise:
+    // a button that does nothing is worse than no button.
+    const openBtn = $('#openFolderBtn');
+    if (openBtn) {
+      const linked = Boolean(project && project.link && project.link.path);
+      openBtn.hidden = !linked;
+      openBtn.textContent = linked && project.link.kind === 'folder' ? 'Open folder' : 'Open file';
+      openBtn.title = linked ? project.link.path : '';
+      openBtn.onclick = linked ? () => openProjectLink(project, openBtn) : null;
+    }
   }
 
   function renderDaily() {
@@ -3005,16 +3076,95 @@
     renderTimekeeping();
   }
 
+  /** One schedule row: when, what, which project, and the note it came with. */
+  function scheduleRowFor(event, now) {
+    const row = document.createElement('article');
+    row.className = 'sched-row';
+    if (event.completed) row.classList.add('done');
+
+    const when = document.createElement('div');
+    when.className = 'when';
+    const start = event.startAt ? new Date(event.startAt) : null;
+    const end = event.endAt ? new Date(event.endAt) : null;
+    const day = start ? start.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }) : 'no date';
+    const clock = start ? start.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '';
+    const until = end ? end.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '';
+    when.textContent = day;
+    const time = document.createElement('span');
+    time.className = 'time';
+    time.textContent = clock && until ? clock + '–' + until : clock;
+    when.append(time);
+    if (start && end && end.getTime() < now) row.classList.add('past');
+
+    const what = document.createElement('div');
+    what.className = 'what';
+    const title = document.createElement('h4');
+    title.textContent = event.name;
+    what.append(title);
+    const meta = document.createElement('p');
+    meta.className = 'meta';
+    const project = event.project ? Store.project(event.project) : null;
+    const bits = [project ? project.name : (event.project ? event.project : 'No project')];
+    if (event.recurrence && event.recurrence !== 'none') {
+      bits.push('repeats ' + event.recurrence + (event.recurrenceUntil ? ' until ' + event.recurrenceUntil : ''));
+    }
+    if (event.completed) bits.push('done');
+    meta.textContent = bits.join(' · ');
+    what.append(meta);
+    if (event.note) {
+      const note = document.createElement('p');
+      note.className = 'note';
+      note.textContent = event.note;
+      what.append(note);
+    }
+    if (event.color) row.style.borderLeftColor = event.color;
+
+    row.append(when, what);
+    return row;
+  }
+
   function renderSchedule() {
-    // Deliberately empty of derived content. The Schedule is a destination, not a
-    // surface: it says in static markup that it is not built, and derives nothing to
-    // draw. The branch exists so the dispatch has one arm per surface instead of a
-    // silent fall-through that would read as an oversight.
-    //
-    // The shell's activity handle is not derived content though — it belongs to every
-    // route, and leaving this branch out meant a direct load into #/schedule opened
-    // with no way to see, or undo, what an agent had been doing.
     renderGlobalActivity();
+    const list = $('#schedList');
+    const empty = $('#schedEmpty');
+    if (!list || !empty) return;
+    const all = Store.schedule();
+    const upcomingOnly = $('#schedUpcoming').checked;
+    const now = Date.now();
+    const events = upcomingOnly
+      ? all.filter((event) => event.endAt && new Date(event.endAt).getTime() >= now - 86400000)
+      : all;
+    $('#schedCount').textContent = all.length
+      ? events.length + ' of ' + all.length + ' entr' + (all.length === 1 ? 'y' : 'ies')
+      : '';
+    list.textContent = '';
+    if (!events.length) {
+      empty.hidden = false;
+      empty.textContent = all.length
+        ? 'Nothing from today onward. Untick “From today” to see the whole calendar.'
+        : 'No schedule entries. They arrive by importing the vault the Obsidian plugin wrote — nothing here can create one yet.';
+      list.hidden = true;
+      return;
+    }
+    empty.hidden = true;
+    list.hidden = false;
+    // Grouped by day, because a schedule is read as days; the source kept one file
+    // per entry and no ordering beyond its own start time.
+    let currentDay = null;
+    events.forEach((event) => {
+      const start = event.startAt ? new Date(event.startAt) : null;
+      const day = start ? start.toDateString() : 'No date';
+      if (day !== currentDay) {
+        currentDay = day;
+        const heading = document.createElement('p');
+        heading.className = 'sched-day';
+        heading.textContent = start
+          ? start.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+          : 'No date';
+        list.append(heading);
+      }
+      list.append(scheduleRowFor(event, now));
+    });
   }
 
   /**
@@ -3237,6 +3387,19 @@
 
     const acts = document.createElement('div');
     acts.className = 'hub-acts';
+
+    // A project that IS a folder offers to open it, through Papers. The path is shown
+    // on the button rather than hidden behind a label: a link the reader cannot see
+    // is a link they cannot check.
+    if (project.link && project.link.path) {
+      const open = document.createElement('button');
+      open.className = 'ghost hub-open';
+      open.type = 'button';
+      open.textContent = project.link.kind === 'folder' ? 'Open folder' : 'Open file';
+      open.title = project.link.path;
+      open.addEventListener('click', (event) => { event.stopPropagation(); openProjectLink(project, open); });
+      acts.append(open);
+    }
 
     // A card ENTERS the project: it is a destination, and this is a link, so the
     // address it goes to can be read, copied, bookmarked or opened in a new tab.

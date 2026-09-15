@@ -50,6 +50,10 @@
       <p class="sub" id="boardSub">Backlog, live execution and finished work.</p>
     </div>
     <div class="counts"><span id="taskCount">0 tasks</span>
+      <!-- A project can BE a folder on this machine. The button is hidden unless the
+           project carries a link, and it opens the folder through Papers — the one
+           thing here that is allowed to open anything. -->
+      <button id="openFolderBtn" class="ghost" hidden>Open folder</button>
       <button id="newTaskBtn" class="primary">New task</button>
     </div>
   </section>
@@ -167,17 +171,26 @@
     <div class="hub-grid" id="hubGrid" hidden></div>
   </section>
 
-  <!-- A destination, not a surface. The original's Schedule runs calendar events
-       rather than tasks; there is no event model and no event store here, so this
-       route says exactly that instead of showing an empty imitation of one. -->
-  <section class="stub" id="schedule" hidden>
-    <p class="eyebrow">SURFACE</p>
-    <h1>Schedule</h1>
-    <p class="sub">Not built yet. The original&rsquo;s third surface schedules calendar events, not tasks:
-      it has its own project type, its own store and its own views. None of that
-      exists here yet, so this page is a destination rather than an imitation
-      &mdash; there is nothing on it to try.</p>
-    <p class="sub"><a href="#/">Go to Daily</a> for the board and Timekeeping, which are real.</p>
+  <!-- The calendar the creator actually kept. It is read-only and says so: these
+       entries arrived from the vault the Obsidian plugin wrote, and Proxima has no
+       command for editing one yet, so the page shows what is there rather than
+       offering controls that would refuse. -->
+  <section class="schedule" id="schedule" hidden>
+    <div class="tk-bar">
+      <div>
+        <p class="eyebrow">SCHEDULE</p>
+        <h1>Schedule</h1>
+      </div>
+      <span class="spacer"></span>
+      <span class="tk-count" id="schedCount"></span>
+      <label class="hub-archived">
+        <input type="checkbox" id="schedUpcoming">
+        <span>From today</span>
+      </label>
+    </div>
+    <p class="tk-empty" id="schedEmpty" hidden></p>
+    <div class="sched-list" id="schedList" hidden></div>
+    <p class="sub" id="schedNote">Read-only: these were imported from the vault, and nothing on this page changes them.</p>
   </section>
 
   <!-- A route that resolves to nothing says so, rather than falling back to a

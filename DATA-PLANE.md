@@ -265,6 +265,59 @@ accepted with nothing to do: no event, no revision, no new sequence number.
 `RUN_ALREADY_LOCKED`, `RUN_MEMBER_LOCKED`, `RUN_LOCKED`, `ACTOR_MISMATCH`,
 `REV_REQUIRED`, `FORBIDDEN`, `WRITE_FAILED`.
 
+### The calendar, and the projects that are places
+
+Two things arrived with the vault import, and neither is a task.
+
+**`schedule_events`** — the creator's calendar, one row per entry the Obsidian plugin
+wrote. It is a *separate table from `tasks` on purpose*: a schedule entry is an instant
+with a duration, a task is a piece of work with a share of a run, and filing one as the
+other would put an appointment in a column it has no place in. Times are instants
+(`start_at`, `end_at`), never days. `recurrence`, `recurrence_until`,
+`recurrence_exceptions`, `recurrence_days` and `occurrence_of` are kept **as the source
+stated them** — nothing expands a recurrence, because an expansion is a decision the
+source never made and a calendar that invents occurrences is a calendar that lies.
+`source_ref` records the file each row came from, so an import is auditable rather than
+a claim. It is exposed as `board.schedule` and it is **read-only**: there is no command
+that creates or edits one yet, and the page says so instead of offering controls that
+would refuse.
+
+**Project links** — a project can BE a place on this machine. `projects.link_kind` and
+`projects.link_path` hold that, and the row is a *pointer*: nothing inside the folder is
+copied, parsed or counted. On a backpack page the link is opened by asking **Papers**,
+which is the only thing in the arrangement allowed to open anything:
+
+```
+papers:project:as-you-go-load               -> the shortcuts Papers will open, with targets
+papers:project:as-you-go-launch {actionId}  -> the machine's own handler: Explorer, or
+                                               whatever application owns the file
+```
+
+The shortcut is matched **by target**, not by a name this app invented: a link is
+openable while its path is one of Papers' declarations. `actions.json` beside
+`project.json` is where those declarations ship. When Papers has no shortcut for a path
+— or when the page is not inside Papers at all — the link says exactly that and prints
+the path rather than pretending it opened something.
+
+### Importing a vault
+
+`vault.import` takes the bytes of every source file and the list of project folders, and
+it is shaped by three rules:
+
+1. **The source is archived before anything is written.** One bundle in `backups/`, with
+   a SHA-256 per file, written outside the transaction and unconditionally — an import
+   that cannot be undone is not an import, it is a move. (This is why a second import of
+   the same vault still writes an archive: what was *offered* is worth recording even
+   when nothing was taken.)
+2. **Ids and dates are preserved.** `event-1780320243719-dpooq.md` becomes a row with
+   that id; a project id `proj-1780057127027-m1c` carries its creation instant in its own
+   name, used when the source has no `createdAt` rather than inventing "now".
+3. **Nothing is overwritten.** A file whose id already exists is skipped and counted, so
+   importing the same vault twice creates nothing and says so — and, because a command
+   that changed nothing writes no event, the log does not grow either.
+
+Its effects are one `create` per record, so the whole import is attributed, revertible,
+and visible in the activity diff like any other change.
 ### The locked plan is the service's rule, not the cockpit's
 
 A locked run freezes a plan, and the cockpit has always enforced that by disabling

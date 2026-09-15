@@ -21,6 +21,8 @@
  *   proxima activity [--hours 1]                        a human-readable diff, newest first
  *   proxima undo --actor agent:scout [--hours 1] [--dry-run]
  *   proxima agents [add <name> | revoke <name>]        list, mint, or revoke
+ *   proxima vault scan <vaultPath>                     what a vault import would take
+ *   proxima vault import <vaultPath> [--origin <name>] [--no-actions]
  *   proxima raw <type> '<json payload>'
  *
  * Options: --as <agent>, --url <url>, --home <dir>, --json
@@ -35,8 +37,9 @@
  * on what you have actually seen, or be refused and read again.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { join, resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
 const flags = { url: process.env.PROXIMA_URL || 'http://127.0.0.1:4181', home: null, token: null, as: null, json: false };
@@ -371,6 +374,103 @@ async function main() {
       if (!body.agents.length) { console.log('No agents yet. Mint one with:  proxima agents add scout'); return undefined; }
       body.agents.forEach((a) => console.log('  ' + String(a.actor).padEnd(24) + ' created ' + ago(a.createdAt) +
         (a.lastUsedAt ? ', last used ' + ago(a.lastUsedAt) : ', never used')));
+      return undefined;
+    }
+
+    case 'vault': {
+      const [sub, vaultPath] = bare(rest);
+      if (sub !== 'scan' && sub !== 'import') throw new Error('vault needs a subcommand: scan <path> or import <path>');
+      if (!vaultPath) throw new Error('vault ' + sub + ' needs the vault path');
+      const root = resolve(vaultPath);
+      if (!existsSync(root)) { console.error('No such vault: ' + root); process.exit(2); }
+
+      // The plugin's own settings name its folders. Reading them beats guessing:
+      // a vault whose folders have been renamed still imports.
+      let eventsRel = '-Hide/Proxima/events';
+      let projectsRel = '-Hide/Proxima/projects';
+      const settingsPath = join(root, '.obsidian', 'plugins', 'proxima', 'data.json');
+      if (existsSync(settingsPath)) {
+        try {
+          const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+          if (typeof settings.eventsFolder === 'string' && settings.eventsFolder) eventsRel = settings.eventsFolder;
+          if (typeof settings.projectsFolder === 'string' && settings.projectsFolder) projectsRel = settings.projectsFolder;
+        } catch { /* unreadable settings: the documented folder names stand */ }
+      }
+      const eventsDir = join(root, ...eventsRel.split('/'));
+      const projectsDir = join(root, ...projectsRel.split('/'));
+      if (!existsSync(eventsDir)) { console.error('No events folder at ' + eventsDir); process.exit(2); }
+      if (!existsSync(projectsDir)) { console.error('No projects folder at ' + projectsDir); process.exit(2); }
+
+      // ONLY the events and the project's own record are read. The contents of a
+      // project folder are the creator's own files, and a cockpit that ingests a
+      // folder has decided it owns what is inside it.
+      const files = [];
+      const rel = (absolute) => absolute.slice(root.length + 1).split('\\').join('/');
+      for (const entry of readdirSync(eventsDir)) {
+        if (!entry.endsWith('.md')) continue;
+        files.push({ path: rel(join(eventsDir, entry)), bytes: readFileSync(join(eventsDir, entry), 'utf8') });
+      }
+      const folders = readdirSync(projectsDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => ({ id: entry.name, path: join(projectsDir, entry.name) }));
+      for (const folder of folders) {
+        const index = join(folder.path, 'index.md');
+        if (existsSync(index)) files.push({ path: rel(index), bytes: readFileSync(index, 'utf8') });
+      }
+
+      const summary = {
+        root,
+        origin: f.origin || 'vault:' + vaultPath.replace(/\\/g, '/'),
+        eventsDir: rel(eventsDir),
+        projectsDir: rel(projectsDir),
+        eventFiles: files.filter((x) => x.path.includes('/events/')).length,
+        projectRecords: files.filter((x) => x.path.endsWith('/index.md')).length,
+        folders: folders.length,
+        folderPaths: folders.map((x) => x.path),
+      };
+      if (sub === 'scan') { show(summary); return undefined; }
+      if (rest.includes('--dry-run') || f['dry-run'] !== undefined) {
+        // The dry run is the scan: the same read, and nothing sent.
+        console.log('dry run — nothing was sent to the service.');
+        show(summary);
+        return undefined;
+      }
+
+      const { body } = await send('vault.import', { source: { root, origin: summary.origin }, files, folders });
+      if (!body.ok) { show(body); process.exit(1); }
+      const report = body.value;
+      if (flags.json) { show({ summary, report }); return undefined; }
+
+      console.log('vault   ' + root);
+      console.log('origin  ' + report.origin);
+      console.log('archive backups/' + report.archive);
+      console.log('events  ' + report.events.created + ' created, ' + report.events.skipped + ' already there, ' +
+        report.events.unfiled + ' with no project of their own, ' + report.events.undated + ' refused as unreadable');
+      console.log('projects ' + report.projects.created + ' created (' + report.projects.linked + ' with a folder link, ' +
+        report.projects.unnamed + ' with no name in the source), ' + report.projects.skipped + ' already there');
+      if (report.rejected.length) {
+        console.log('refused ' + report.rejected.length + ':');
+        report.rejected.slice(0, 10).forEach((r) => console.log('   ' + r.path + ' — ' + r.why));
+      }
+
+      // The links the creator clicks. Papers reads `actions.json` beside project.json
+      // and can open each target with the machine's own handler; nothing else has to
+      // know how to open a folder.
+      if (!rest.includes('--no-actions')) {
+        // This file lives in <project>/service, and the project root is where Papers looks
+        // for actions.json — beside project.json and local-service.json.
+        const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+        const actionsPath = join(projectRoot, 'actions.json');
+        const linked = [];
+        const board = await api('GET', '/v1/snapshot');
+        const projects = (board.body && board.body.board && board.body.board.projects) || [];
+        projects.filter((p) => p.link && p.link.kind === 'folder').forEach((p) => {
+          const slug = String(p.id).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100);
+          linked.push({ id: 'vault-' + slug, target: p.link.path });
+        });
+        writeFileSync(actionsPath, JSON.stringify({ schemaVersion: 1, actions: linked }, null, 2) + '\n');
+        console.log('actions ' + linked.length + ' folder link(s) declared in ' + actionsPath);
+      }
       return undefined;
     }
 

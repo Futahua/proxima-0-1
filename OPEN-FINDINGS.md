@@ -56,6 +56,56 @@ again with the same script. Where a refusal is the answer, the refusal is quoted
 | **`renderSchedule()` never called `renderGlobalActivity()`**, so a direct load into `#/schedule` left the activity handle hidden and "every route" was not closed as stated | Verified by loading `http://127.0.0.1:4181/#/schedule` directly: the handle reads `◆ b6probe · 5 · just now` while the board's own line is correctly hidden off-board. |
 | **`applyTaskPatch` conflated an explicitly stored null with absence** during compensation — every null-valued key was deleted from `extra_json`, so restoring a record could drop a field that had really held null | The event's `before` now leaves out fields that were absent instead of writing them as null, and the compensation carries an explicit `__remove` list for those. Verified: a task created with `shade: null` still has the key after the undo (with its null), while a task that never had `shade` does not gain one. |
 
+## The real-data import (round 8)
+
+The creator's own vault, imported: 271 calendar entries and 30 project folders from
+`D:\Letters\MatTroiSeConMoc\vault-copy-20260913`, which is a copy and was left
+byte-identical (275 imported source files re-hashed against the archive after the
+import: 0 changed, 0 missing).
+
+**Handoff against disk — no conflict, one correction of emphasis.** The 271 event
+records are `-Hide/Proxima/events/event-*.md` and the "about 30 project folders" are
+exactly 30 directories under `-Hide/Proxima/projects/`. What the handoff did not say,
+because nothing on disk says it: **only 4 of those 30 folders carry a name**. A project's
+name lives in its own `index.md` frontmatter, and 26 folders have no `index.md` at all,
+so those 26 rows are named by their id. That is recorded rather than papered over: the
+creator will see `proj-1780057127027-m1c` where the source never recorded a name.
+
+| Step | Before | After |
+| --- | --- | --- |
+| board | 0 projects, 0 tasks, 0 schedule entries, headSeq 204 | 30 projects (30 linked to their folder), 0 tasks, 271 schedule entries, headSeq 205 |
+| events | — | 271 created, 0 skipped, 0 undated, 0 without a project that named one, 11 that never named a project |
+| projects | — | 30 created: 30 with a folder link, 26 with no name in the source, 4 named by their own record |
+| second import | — | 0 created, 301 skipped, headSeq unchanged (206) — a no-op writes no event |
+| source archive | — | `backups/vault-D-Letters-MatTroiSeConMoc-vault-copy-20260913-20260915-141432.json` (189.6 KB, 275 files, a SHA-256 each) |
+| recovery point | — | `backups/recovery-before-vault-import-20260915-210614/` (db + wal + shm + instance.json + token copy) |
+
+**Driven, inside Papers** (the built checkout at the bridge commit, isolated profile,
+through Papers' own `backpackProject.open`): the surface reads `headSeq 206`, `271`
+schedule entries and `30` projects over the bridge; the Hub renders 30 cards each with a
+link; `as-you-go-load` answers with 30 shortcuts seeded from `actions.json`, the link
+matches by target (`shortcut-vault-proj-1780394511456-yoh`), and
+`as-you-go-launch` answers `{ok: true}` — the folder opened in Explorer. The Schedule
+route renders `271 of 271 entries` grouped by day.
+
+**What refused, and what it looked like**
+
+| Refusal | What it looked like |
+| --- | --- |
+| A page outside Papers clicking a folder link | *"This page is not inside Papers, so it cannot open a folder. The folder is D:\…\proj-1780394511456-yoh"* — the path, not a claim |
+| A folder grant through Papers' native-source capability | Not attempted: the host requires a **file**, so a folder link goes through the declared-shortcut route instead (`grantNativeSource` refuses anything that is not a file) |
+| An event whose dates cannot be read | Refused, not coerced: the row is skipped and the file named. All 271 parsed, so this refused zero times |
+| A project folder with no `index.md` | Created named by its id, and counted as `unnamed` in the report rather than given an invented name |
+| The packaged Papers launched with `--remote-debugging-port` | The port accepts TCP and never answers HTTP (`curl` exit 28); the packaged build was therefore verified by reading its asar (bridge present, loopback policy, `as-you-go-*` present) and driven at the same commit in the built checkout |
+
+## Open — from the import round
+
+| # | Finding | Original | State here |
+| --- | --- | --- | --- |
+| 58 | **Schedule entries are read-only.** The import fills them; nothing edits one. There is no `event.patch`, no way to tick a class off, and no way to add an appointment the vault never had. | — | Open, and said out loud on the page. It is the next slice if the creator wants the calendar to be theirs rather than a copy of what the plugin left. |
+| 59 | **26 projects are named by their id.** Their folders carry no `index.md`, so no name exists anywhere on disk. | — | Open, and only the creator can close it. Renaming one is a `project` rename that does not exist yet either — the Hub has no rename. |
+| 60 | **`actions.json` is seeded, then the creator owns it.** Papers seeds its shortcut state from the project's `actions.json` only while `state.json` is absent; the first time the creator edits shortcuts in the launcher, that file appears and future edits to `actions.json` no longer reach it. | — | Open, and a property of the host, not of this project. Adding a folder link later means editing the launcher rather than the declaration. |
+| 61 | **The imported folder paths point into a copy.** Every link targets `…\vault-copy-20260913\…`, which is this workspace's copy. If the creator's real vault is elsewhere, the links open the copy. | — | Open, and deliberately not guessed at: the handoff named this path as the source, and pointing links at a vault nobody confirmed would be worse than pointing them at the one that was. |
 ## Closed — the Papers bridge (round 7)
 
 Lane 4 built the host side (`backpack-local-service-bridge` @ `5d039f7`): `connect-src`

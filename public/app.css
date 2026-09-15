@@ -494,3 +494,18 @@ dialog menu { display: flex; gap: 8px; padding: 0; margin: 18px 0 0; }
 /* A refused save says what is wrong, in words, next to the fields it concerns. */
 .field-error { margin: 0 0 12px; padding: 9px 11px; border-radius: 6px; font-size: 12px;
   color: var(--ink); background: rgba(224, 108, 117, .12); border: 1px solid var(--danger); }
+
+/* The Schedule: imported calendar entries, read as days. Read-only by construction —
+   nothing on this page writes, because there is no command for editing one yet. */
+.sched-list { display: flex; flex-direction: column; gap: 2px; }
+.sched-day { margin: 14px 0 4px; font-size: 12px; letter-spacing: .04em; color: var(--dim); }
+.sched-row { display: grid; grid-template-columns: 130px 1fr; gap: 12px; align-items: start;
+  padding: 8px 10px; border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 6px; background: var(--panel-2); }
+.sched-row.past { opacity: .62; }
+.sched-row.done h4 { text-decoration: line-through; }
+.sched-row .when { font-size: 12px; color: var(--dim); }
+.sched-row .when .time { display: block; color: var(--ink); }
+.sched-row .what h4 { margin: 0 0 2px; font-size: 14px; }
+.sched-row .what .meta { margin: 0; font-size: 12px; color: var(--dim); }
+.sched-row .what .note { margin: 4px 0 0; font-size: 12px; color: var(--dim); white-space: pre-wrap; }

@@ -592,6 +592,9 @@ const Store = (() => {
     board = {
       projects: Array.isArray(body.board.projects) ? body.board.projects : [],
       tasks: Array.isArray(body.board.tasks) ? body.board.tasks : [],
+      // The calendar. It is imported legacy data, not something this cockpit edits,
+      // so it is carried in the snapshot and read as it stands.
+      schedule: Array.isArray(body.board.schedule) ? body.board.schedule : [],
       run: body.board.run || null,
     };
     attribution = body.board.attribution && typeof body.board.attribution === 'object' ? body.board.attribution : {};
@@ -1116,6 +1119,7 @@ const Store = (() => {
     tasks: () => board.tasks.slice(),
     task: (taskId) => board.tasks.find((t) => t.id === taskId) ?? null,
     run: () => (board.run ? { ...board.run, members: board.run.members ? board.run.members.map((m) => ({ ...m })) : null } : null),
+    schedule: () => (Array.isArray(board.schedule) ? board.schedule.slice() : []),
 
     // ── Who touched what ─────────────────────────────────────────────────────
     attributionFor: (kind, id) => {

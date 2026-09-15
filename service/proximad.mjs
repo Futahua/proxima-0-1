@@ -231,6 +231,11 @@ const ATTRIBUTION_COLUMNS = [
   ['projects', 'last_at', 'TEXT'],
   ['projects', 'last_type', 'TEXT'],
   ['projects', 'last_seq', 'INTEGER'],
+  // A project can be a place on this machine — the folder its work lives in. The
+  // link arrived with the vault import; a database that predates it keeps working,
+  // and an older row simply reads as "no link".
+  ['projects', 'link_kind', 'TEXT'],
+  ['projects', 'link_path', 'TEXT'],
 ];
 const addedColumns = ATTRIBUTION_COLUMNS.filter(([table, column, definition]) => ensureColumn(table, column, definition));
 // Also when rows predate the columns: a database that gained them before this
@@ -393,6 +398,35 @@ function rowToProject(row) {
     description: row.description,
     createdAt: row.created_at,
     archivedAt: row.archived_at,
+    // A place on this machine, when the project is one. Absent is the normal case
+    // for a project that only ever held tasks.
+    link: row.link_path ? { kind: row.link_kind || 'folder', path: row.link_path } : null,
+    rev: row.rev,
+  };
+}
+
+const TYPED_EVENT_FIELDS = ['id', 'name', 'note', 'project', 'startAt', 'endAt', 'completed', 'color',
+  'recurrence', 'recurrenceUntil', 'recurrenceExceptions', 'recurrenceDays', 'occurrenceOf',
+  'sourceRef', 'createdAt', 'rev'];
+
+function rowToScheduleEvent(row) {
+  return {
+    ...extraOf(row.extra_json),
+    id: row.id,
+    name: row.name,
+    note: row.note,
+    project: row.project_id === null ? '' : row.project_id,
+    startAt: row.start_at,
+    endAt: row.end_at,
+    completed: row.completed === 1,
+    color: row.color,
+    recurrence: row.recurrence,
+    recurrenceUntil: row.recurrence_until,
+    recurrenceExceptions: row.recurrence_exceptions,
+    recurrenceDays: row.recurrence_days,
+    occurrenceOf: row.occurrence_of,
+    sourceRef: row.source_ref,
+    createdAt: row.created_at,
     rev: row.rev,
   };
 }
@@ -420,6 +454,10 @@ const readProject = (id) => {
   return row ? rowToProject(row) : null;
 };
 const readRun = () => rowToRun(db.prepare('SELECT * FROM runs WHERE id = 1').get());
+const readScheduleEvent = (id) => {
+  const row = db.prepare('SELECT * FROM schedule_events WHERE id = ?').get(id);
+  return row ? rowToScheduleEvent(row) : null;
+};
 
 // ── Restoring what an event kept ────────────────────────────────────────────
 // A delete event holds the whole record, which is what makes "deletes are
@@ -445,9 +483,26 @@ function insertProjectRecord(record, rev) {
   const known = new Set(TYPED_PROJECT_FIELDS);
   const extra = {};
   Object.keys(record).forEach((k) => { if (!known.has(k)) extra[k] = record[k]; });
-  db.prepare('INSERT INTO projects (id, name, description, created_at, archived_at, rev, extra_json) VALUES (?, ?, ?, ?, ?, ?, ?)')
+  db.prepare('INSERT INTO projects (id, name, description, created_at, archived_at, link_kind, link_path, rev, extra_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
     .run(record.id, record.name || 'Untitled project', record.description || '',
-      record.createdAt || new Date().toISOString(), record.archivedAt || null, rev, JSON.stringify(extra));
+      record.createdAt || new Date().toISOString(), record.archivedAt || null,
+      record.link ? record.link.kind : null, record.link ? record.link.path : null,
+      rev, JSON.stringify(extra));
+}
+
+function insertScheduleEventRecord(record, rev) {
+  const known = new Set(TYPED_EVENT_FIELDS);
+  const extra = {};
+  Object.keys(record).forEach((k) => { if (!known.has(k)) extra[k] = record[k]; });
+  db.prepare(`INSERT INTO schedule_events
+              (id, name, note, project_id, start_at, end_at, completed, color, recurrence, recurrence_until,
+               recurrence_exceptions, recurrence_days, occurrence_of, source_ref, created_at, rev, extra_json)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(record.id, record.name || 'Untitled event', record.note || '', record.project || null,
+      record.startAt || null, record.endAt || null, record.completed ? 1 : 0,
+      record.color || null, record.recurrence || null, record.recurrenceUntil || null,
+      record.recurrenceExceptions || null, record.recurrenceDays || null, record.occurrenceOf || null,
+      record.sourceRef || null, record.createdAt || new Date().toISOString(), rev, JSON.stringify(extra));
 }
 
 function insertRunRecord(record) {
@@ -601,6 +656,7 @@ function checkRev(ctx, kind, id, currentRev) {
 function bumpRev(kind, id) {
   if (kind === 'task') db.prepare('UPDATE tasks SET rev = rev + 1 WHERE id = ?').run(id);
   else if (kind === 'project') db.prepare('UPDATE projects SET rev = rev + 1 WHERE id = ?').run(id);
+  else if (kind === 'schedule_event') db.prepare('UPDATE schedule_events SET rev = rev + 1 WHERE id = ?').run(id);
   else if (kind === 'run') db.prepare('UPDATE runs SET rev = rev + 1 WHERE id = 1').run();
 }
 
@@ -1111,6 +1167,74 @@ const COMMANDS = {
   'proposal.accept'(payload, ctx) { return refuse('COMMAND_NOT_IMPLEMENTED', { type: 'proposal.accept', slice: 'the creator chose frictionless: there is no approval queue to accept into' }); },
 
   /**
+   * Import the creator's real vault — the events the Obsidian plugin wrote, and the
+   * project folders it kept them in.
+   *
+   * Three rules shape this, and each one is the opposite of the convenient choice:
+   *
+   *   1. THE SOURCE IS ARCHIVED BEFORE ANYTHING IS WRITTEN. The bytes of every file
+   *      that is read arrive here, and they are hashed and archived as one bundle
+   *      before the first row. An import that cannot be undone is not an import, it
+   *      is a move.
+   *   2. THE PROJECT FOLDERS ARE NOT READ. A project is a place on this machine; what
+   *      is stored is the PATH. Nothing inside a folder is copied, parsed or counted,
+   *      because a cockpit that ingests a folder has decided it owns what is in it.
+   *   3. IDS AND DATES ARE KEPT. An event file named `event-1780320243719-dpooq.md`
+   *      becomes a row with that id, and a project id `proj-1780057127027-m1c`
+   *      carries its creation instant in its own name — which is used when the source
+   *      has no record of one, rather than inventing "now".
+   *
+   * A file whose id already exists is SKIPPED and reported. Nothing is overwritten:
+   * a second import of the same vault is a no-op with a report, not a rewrite.
+   */
+  'vault.import'(payload, ctx) {
+    const source = payload.source && typeof payload.source === 'object' ? payload.source : null;
+    if (!source || typeof source.root !== 'string' || !source.root) {
+      return refuse('PAYLOAD_INVALID', { type: 'vault.import', missing: ['source.root'] });
+    }
+    const origin = typeof source.origin === 'string' && source.origin ? source.origin : 'vault';
+    const files = Array.isArray(payload.files) ? payload.files : [];
+    const folders = Array.isArray(payload.folders) ? payload.folders : [];
+    if (!files.length && !folders.length) {
+      return refuse('PAYLOAD_INVALID', { type: 'vault.import', missing: ['files[] or folders[]'] });
+    }
+    const parsed = readVaultSources(payload, source);
+    if (!parsed.ok) return parsed;
+    // Written outside the transaction, first, and unconditionally: the archive is the
+    // one thing here that is never conditional.
+    const archive = archiveBytes(origin, JSON.stringify({
+      schemaVersion: 1,
+      origin,
+      root: source.root,
+      at: new Date().toISOString(),
+      files: files.map((f) => ({ path: f.path, sha256: createHash('sha256').update(String(f.bytes ?? '')).digest('hex'), bytes: String(f.bytes ?? '') })),
+    }), { counts: { files: files.length, folders: folders.length }, conflicts: 0 });
+
+    const state = { report: null };
+    return {
+      ok: true,
+      entity: { kind: 'board', id: 'vault-import' },
+      value: () => state.report,
+      apply() {
+        const applied = applyVaultImport(parsed, { archive, origin });
+        state.report = applied.report;
+        // A second import of the same vault creates nothing, and a command that
+        // changed nothing must not write an event: an audit log with "imported 0" in
+        // it is a log that cannot be trusted to mean anything by its length.
+        if (!applied.effects.length) {
+          return { value: applied.report, before: null, after: null, changed: false };
+        }
+        return {
+          value: applied.report,
+          before: null,
+          after: { archive, origin, projects: applied.report.projects.created, events: applied.report.events.created },
+          effects: applied.effects,
+        };
+      },
+    };
+  },
+
+  /**
    * Importing a legacy board is a COMMAND now, not a side door.
    *
    * It used to be an HTTP endpoint that wrote rows itself, recorded them as
@@ -1283,6 +1407,7 @@ const COMMANDS = {
     const liveRecord = (kind, id) => {
       if (kind === 'task') return readTask(id);
       if (kind === 'project') return readProject(id);
+      if (kind === 'schedule_event') return readScheduleEvent(id);
       // A run is identified by WHEN it was locked, not by a row id: there is only
       // ever one, so "the run I locked" and "whatever run exists now" are different
       // questions and only the first one is the one an undo may act on.
@@ -1308,12 +1433,14 @@ const COMMANDS = {
     const deleteRecord = (kind, id) => {
       if (kind === 'task') db.prepare('DELETE FROM tasks WHERE id = ?').run(id);
       else if (kind === 'project') { db.prepare('UPDATE tasks SET project_id = NULL WHERE project_id = ?').run(id); db.prepare('DELETE FROM projects WHERE id = ?').run(id); }
+      else if (kind === 'schedule_event') db.prepare('DELETE FROM schedule_events WHERE id = ?').run(id);
       else if (kind === 'run') db.prepare('DELETE FROM runs WHERE id = 1').run();
     };
     const restoreRecord = (kind, effect) => {
       const record = effect.before;
       if (kind === 'task') insertTaskRecord(record, (Number(record.rev) || 1) + 1);
       else if (kind === 'project') insertProjectRecord(record, (Number(record.rev) || 1) + 1);
+      else if (kind === 'schedule_event') insertScheduleEventRecord(record, (Number(record.rev) || 1) + 1);
       else if (kind === 'run') insertRunRecord(record);
     };
     const putFieldsBack = (kind, id, fields) => {
@@ -1716,6 +1843,207 @@ function archiveBytes(origin, bytes, extra) {
  * leaves nothing behind except the archive. What it returns is the effects list,
  * which is what makes an import attributable and revertible.
  */
+/**
+ * The frontmatter reader, and nothing more.
+ *
+ * `key: value` lines between the fences, a body after them. It is deliberately not a
+ * YAML engine: the vault it reads was written by one program in one shape, and a
+ * general parser would accept documents this import has no idea how to represent.
+ * A line it does not understand is not silently dropped — the caller reports it.
+ */
+function parseFrontmatter(text) {
+  const raw = String(text === undefined || text === null ? '' : text);
+  const fences = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/.exec(raw);
+  if (!fences) return { fields: {}, body: raw.trim(), understood: false };
+  const fields = {};
+  const ignored = [];
+  fences[1].split(/\r?\n/).forEach((line) => {
+    if (!line.trim()) return;
+    const match = /^([A-Za-z_][A-Za-z0-9_]*):[ \t]*(.*)$/.exec(line);
+    if (!match) { ignored.push(line.trim().slice(0, 80)); return; }
+    let value = match[2].trim();
+    if (value.length > 1 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
+      value = value.slice(1, -1);
+    }
+    fields[match[1]] = value;
+  });
+  return { fields, body: raw.slice(fences[0].length).trim(), ignored, understood: true };
+}
+
+/** `proj-1780057127027-m1c` carries its creation instant in its own name. */
+function millisFromId(id) {
+  const match = /-(\d{10,16})-/.exec(String(id || ''));
+  if (match) {
+    const ms = Number(match[1]);
+    if (Number.isFinite(ms) && ms > 0 && ms < 4102444800000) return new Date(ms).toISOString();
+  }
+  return null;
+}
+
+const asInstant = (value) => {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+};
+
+/**
+ * Read the vault into records. NO WRITES: this half is validation, so a refusal can
+ * happen before anything has been archived or inserted.
+ */
+function readVaultSources(payload, source) {
+  const events = [];
+  const projectsById = new Map();
+  const rejected = [];
+
+  (payload.folders || []).forEach((folder) => {
+    const id = String((folder && folder.id) || '').trim();
+    const path = String((folder && folder.path) || '').trim();
+    if (!id || !path) { rejected.push({ path: path || '(folder)', why: 'a folder needs an id and an absolute path' }); return; }
+    projectsById.set(id, {
+      id, linkPath: path, linkKind: 'folder',
+      name: null, description: '', createdAt: null, extra: {}, sourceRef: null, note: '',
+    });
+  });
+
+  (payload.files || []).forEach((file) => {
+    const path = String((file && file.path) || '');
+    const bytes = typeof (file && file.bytes) === 'string' ? file.bytes : '';
+    const eventMatch = /(?:^|\/)events\/([^/]+)\.md$/.exec(path);
+    const projectMatch = /(?:^|\/)projects\/([^/]+)\/index\.md$/.exec(path);
+    if (eventMatch) {
+      const { fields, body } = parseFrontmatter(bytes);
+      if (!fields.name) { rejected.push({ path, why: 'no name in the frontmatter' }); return; }
+      events.push({ id: eventMatch[1], path, fields, note: body });
+      return;
+    }
+    if (projectMatch) {
+      const id = projectMatch[1];
+      const { fields, body } = parseFrontmatter(bytes);
+      const known = projectsById.get(id) || { id, linkPath: null, linkKind: null, name: null, description: '', createdAt: null, extra: {}, sourceRef: null, note: '' };
+      const extra = {};
+      ['projectType', 'status', 'linkedFolder', 'linkedFolders', 'icon', 'type'].forEach((key) => {
+        if (fields[key] !== undefined) extra[key] = fields[key];
+      });
+      projectsById.set(id, {
+        ...known,
+        name: fields.name || known.name,
+        description: fields.description || known.description || '',
+        createdAt: fields.createdAt || known.createdAt,
+        sourceRef: path,
+        note: body,
+        extra: { ...known.extra, ...extra },
+      });
+      return;
+    }
+    rejected.push({ path, why: 'not an event or a project record' });
+  });
+
+  const projects = [...projectsById.values()].map((project) => ({
+    ...project,
+    // No name anywhere in the source: the id is the only true thing left, and saying
+    // so is better than inventing a name the creator never gave.
+    name: project.name || project.id,
+    named: Boolean(project.name),
+    createdAt: project.createdAt || millisFromId(project.id) || new Date().toISOString(),
+  }));
+
+  const known = new Set(projects.map((p) => p.id));
+  const prepared = events.map((event) => {
+    const f = event.fields;
+    const referenced = f.project || null;
+    const filed = referenced && known.has(referenced) ? referenced : null;
+    const extra = {};
+    if (f.isClonedOccurrence !== undefined) extra.isClonedOccurrence = f.isClonedOccurrence === 'true';
+    if (f.occurrenceDate !== undefined) extra.occurrenceDate = f.occurrenceDate;
+    return {
+      id: event.id,
+      path: event.path,
+      name: f.name,
+      note: event.note || '',
+      project: filed,
+      referencedProject: referenced,
+      startAt: asInstant(f.startDate),
+      endAt: asInstant(f.deadline),
+      completed: f.isCompleted === 'true',
+      color: f.color || null,
+      recurrence: f.recurrence || null,
+      recurrenceUntil: f.recurrenceUntil || null,
+      recurrenceExceptions: f.recurrenceExceptions || null,
+      recurrenceDays: f.recurrenceDays || null,
+      occurrenceOf: f.parentTaskId || null,
+      createdAt: asInstant(f.createdAt) || millisFromId(event.id) || new Date().toISOString(),
+      extra,
+      rawStart: f.startDate,
+      rawDeadline: f.deadline,
+    };
+  });
+
+  const undated = prepared.filter((e) => !e.startAt || !e.endAt);
+  return { ok: true, projects, events: prepared, rejected, undated, root: source.root, origin: source.origin };
+}
+
+/**
+ * Write what was read, and report every record that was already there.
+ *
+ * Skipping is the whole idempotency story: a second import of the same vault creates
+ * nothing, overwrites nothing, and says so.
+ */
+function applyVaultImport(parsed, { archive, origin }) {
+  const effects = [];
+  const report = {
+    origin,
+    archive,
+    root: parsed.root,
+    projects: { created: 0, skipped: 0, unnamed: 0, linked: 0 },
+    events: { created: 0, skipped: 0, unfiled: 0, withoutProject: 0, undated: 0, byProject: {} },
+    rejected: parsed.rejected,
+    at: new Date().toISOString(),
+  };
+
+  parsed.projects.forEach((project) => {
+    if (readProject(project.id)) { report.projects.skipped += 1; return; }
+    db.prepare(`INSERT INTO projects (id, name, description, created_at, archived_at, link_kind, link_path, rev, extra_json)
+                VALUES (?, ?, ?, ?, NULL, ?, ?, 1, ?)`)
+      .run(project.id, project.name, project.description, project.createdAt,
+        project.linkKind, project.linkPath, JSON.stringify(project.extra));
+    if (!project.named) report.projects.unnamed += 1;
+    if (project.linkPath) report.projects.linked += 1;
+    report.projects.created += 1;
+    effects.push(makeEffect('project', project.id, 'create', null, readProject(project.id)));
+  });
+
+  parsed.events.forEach((event) => {
+    if (!event.startAt || !event.endAt) {
+      // Refused rather than coerced: an event whose dates cannot be read is not an
+      // event this store can put on a timeline, and guessing "today" would put a
+      // wrong appointment in front of the creator.
+      report.events.undated += 1;
+      report.rejected.push({ path: event.path, why: 'startDate/deadline are not readable instants: ' + JSON.stringify([event.rawStart, event.rawDeadline]) });
+      return;
+    }
+    if (readScheduleEvent(event.id)) { report.events.skipped += 1; return; }
+    db.prepare(`INSERT INTO schedule_events
+                (id, name, note, project_id, start_at, end_at, completed, color, recurrence, recurrence_until,
+                 recurrence_exceptions, recurrence_days, occurrence_of, source_ref, created_at, rev, extra_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`)
+      .run(event.id, event.name, event.note, event.project, event.startAt, event.endAt,
+        event.completed ? 1 : 0, event.color, event.recurrence, event.recurrenceUntil,
+        event.recurrenceExceptions, event.recurrenceDays, event.occurrenceOf,
+        event.path, event.createdAt, JSON.stringify(event.extra));
+    if (!event.project && event.referencedProject) report.events.unfiled += 1;
+    // Counted separately from `unfiled`: an event that never named a project is not
+    // an event whose project went missing, and reporting them as one number would
+    // hide the difference.
+    if (!event.referencedProject) report.events.withoutProject += 1;
+    const key = event.project || '(no project)';
+    report.events.byProject[key] = (report.events.byProject[key] || 0) + 1;
+    report.events.created += 1;
+    effects.push(makeEffect('schedule_event', event.id, 'create', null, readScheduleEvent(event.id)));
+  });
+
+  return { effects, report };
+}
+
 function applyImport({ origin, bytes, client, archive, analysis }) {
   const report = analysis;
   const at = new Date().toISOString();
@@ -1852,6 +2180,9 @@ function snapshot() {
     board: {
       projects: db.prepare('SELECT * FROM projects ORDER BY name COLLATE NOCASE').all().map(rowToProject),
       tasks: db.prepare('SELECT * FROM tasks ORDER BY order_index, rowid').all().map(rowToTask),
+      // The calendar, which is not the board: a schedule entry is an instant with a
+      // duration, and filing one as a task would put it in a column it has no place in.
+      schedule: db.prepare('SELECT * FROM schedule_events ORDER BY start_at, rowid').all().map(rowToScheduleEvent),
       run: readRun(),
       // Who touched what, kept beside the records rather than inside them: an entity
       // is what the creator wrote, and provenance is a fact ABOUT it.

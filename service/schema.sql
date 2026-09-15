@@ -25,9 +25,48 @@ CREATE TABLE IF NOT EXISTS projects (
   description TEXT NOT NULL DEFAULT '',
   created_at  TEXT NOT NULL,
   archived_at TEXT,
+  -- A project can BE a place on this machine — a folder of the creator's own work
+  -- that Proxima links to and never copies. `link_path` is the absolute path, and
+  -- `link_kind` says how to open it ('folder' today). The contents stay where they
+  -- are: this is a pointer, and the row must not become a cache of them.
+  link_kind   TEXT,
+  link_path   TEXT,
   rev         INTEGER NOT NULL DEFAULT 1,
   extra_json  TEXT NOT NULL DEFAULT '{}'
 );
+
+-- The creator's calendar: one row per occurrence, imported from the vault that the
+-- Obsidian plugin wrote. It is NOT the same thing as the `events` table below, which
+-- is the audit log — hence the different name.
+--
+-- Times are instants (ISO 8601 with an offset), not days: a schedule entry has a
+-- start and an end, where a task has a start day and a deadline day. `occurrence_of`
+-- and the recurrence columns are kept as the source stated them; nothing here expands
+-- a recurrence, because an expansion is a decision the source never made.
+CREATE TABLE IF NOT EXISTS schedule_events (
+  id                    TEXT PRIMARY KEY,
+  name                  TEXT NOT NULL,
+  note                  TEXT NOT NULL DEFAULT '',
+  project_id            TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  start_at              TEXT,
+  end_at                TEXT,
+  completed             INTEGER NOT NULL DEFAULT 0,
+  color                 TEXT,
+  recurrence            TEXT,
+  recurrence_until      TEXT,
+  recurrence_exceptions TEXT,
+  recurrence_days       TEXT,
+  occurrence_of         TEXT,
+  -- Where this row came from, exactly as the source named it: the vault-relative
+  -- path of the file it was read from. Provenance is what makes an import auditable
+  -- rather than a claim.
+  source_ref            TEXT,
+  created_at            TEXT NOT NULL,
+  rev                   INTEGER NOT NULL DEFAULT 1,
+  extra_json            TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS schedule_events_start   ON schedule_events(start_at);
+CREATE INDEX IF NOT EXISTS schedule_events_project ON schedule_events(project_id);
 
 CREATE TABLE IF NOT EXISTS tasks (
   id           TEXT PRIMARY KEY,
