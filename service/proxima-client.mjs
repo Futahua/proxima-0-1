@@ -37,7 +37,7 @@
  * on what you have actually seen, or be refused and read again.
  */
 
-import { readFileSync, writeFileSync, existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, realpathSync, statSync, lstatSync } from 'node:fs';
 import { join, resolve, dirname, relative, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -420,7 +420,17 @@ async function main() {
       let eventsRel = '-Hide/Proxima/events';
       let projectsRel = '-Hide/Proxima/projects';
       const settingsPath = join(root, '.obsidian', 'plugins', 'proxima', 'data.json');
-      if (existsSync(settingsPath)) {
+      // ABSENCE IS DECIDED BY THE ENTRY, NOT BY WHAT IT POINTS AT.
+      //
+      // `existsSync` follows links, so a settings entry that is a broken link answers
+      // "no settings here" and the documented folder names quietly take over. The
+      // question being asked is whether there is an ENTRY at this path, and `lstatSync`
+      // is the one that answers it. What to do about an entry that will not resolve is
+      // then a separate decision, made below, on purpose.
+      const settingsEntryExists = (() => {
+        try { lstatSync(settingsPath); return true; } catch { return false; }
+      })();
+      if (settingsEntryExists) {
         // THE SETTINGS FILE DECIDES WHICH FOLDERS ARE READ, so it is not a detail. A
         // data.json that is really a link out of the vault would let the vault name its
         // own sources from anywhere on the machine — the containment above would then be
@@ -428,23 +438,36 @@ async function main() {
         // and measured against the same root as everything else, and it has to be a
         // regular file that is really there.
         //
-        // Settings that are MISSING are ordinary and the documented folder names stand.
+        // Settings that are ABSENT are ordinary and the documented folder names stand.
         // Settings that resolve OUTSIDE are refused, loudly and separately: "there are no
         // settings here" and "the settings came from somewhere else" must never look the
         // same in a log, and neither may be mistaken for the other.
-        let realSettings = null;
-        try { realSettings = realpathSync.native(settingsPath); }
-        catch { /* exists but will not resolve: the read below decides, as it always did */ }
-        if (realSettings !== null) {
-          if (!contained(realSettings)) escape('the plugin settings (' + settingsPath + ')', realSettings);
-          if (!statSync(realSettings).isFile()) {
-            console.error('Refused: the plugin settings (' + settingsPath + ') resolve to ' + realSettings + ',');
-            console.error('which is not a regular file. Nothing was read, nothing was sent.');
-            process.exit(2);
-          }
+        let realSettings;
+        try {
+          realSettings = realpathSync.native(settingsPath);
+        } catch (error) {
+          // FAIL CLOSED. The entry is there and this import cannot establish what it
+          // really is — so it cannot read it, and it cannot pretend the entry was never
+          // there either. The version before this one read the UNVERIFIED pathname in
+          // exactly this case (`readFileSync(realSettings || settingsPath)`), which made
+          // a settings file that could not be resolved into a settings file that was
+          // simply read anyway.
+          console.error('Refused: the plugin settings entry at ' + settingsPath + ' exists but cannot be resolved ('
+            + ((error && error.code) || error) + ').');
+          console.error('Settings decide which folders an import reads, so it will not read one it cannot verify.');
+          console.error('Nothing was read, nothing was sent.');
+          process.exit(2);
+        }
+        if (!contained(realSettings)) escape('the plugin settings (' + settingsPath + ')', realSettings);
+        if (!statSync(realSettings).isFile()) {
+          console.error('Refused: the plugin settings (' + settingsPath + ') resolve to ' + realSettings + ',');
+          console.error('which is not a regular file. Nothing was read, nothing was sent.');
+          process.exit(2);
         }
         try {
-          const settings = JSON.parse(readFileSync(realSettings || settingsPath, 'utf8'));
+          // The canonical path, always. There is no second choice to fall back to: a
+          // settings file that could not be verified is a settings file that is not read.
+          const settings = JSON.parse(readFileSync(realSettings, 'utf8'));
           if (typeof settings.eventsFolder === 'string' && settings.eventsFolder) eventsRel = settings.eventsFolder;
           if (typeof settings.projectsFolder === 'string' && settings.projectsFolder) projectsRel = settings.projectsFolder;
         } catch { /* unreadable settings: the documented folder names stand */ }

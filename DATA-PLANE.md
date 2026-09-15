@@ -367,10 +367,13 @@ Three consequences worth stating plainly, because they are refusals rather than 
   is really a link out of the vault would let the vault name its own sources from anywhere
   on the machine, and the containment above would then be enforcing a rule the settings had
   already walked around. It is canonicalized with `realpath` and it has to be a regular file
-  inside the vault. Settings that are *missing* are ordinary — the documented folder names
-  stand — but settings that resolve *outside* are a containment refusal that says so: "there
-  are no settings here" and "the settings came from somewhere else" must never look alike in
-  a log.
+  inside the vault. Whether there is an entry at all is decided by `lstatSync`, not by
+  `existsSync`: absence is a fact about the path, not about what the path points at. Settings
+  that are *absent* are ordinary — the documented folder names stand — but settings that
+  resolve *outside*, that are not a regular file, or that **exist and cannot be resolved at
+  all**, are refused and say which of those they are. An entry whose identity cannot be
+  established is never read by its unverified pathname: there is no fallback read, because
+  a settings file that cannot be verified is a settings file that is not read.
 
 ### The locked plan is the service's rule, not the cockpit's
 

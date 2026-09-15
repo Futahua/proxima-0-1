@@ -40,7 +40,7 @@ import { createServer } from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const SERVICE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DAEMON = join(SERVICE, 'proximad.mjs');
@@ -107,6 +107,20 @@ const clientJson = (...args) => {
   try { parsed = JSON.parse(run.output); } catch { /* refusal text, asserted by the caller */ }
   return { ...run, parsed };
 };
+
+const HOOKS = join(SERVICE, 'tests', 'hooks', 'settings-fault-preload.mjs');
+
+/**
+ * The client again, watched from inside: see tests/hooks/. `environment` carries the
+ * fault to inject and the log to write; the product itself is untouched and is started
+ * exactly as it is started above.
+ */
+function clientWatched(environment, ...args) {
+  const result = spawnSync(process.execPath,
+    ['--import', pathToFileURL(HOOKS).href, CLIENT, ...args, '--url', base, '--home', home, '--no-actions'],
+    { encoding: 'utf8', env: { ...process.env, ...environment } });
+  return { status: result.status, output: (result.stdout || '') + (result.stderr || '') };
+}
 
 async function snapshot() {
   const res = await fetch(base + '/v1/snapshot', { headers: { authorization: 'Bearer ' + token } });
@@ -568,4 +582,47 @@ test('a folder and its own record are the expected pairing, and consistent dupli
   const row = after.board.projects.find((p) => p.id === id);
   assert.equal(row.name, 'Paired', 'the record names the project');
   assert.equal(row.link.path, folderPath, 'the folder says where it is');
+});
+
+test('a settings entry that exists but cannot be resolved is refused, read nowhere, and sent nowhere', async () => {
+  const before = await snapshot();
+  const beforeArchives = archives().length;
+
+  const v = vault();
+  // An ordinary record of the vault's own, so "refused" cannot be confused with
+  // "imported nothing": if the import ran at all, this file would land.
+  writeEvent(v, 'event-1780320243795-uuuuu', {});
+
+  // The settings entry is a normal, readable file naming the vault's own folders. What
+  // is broken is establishing WHAT it is — injected as an EPERM from realpathSync.native,
+  // which is what a denied ancestor or a broken reparse point looks like from here.
+  const settingsPath = join(v.dir, '.obsidian', 'plugins', 'proxima', 'data.json');
+  const logPath = join(root, 'settings-fault.log');
+  const run = clientWatched({
+    PROXIMA_TEST_HOOK_LOG: logPath,
+    PROXIMA_TEST_REALPATH_FAULT: settingsPath,
+    PROXIMA_TEST_WATCHED: 'proxima-client.mjs',
+  }, 'vault', 'import', v.dir);
+
+  const log = existsSync(logPath) ? readFileSync(logPath, 'utf8').split('\n').filter(Boolean) : [];
+  const reads = log.filter((line) => line.startsWith('readFileSync '));
+  const fetches = log.filter((line) => line.startsWith('fetch '));
+
+  assert.ok(log.includes('preload installed'), 'the watcher must have been running: ' + JSON.stringify(log));
+  assert.ok(log.some((line) => line.startsWith('realpath-fault ')),
+    'the fault must have been injected, or this proves nothing: ' + JSON.stringify(log));
+  assert.equal(run.status, 2, 'an unresolvable settings entry must fail closed: ' + run.output);
+  assert.match(run.output, /plugin settings entry/);
+  assert.match(run.output, /cannot be resolved/);
+  assert.equal(reads.filter((line) => line.includes('settings') || line.includes('data.json')).length, 0,
+    'the unverified pathname must never be read: ' + JSON.stringify(reads));
+  assert.equal(reads.length, 0, 'nothing at all may be read after the refusal: ' + JSON.stringify(reads));
+  assert.equal(fetches.length, 0, 'no request may reach the service: ' + JSON.stringify(fetches));
+
+  // And the state of the world agrees with the log.
+  assert.equal(archives().length, beforeArchives, 'no archive may be written');
+  const after = await snapshot();
+  assert.equal(after.headSeq, before.headSeq, 'no event may be written');
+  assert.ok(!after.board.schedule.some((e) => e.id === 'event-1780320243795-uuuuu'),
+    'the import must not have run at all');
 });

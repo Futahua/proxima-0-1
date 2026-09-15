@@ -142,6 +142,23 @@ catch it — the four that must fail there do, with the old behaviour quoted bel
 identical, `headSeq` 206, no conflicts** — the expected folder + `index.md` pairing is
 recognised on real data and does not manufacture duplicates.
 
+**And one fail-open path inside that fix (round 11).** The settings containment above left
+a hole of its own: `existsSync` decided existence, `realpathSync.native` was allowed to
+fail, and the read fell back to the *unverified* pathname
+(`readFileSync(realSettings || settingsPath)`). An entry that exists and cannot be resolved
+was therefore read anyway. Existence is now decided by `lstatSync` — absence is a fact about
+the path, not about what it points at — and a canonicalization failure **fails closed**: the
+import refuses, says the entry could not be resolved, and reads nothing. The fallback read
+is gone; only the canonical path is ever opened.
+
+Proven with a fault injected into the client process (a loader hook that makes
+`realpathSync.native` throw EPERM for that one entry, and logs every `readFileSync` and
+`fetch`). Against `bd88e8f` the log reads, in order: `realpath-fault …data.json`,
+**`readFileSync …data.json`**, `realpathSync.native …events`, **`fetch …/v1/commands`** — the
+unverified file was read, its contents were acted on, and a request went out. Against this
+commit the log stops at `realpath-fault`: no read, no fetch, exit 2, no archive, no event,
+no row. The watcher lives in `service/tests/hooks/` and the product knows nothing about it.
+
 
 
 ## Open — from the import round
