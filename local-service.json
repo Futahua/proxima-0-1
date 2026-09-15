@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "services": [
+    { "origin": "http://127.0.0.1:4181", "secret": "operator" }
+  ],
+  "secrets": [
+    {
+      "id": "operator",
+      "file": "D:\\Letters\\MatTroiSeConMoc\\Proxima Data Home\\token",
+      "header": "authorization",
+      "scheme": "Bearer"
+    }
+  ]
+}

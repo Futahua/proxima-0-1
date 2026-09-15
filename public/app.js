@@ -1422,9 +1422,14 @@
       return;
     }
     const when = Store.cachedAt() ? new Date(Store.cachedAt()).toLocaleString() : null;
+    // In Papers the reader has no address bar to fall back on, so the notice has to
+    // name the repair as well as the state.
+    const repair = state.transport === 'bridge'
+      ? ' Nothing has been lost — start the service (service\\Proxima.cmd) and reopen this page.'
+      : '';
     banner.textContent = 'The Proxima service is not reachable' + (state.detail ? ' (' + state.detail + ')' : '') +
       '. This board is a read-only copy' + (when ? ' from ' + when : '') +
-      ' — nothing you change here will be saved, and nothing has been written to this browser.';
+      ' — nothing you change here will be saved, and nothing has been written to this browser.' + repair;
   }
 
   // ── The migration bridge ──────────────────────────────────────────────────

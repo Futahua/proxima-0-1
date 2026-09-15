@@ -464,22 +464,54 @@ and send it as `ifRev`. That is the same requirement the service puts on an agen
 ## Where the cockpit is served from, and why it is not a detail
 
 The service serves the cockpit itself (`GET /`), and that is the only arrangement in
-which the cockpit can talk to it. Two others exist and both fail, for reasons that are
-worth writing down because they are invisible from the outside:
+which the cockpit can talk to it *directly*. Three cases, and the last one is how the
+creator actually uses Proxima:
 
 | Served from | What happens |
 | --- | --- |
-| **the service** — `http://127.0.0.1:4181/` | Same origin as the API. No CORS, the session cookie is first-party, SSE works. **This is the way in.** |
+| **the service** — `http://127.0.0.1:4181/` | Same origin as the API. No CORS, the session cookie is first-party, SSE works. |
 | **a dev static server** — `http://127.0.0.1:4180` | Works only with `--allow-origin http://127.0.0.1:4180` and `?api=http://127.0.0.1:4181/v1`: the nonce is injected by the service when it serves the page, and a page the service did not serve has none. |
-| **a Papers backpack** — `papers-backpack://<projectId>` | **Cannot work at all.** Papers answers every asset of a backpack project with `default-src 'none'; …; connect-src 'none'` and registers the scheme `corsEnabled: false` (`App/resources/app.asar`, `installBackpackProjectProtocol` / `registerBackpackProjectSchemePrivileges`). The document's own policy forbids it every connection, so the request is refused before DNS, before CORS and before any cookie question — no origin allowance, session or token can change it. |
+| **a Papers backpack** — `papers-backpack://<projectId>` | A direct fetch cannot work, for two reasons stacked one behind the other: the page's own policy refuses the connection before the network layer (nothing is sent), and with that relaxed the request goes out with `Origin: papers-backpack://<projectId>` and dies on CORS. Cookies do not survive the trip at all. So the page does not fetch: it **asks Papers**, which makes the request from its main process and attaches the project's declared credential. |
 
-A cockpit that finds itself unable to reach the service therefore has to say *which*
-of these it is, or the reader learns to ignore the one banner that has to be believed.
-It listens for `securitypolicyviolation` (installed before the first request, and
-re-stating the status when it fires, because the violation arrives one task after the
-failure it explains) and names the wall and the way around it. When the service really
-is not answering, the old sentence stands unchanged — the difference is measured, not
-guessed: `blockedBy` is `policy`, `origin` or `null`.
+### The bridge, from the page's side
+
+`local-service.json` beside `project.json` is the project's declaration — the service
+origin it may reach and the id of a credential that names a file to read:
+
+```json
+{ "schemaVersion": 1,
+  "services": [{ "origin": "http://127.0.0.1:4181", "secret": "operator" }],
+  "secrets": [{ "id": "operator",
+                "file": "D:\\…\\Proxima Data Home\\token",
+                "header": "authorization", "scheme": "Bearer" }] }
+```
+
+A request is one `postMessage` and one reply, correlated by `requestId`:
+
+```js
+window.postMessage({ type: 'papers:project:local-service-fetch',
+  requestId, url, method, headers, body }, location.origin);
+// → { type: 'papers:host:result', requestId, ok: true,
+//     localService: { ok, status, headers, body, detail? } }
+```
+
+Three things the page must respect, all of them the host's rules rather than ours:
+
+- **The credential is never the page's.** Papers attaches it from the declared file and
+  strips any `authorization` or `cookie` the page tries to set. There is nothing to
+  build that relies on the page supplying one, and the cockpit does not.
+- **`localService.ok: false` means the SERVICE WAS NOT REACHED** — and that is the only
+  thing that produces the "not reachable" banner. A non-2xx status is `ok: true` with
+  that status: a 401 is the service's own answer about the credential, and it is
+  reported as it stands, never softened and never retried into a session that a
+  backpack page cannot have anyway.
+- **No stream.** The bridge is a request and a reply, so on that path the cockpit polls
+  `GET /v1/log?after=<headSeq>` every four seconds while the page is visible. That
+  keeps cross-window liveness and the activity diff, and it is the recovery loop too.
+
+**The service was not made more permissive for any of this.** Its CORS policy, its
+token, its nonce and its 401 are exactly what they were; the bridge exists precisely so
+that they can stay that way.
 
 ## Running proximad on this machine day to day
 

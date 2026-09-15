@@ -400,11 +400,140 @@ const Store = (() => {
   } catch { /* no document to watch: nothing can be blocked either */ }
 
   const blockedByPolicy = () => policyBlocks.length > 0;
-  const blockedByOrigin = () => originKind() !== 'http';
+  // "This page cannot ask" is only true when there is no bridge to ask THROUGH. Once
+  // Papers carries the request, a failure is the service's or the bridge's, and it is
+  // reported with its own reason — saying "this page is not allowed to ask" while
+  // Papers is asking on its behalf would be a lie in the other direction.
+  const blockedByOrigin = () => originKind() !== 'http' && bridgeState !== 'present';
   /** The service is fine and this page cannot ask it — which is not "not reachable". */
   const blocked = () => blockedByPolicy() || blockedByOrigin();
 
+  // ── The Papers bridge ───────────────────────────────────────────────────────
+  // A backpack page cannot fetch the service: the page's own policy refuses the
+  // connection on an installed Papers, and where it does not, the request goes out
+  // with `Origin: papers-backpack://<projectId>` and dies on CORS. Neither layer can
+  // carry a credential, and a page cannot read a token file.
+  //
+  // So on a backpack page the request is handed to Papers, which makes it from its
+  // MAIN process — no page origin for CORS to police, no policy to violate — and
+  // attaches the credential the project declares in `local-service.json`. The page
+  // never sees the credential, never supplies one, and cannot forge one: Papers
+  // strips page-supplied `authorization` and `cookie` before it sends.
+  //
+  // The refusal stays the service's. A 401 comes back a 401. And when Papers cannot
+  // complete the request — the service is not running, the declared credential is
+  // unreadable — it answers `ok: false` with a reason, which is exactly what the
+  // honest banner is for.
+  const BRIDGE_DEFAULT_ORIGIN = 'http://127.0.0.1:4181';
+  const BRIDGE_REQUEST = 'papers:project:local-service-fetch';
+  const BRIDGE_REPLY = 'papers:host:result';
+  const BRIDGE_PROBE_MS = 2500;
+  const BRIDGE_CALL_MS = 10000;
+  const bridgePending = new Map();
+  let bridgeSeq = 0;
+  // unknown until asked. `absent` means Papers did not answer at all — an older
+  // Papers without the capability — and is what sends us back to a plain fetch, so
+  // the policy banner still gets its chance to be the true one.
+  let bridgeState = 'unknown';
+  let bridgeDetail = '';
+
+  try {
+    window.addEventListener('message', (event) => {
+      // Papers only ever replies into its own page's origin; checking here too means
+      // a message from anywhere else cannot settle one of our requests.
+      if (event.source !== window) return;
+      try { if (event.origin !== location.origin) return; } catch { return; }
+      const data = event.data;
+      if (!data || data.type !== BRIDGE_REPLY || typeof data.requestId !== 'string') return;
+      const settle = bridgePending.get(data.requestId);
+      if (!settle) return;
+      bridgePending.delete(data.requestId);
+      settle(data);
+    });
+  } catch { /* no window to listen on: the bridge cannot be used either */ }
+
+  function bridgePost(message) {
+    try { window.postMessage(message, location.origin); return true; } catch { return false; }
+  }
+
+  /**
+   * One bridged request. Resolves rather than rejects, and says which of the three
+   * things happened: Papers answered with the service's own response, Papers refused
+   * to make the request, or Papers did not answer at all.
+   */
+  function bridgeCall(request, timeoutMs) {
+    return new Promise((resolve) => {
+      const requestId = 'proxima-' + (++bridgeSeq) + '-' + Math.random().toString(36).slice(2, 8);
+      const timer = window.setTimeout(() => {
+        bridgePending.delete(requestId);
+        resolve({ answered: false, detail: 'Papers did not answer the request' });
+      }, timeoutMs || BRIDGE_CALL_MS);
+      bridgePending.set(requestId, (reply) => {
+        window.clearTimeout(timer);
+        resolve({ answered: true, reply });
+      });
+      if (!bridgePost({ type: BRIDGE_REQUEST, requestId, ...request })) {
+        window.clearTimeout(timer);
+        bridgePending.delete(requestId);
+        resolve({ answered: false, detail: 'the page could not hand the request to Papers' });
+      }
+    });
+  }
+
+  /** Absolute URL for an API path, whether the base is a path or a whole origin. */
+  function absoluteApi(path) {
+    const base = apiBase();
+    if (/^https?:/i.test(base)) return base.replace(/\/+$/, '') + path;
+    return BRIDGE_DEFAULT_ORIGIN + base.replace(/\/+$/, '') + path;
+  }
+
+  const usingBridge = () => originKind() === 'papers-backpack' && bridgeState !== 'absent';
+
+  /**
+   * One request through Papers' main process.
+   *
+   * Only `content-type` and `accept` travel: the credential is attached by Papers
+   * from the file the project declares, and a page-supplied `authorization` would be
+   * stripped anyway. Nothing here holds a token, which is the whole point.
+   */
+  async function bridgeRequest(method, path, body) {
+    const headers = body ? { 'content-type': 'application/json' } : { accept: 'application/json' };
+    const call = await bridgeCall({
+      url: absoluteApi(path),
+      method: method,
+      headers: headers,
+      body: body ? JSON.stringify(body) : undefined,
+    }, BRIDGE_CALL_MS);
+
+    if (!call.answered) {
+      // Nothing came back at all: this Papers has no bridge, so stop pretending and
+      // let the plain fetch try — which is what produces the policy violation and the
+      // banner that names the wall on an installed Papers.
+      bridgeState = 'absent';
+      return { status: 0, body: null, unreachable: true, detail: call.detail, transport: 'bridge' };
+    }
+    const reply = call.reply || {};
+    if (reply.ok !== true) {
+      // The envelope failed: Papers refused the request itself (an undeclared origin,
+      // a method it does not carry, a malformed address).
+      bridgeDetail = String(reply.error || 'Papers refused the request');
+      return { status: 0, body: null, unreachable: true, detail: bridgeDetail, transport: 'bridge' };
+    }
+    const answer = reply.localService || {};
+    if (answer.ok !== true) {
+      // Papers could not complete it — most often the service is not running, or the
+      // declared credential could not be read. This is the honest "not reachable".
+      bridgeDetail = String(answer.detail || 'the service could not be reached');
+      return { status: 0, body: null, unreachable: true, detail: bridgeDetail, transport: 'bridge' };
+    }
+    // The service's own answer, untouched: a 401 stays a 401 and is NOT unreachable.
+    let parsed = null;
+    try { parsed = answer.body ? JSON.parse(answer.body) : null; } catch { parsed = null; }
+    return { status: Number(answer.status) || 0, body: parsed, transport: 'bridge' };
+  }
+
   async function request(method, path, body) {
+    if (usingBridge()) return bridgeRequest(method, path, body);
     const response = await fetch(apiBase() + path, {
       method,
       // 'include' rather than 'same-origin': in the real build the API is on this
@@ -443,10 +572,15 @@ const Store = (() => {
    * cookie that exists. That is normal — an update, a crash, a reboot — and a cockpit
    * that answered "unauthorised" to it would be reporting its own staleness as the
    * reader's problem. One retry, then whatever the service said.
+   *
+   * Through the bridge there is no session to earn: Papers attaches the project's
+   * declared credential to every request it makes, so a 401 there is the service
+   * refusing THAT credential and must be reported as it stands rather than papered
+   * over with a second attempt.
    */
   async function authed(method, path, body) {
     let result = await request(method, path, body);
-    if (result.status === 401) {
+    if (result.status === 401 && !usingBridge()) {
       await establishSession();
       result = await request(method, path, body);
     }
@@ -470,6 +604,11 @@ const Store = (() => {
 
   async function refresh() {
     const result = await authed('GET', '/snapshot');
+    // The reason travels with the failure. Through the bridge the useful sentence is
+    // the bridge's own — "the service could not be reached: net::ERR_CONNECTION_REFUSED"
+    // — and replacing it with "snapshot failed" would throw away the only part a reader
+    // can act on.
+    if (result.unreachable) throw new Error(result.detail || 'the service did not answer');
     if (result.status !== 200 || !result.body) throw new Error('snapshot failed');
     applySnapshot(result.body);
     changed();
@@ -481,6 +620,9 @@ const Store = (() => {
    * both cheaper than reasoning about that and impossible to get subtly wrong.
    */
   function subscribe() {
+    // A backpack page has no stream to subscribe to: the bridge is a request and a
+    // reply, and there is nothing to hold open. It asks the log instead, on a timer.
+    if (usingBridge()) { startPolling(); return; }
     // On a page that is not allowed to open a connection, an EventSource is one more
     // refused request per second and nothing else. The banner already says why.
     if (source || typeof EventSource === 'undefined' || blocked()) return;
@@ -539,6 +681,9 @@ const Store = (() => {
    */
   function recoverSoon() {
     window.clearTimeout(streamRetry);
+    // Through the bridge the poll below IS the retry: it asks again every few seconds
+    // and reports what it finds, so a second loop would only double the requests.
+    if (usingBridge()) { startPolling(); return; }
     // There is nothing to recover from on a page that cannot make the request at all:
     // retrying would be a banner flicker every five seconds, forever, about a service
     // that is running perfectly well.
@@ -556,6 +701,47 @@ const Store = (() => {
     refreshTimer = window.setTimeout(() => {
       refresh().catch(() => { setStatus('offline', 'the service stopped answering'); recoverSoon(); });
     }, 30);
+  }
+
+  /**
+   * The bridge has no stream, so the cockpit asks the log instead.
+   *
+   * Every few seconds, and only while the page is visible: this is the price of the
+   * bridge being a request and a reply. It keeps the two things the stream was for —
+   * a change made in another window arriving without a reload, and the activity diff
+   * being fed — and it doubles as the recovery loop, because a failure here is
+   * reported and the next tick asks again.
+   */
+  const POLL_MS = 4000;
+  let pollTimer = 0;
+
+  function startPolling() {
+    if (pollTimer || typeof window === 'undefined') return;
+    const tick = async () => {
+      pollTimer = window.setTimeout(tick, POLL_MS);
+      if (typeof document !== 'undefined' && document.hidden) return;
+      try {
+        const result = await request('GET', '/log?after=' + headSeq + '&limit=200');
+        if (result.unreachable) {
+          // Said once per tick at most, and it is the truth: Papers asked, and the
+          // service did not answer.
+          setStatus('offline', result.detail || 'the service stopped answering');
+          return;
+        }
+        if (result.status !== 200 || !result.body || !Array.isArray(result.body.events)) return;
+        if (mode !== 'online') setStatus('online', '');
+        if (!result.body.events.length) return;
+        result.body.events.forEach((event) => { noteEvent(event); noteAgentHour(event); });
+        // Anything at all moved, so re-read rather than reason about what it did.
+        await refresh();
+      } catch { /* the next tick reports a failure that persists */ }
+    };
+    pollTimer = window.setTimeout(tick, POLL_MS);
+  }
+
+  function stopPolling() {
+    window.clearTimeout(pollTimer);
+    pollTimer = 0;
   }
 
   /**
@@ -751,7 +937,31 @@ const Store = (() => {
       };
     }
 
+    // Through the bridge a failed request resolves rather than throwing, and it says
+    // why: the service could not be reached, or Papers would not make the request.
+    // Either way nothing was sent that could have changed anything.
+    if (result.unreachable) {
+      setStatus('offline', result.detail || 'the service stopped answering');
+      return {
+        ok: false, code: 'SERVICE_UNAVAILABLE', commandId: env.commandId || null,
+        details: { detail: result.detail || '', transport: result.transport || 'http' },
+        message: 'The Proxima service is not reachable' + (result.detail ? ' (' + result.detail + ')' : '') +
+          ', so nothing was changed.',
+      };
+    }
+
     if (result.status === 401) {
+      // A backpack page has no session to renew — Papers carries the project's
+      // declared credential — so a 401 there is the service's own answer about that
+      // credential, and it is reported as it stands.
+      if (usingBridge()) {
+        return {
+          ok: false, code: 'UNAUTHORISED', commandId: env.commandId || null,
+          details: { status: 401 },
+          message: (result.body && result.body.message) ||
+            'The service refused the credential this project declares. Nothing was changed.',
+        };
+      }
       // The session expired. Try once to earn another, then report honestly.
       try {
         await establishSession();
@@ -829,7 +1039,19 @@ const Store = (() => {
       if (cachedAt) setStatus('connecting', 'showing a cached copy while the service is contacted');
       changed();
       try {
-        await establishSession();
+        // On a backpack page the first question is not "is the service there" but
+        // "will Papers carry the request at all". A reply of any kind settles it: an
+        // answer from the service, or a refusal from the bridge, both mean the
+        // capability exists. Only silence means this Papers has no bridge, and then
+        // the plain fetch below gets its turn — which is what produces the policy
+        // violation and the banner that names the wall on an installed Papers.
+        if (originKind() === 'papers-backpack') {
+          const probe = await bridgeCall({ url: absoluteApi('/health'), method: 'GET', headers: { accept: 'application/json' } }, BRIDGE_PROBE_MS);
+          bridgeState = probe.answered ? 'present' : 'absent';
+        }
+        // Through the bridge there is no session to earn: Papers attaches the
+        // credential the project declares, and the page never holds one.
+        if (!usingBridge()) await establishSession();
         await refresh();
         // A window that has never looked has nothing to catch up ON: "54 changes
         // since you last looked" is not a diff, it is the whole history of the
@@ -1027,6 +1249,11 @@ const Store = (() => {
       blocked: blocked(),
       blockedBy: blockedByPolicy() ? 'policy' : (blockedByOrigin() ? 'origin' : null),
       blockedTarget: policyBlocks.length ? policyBlocks[0].blocked : null,
+      // Which road the requests take, and what the bridge last said when it could
+      // not complete one. Both are facts the banner needs to be true.
+      transport: usingBridge() ? 'bridge' : 'http',
+      bridgeState: bridgeState,
+      bridgeDetail: bridgeDetail,
       serviceAddress: serviceAddress(),
     }),
     writeError: () => (lastError ? { ...lastError } : null),
