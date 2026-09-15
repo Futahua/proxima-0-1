@@ -2902,7 +2902,11 @@
     $('#confirmOk').textContent = 'Revert ' + willRevert + (willRevert === 1 ? ' change' : ' changes');
 
     confirmDialog.__onOk = async () => {
-      const result = await Store.revert(actor, since, false);
+      // The bound the dry run planned against, handed back with the confirmation it
+      // produced. The window alone was not enough: a change made while this dialog sat
+      // open would join the undo, and the reader would be told "1 change" and watch two
+      // go back.
+      const result = await Store.revert(actor, since, false, report.throughSeq);
       if (reportRefusal(result, null)) return;
       const done = (result.value && result.value.reverted ? result.value.reverted.length : 0);
       const left = (result.value && result.value.conflicts ? result.value.conflicts.length : 0);
@@ -2953,10 +2957,15 @@
   }
 
   function renderSchedule() {
-    // Deliberately empty. The Schedule is a destination, not a surface: it says in
-    // static markup that it is not built, and derives nothing to draw. The branch
-    // exists so the dispatch has one arm per surface instead of a silent
-    // fall-through that would read as an oversight.
+    // Deliberately empty of derived content. The Schedule is a destination, not a
+    // surface: it says in static markup that it is not built, and derives nothing to
+    // draw. The branch exists so the dispatch has one arm per surface instead of a
+    // silent fall-through that would read as an oversight.
+    //
+    // The shell's activity handle is not derived content though — it belongs to every
+    // route, and leaving this branch out meant a direct load into #/schedule opened
+    // with no way to see, or undo, what an agent had been doing.
+    renderGlobalActivity();
   }
 
   /**

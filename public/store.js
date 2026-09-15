@@ -596,6 +596,15 @@ const Store = (() => {
   function applyOwn(type, payload, result) {
     const value = result.value;
     if (result.event) noteAttribution(result.event);
+    // A command with effects on records OTHER than the one it is named after — a move
+    // that renumbered a column, a project delete that orphaned its tasks, an import —
+    // has consequences this function cannot reproduce: the siblings' order and
+    // revision, and every record's attribution. Reproducing the headline and skipping
+    // the stream (our own events are ignored there) left the cockpit quietly stale.
+    // At this size the honest answer is to re-read.
+    const effects = (result.event && result.event.effects) || [];
+    const others = effects.filter((e) => !(e.kind === (result.event.entity || {}).kind && e.id === (result.event.entity || {}).id));
+    if (others.length) return false;
     if (type === 'task.create' || type === 'task.patch' || type === 'task.move') {
       if (value && value.id) upsertTask(value);
     } else if (type === 'task.delete') {
@@ -879,10 +888,20 @@ const Store = (() => {
      * cover the SAME window — two calls that each computed "the last hour" would
      * drift apart by however long the reader spent reading the confirmation, and the
      * confirmation would then be a description of a different undo.
+     *
+     * `throughSeq` is the rest of that promise: the sequence the dry run planned
+     * against, handed back so the execution is bounded by it. Without it the clock
+     * still moves between the two calls: a change made while the confirmation sat
+     * open silently joined a set the reader never agreed to.
      */
-    revert: (actor, since, dryRun) => command({
+    revert: (actor, since, dryRun, throughSeq) => command({
       type: 'history.revert',
-      payload: { actor: actor, since: since, dryRun: Boolean(dryRun) },
+      payload: {
+        actor: actor,
+        since: since,
+        dryRun: Boolean(dryRun),
+        ...(throughSeq === undefined || throughSeq === null ? {} : { throughSeq: throughSeq }),
+      },
       commandId: 'cmd_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
     }).then(async (result) => {
       // A revert changes what is left in the hour, so the answer to "is there

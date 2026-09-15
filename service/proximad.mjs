@@ -477,19 +477,22 @@ function applyTaskPatch(id, patch) {
   const extra = {};
   const sets = [];
   const params = [];
+  // Fields the compensation is putting back may include ones that were genuinely
+  // absent before — an unknown field the agent added, say. Those are REMOVED, and
+  // "absent" is told apart from "stored as null" by naming them explicitly rather
+  // than by treating null as a synonym for missing.
+  const removals = Array.isArray(patch.__remove) ? patch.__remove : [];
   Object.keys(patch).forEach((field) => {
+    if (field === '__remove') return;
     if (!column[field]) { extra[field] = patch[field]; return; }
     sets.push(column[field] + ' = ?');
     params.push(field === 'project' ? (patch[field] || null) : field === 'deadline' ? (patch[field] || null) : patch[field]);
   });
-  // Unknown fields come back too: they are part of the record, and a compensation
-  // that restored the known half and dropped the rest would be a partial undo
-  // wearing a complete one's clothes.
-  if (Object.keys(extra).length) {
+  if (Object.keys(extra).length || removals.length) {
     const row = db.prepare('SELECT extra_json FROM tasks WHERE id = ?').get(id);
     if (row) {
       const merged = { ...extraOf(row.extra_json), ...extra };
-      Object.keys(merged).forEach((k) => { if (merged[k] === null) delete merged[k]; });
+      removals.forEach((k) => { delete merged[k]; });
       db.prepare('UPDATE tasks SET extra_json = ? WHERE id = ?').run(JSON.stringify(merged), id);
     }
   }
@@ -541,7 +544,6 @@ const MESSAGES = {
   RUN_ALREADY_LOCKED: () => 'A run is already locked. Unlock it before locking another.',
   WRITE_FAILED: (d) => 'The service could not write that (' + d.reason + '). Nothing was changed.',
   ACTOR_MISMATCH: (d) => 'That command claims to be ' + d.claimed + ', and this credential is ' + d.actual + '. Nothing was changed.',
-  FORBIDDEN: (d) => 'That is the operator’s to do: ' + (d.why || 'this credential may not') + '. Nothing was changed.',
   REV_REQUIRED: (d) => 'An agent has to say which revision it read before changing ' + d.kind + ' “' + d.id + '” (send ifRev). Read it again, then act on what you read.',
   RUN_MEMBER_LOCKED: (d) => '“' + (d.name || d.id) + '” is part of the locked plan, so its ' + d.field + ' is frozen until the run is unlocked.',
   RUN_LOCKED: () => 'A run is locked, so its members cannot leave the running column and nothing else can join it. Unlock it first.',
@@ -569,7 +571,16 @@ const newId = (prefix) => prefix + '_' + Date.now().toString(36) + randomBytes(3
 const REVISION_BOUND = new Set([
   'task.patch', 'task.move', 'task.delete',
   'project.archive', 'project.restore', 'project.delete',
+  'run.unlock',
 ]);
+
+/** Which record a command's revision is about, for the refusal to name it. */
+function revisionTarget(type, payload) {
+  if (type.startsWith('task.')) return { kind: 'task', id: payload.taskId || null };
+  if (type.startsWith('project.')) return { kind: 'project', id: payload.projectId || null };
+  if (type === 'run.unlock') return { kind: 'run', id: 'current' };
+  return { kind: 'entity', id: null };
+}
 
 // ── Commands ────────────────────────────────────────────────────────────────
 // Each handler validates and returns a closure that applies the change. Nothing is
@@ -593,7 +604,6 @@ function bumpRev(kind, id) {
   else if (kind === 'run') db.prepare('UPDATE runs SET rev = rev + 1 WHERE id = 1').run();
 }
 
-const isHumanActor = (actor) => String(actor || '').startsWith('human:');
 
 // ── The locked plan ─────────────────────────────────────────────────────────
 // The cockpit has always enforced these by disabling controls. That made the rules
@@ -638,6 +648,12 @@ const COMMANDS = {
     if (typeof payload.name !== 'string' || !payload.name.trim()) return refuse('PAYLOAD_INVALID', { type: 'task.create', missing: ['name'] });
     if (payload.project && !readProject(payload.project)) return refuse('PROJECT_NOT_FOUND', { projectId: payload.project });
     if (payload.status !== undefined && !STATUSES.includes(payload.status)) return refuse('STATUS_UNKNOWN', { value: payload.status, allowed: STATUSES });
+    // The same boundary as a move: nothing joins the running column while a plan is
+    // frozen, and creating straight into it is joining it.
+    if (payload.status === 'running') {
+      const locked = checkRunInvariants('move', '', { toStatus: 'running' });
+      if (locked) return locked;
+    }
     if (payload.weight !== undefined && !validWeight(payload.weight)) return refuse('WEIGHT_INVALID', { value: payload.weight });
     if (payload.start !== undefined && payload.start !== '' && !isRealDay(payload.start)) return refuse('DATE_INVALID', { field: 'start', value: payload.start });
     if (payload.deadline !== undefined && payload.deadline !== '' && !isRealDay(payload.deadline)) return refuse('DATE_INVALID', { field: 'deadline', value: payload.deadline });
@@ -736,8 +752,16 @@ const COMMANDS = {
     // Unknown fields are a real edit and are recorded as one: they used to land in
     // extra_json while the event's diff stayed empty, so an agent's change to a field
     // this service does not know about audited as nothing at all and could not be
-    // put back. The record is restored wholesale on undo, so the value is enough.
-    unknown.forEach((k) => { beforeDiff[k] = stored[k] === undefined ? null : stored[k]; afterDiff[k] = patch[k]; });
+    // put back.
+    //
+    // A field that was NOT THERE is left out of `before` entirely, rather than written
+    // as null. The two are different facts — "it was absent" and "it was explicitly
+    // null" — and recording absence as null made the compensation delete a value the
+    // record had really held.
+    unknown.forEach((k) => {
+      if (stored[k] !== undefined) beforeDiff[k] = stored[k];
+      afterDiff[k] = patch[k];
+    });
     return {
       ok: true,
       entity: { kind: 'task', id: before.id },
@@ -829,12 +853,34 @@ const COMMANDS = {
     if (!rows) return refuse('PAYLOAD_INVALID', { type: 'task.layout', missing: ['rows'] });
     const pending = [];
     const skipped = [];
+    const stale = [];
+    const unread = [];
+    const agent = String(ctx.actor || '').startsWith('agent:');
     for (const entry of rows) {
       if (!entry || typeof entry !== 'object') return refuse('PAYLOAD_INVALID', { type: 'task.layout', missing: ['rows[].taskId'] });
       if (!validRow(entry.ganttRow)) return refuse('GANTT_ROW_INVALID', { value: entry.ganttRow });
       const task = readTask(entry.taskId);
       if (!task) { skipped.push(entry.taskId); continue; }
+      // A layout pass is DERIVED: it is what the caller's screen said the rows were.
+      // A pass computed from a board that has moved on is stale, and applying it
+      // rearranges rows nobody asked about. A caller that names the revision it drew
+      // is held to it; an agent has to name it, on the same rule as every other
+      // change to a record that already exists. The cockpit draws and sends in one
+      // gesture on one screen and is not made to prove it — but a row it sends with
+      // no revision must still be PLACED, or every pass from the page would quietly
+      // do nothing, which is the sort of silence this whole file is written against.
+      if ((entry.rev === undefined || entry.rev === null) && agent) { unread.push(entry.taskId); continue; }
+      if (entry.rev !== undefined && entry.rev !== null && Number(entry.rev) !== Number(task.rev)) {
+        stale.push({ id: entry.taskId, expected: Number(entry.rev), actual: task.rev });
+        continue;
+      }
       if (task.ganttRow !== entry.ganttRow) pending.push({ id: task.id, from: task.ganttRow, to: entry.ganttRow });
+    }
+    if (stale.length) {
+      return refuse('ENTITY_REV_CONFLICT', { kind: 'task', id: stale[0].id, expected: stale[0].expected, actual: stale[0].actual });
+    }
+    if (agent && unread.length) {
+      return refuse('REV_REQUIRED', { kind: 'task', id: unread[0] });
     }
     if (pending.length === 0) {
       return { ok: true, entity: { kind: 'board', id: 'timeline' }, value: () => ({ placed: 0, skipped }), apply: () => ({ value: { placed: 0, skipped }, before: null, after: null, changed: false }) };
@@ -1040,6 +1086,14 @@ const COMMANDS = {
   'run.unlock'(payload, ctx) {
     const run = readRun();
     if (!run) return { ok: true, entity: { kind: 'run', id: 'none' }, value: () => null, apply: () => ({ value: null, before: null, after: null, changed: false }) };
+    // Ending a run is not reversible by repetition, so it has to say WHICH run it means.
+    // A caller that names the run it saw is held to that name: unlocking a plan that
+    // has been replaced since would end somebody else's horizon while reporting success.
+    const conflict = checkRev(ctx, 'run', 'current', run.rev);
+    if (conflict) return conflict;
+    if (payload.lockedAt !== undefined && payload.lockedAt !== null && String(payload.lockedAt) !== String(run.lockedAt)) {
+      return refuse('ENTITY_REV_CONFLICT', { kind: 'run', id: String(payload.lockedAt), expected: String(payload.lockedAt), actual: String(run.lockedAt) });
+    }
     return {
       ok: true,
       entity: { kind: 'run', id: run.lockedAt },
@@ -1055,6 +1109,46 @@ const COMMANDS = {
   },
 
   'proposal.accept'(payload, ctx) { return refuse('COMMAND_NOT_IMPLEMENTED', { type: 'proposal.accept', slice: 'the creator chose frictionless: there is no approval queue to accept into' }); },
+
+  /**
+   * Importing a legacy board is a COMMAND now, not a side door.
+   *
+   * It used to be an HTTP endpoint that wrote rows itself, recorded them as
+   * `migration:localstorage`, and was excluded from every undo — a door into the board
+   * that attribution and history.revert both looked away from. As a command it has an
+   * actor (whoever asked), an event, and effects: one `create` per record it put on
+   * the board, so an import can be attributed and taken back like anything else.
+   *
+   * The bytes are still archived before anything is written, and the rescue rules for
+   * old records are untouched: refusal is for new writes, rescue is for old bytes.
+   */
+  'import.legacy'(payload, ctx) {
+    if (typeof payload.bytes !== 'string') return refuse('PAYLOAD_INVALID', { type: 'import.legacy', missing: ['bytes'] });
+    if (!payload.origin) return refuse('PAYLOAD_INVALID', { type: 'import.legacy', missing: ['origin'] });
+    const analysis = analyseLegacy(payload.bytes);
+    if (!analysis.ok) return refuse('PAYLOAD_INVALID', { type: 'import.legacy', missing: [analysis.error] });
+    // Written here, outside the transaction, for the same reason it always was: if the
+    // import below fails, the archive is still there.
+    const archive = archiveBytes(payload.origin, payload.bytes, { counts: analysis.counts, conflicts: analysis.conflicts.length });
+    const origin = payload.origin;
+    const client = ctx.client;
+    let summary = null;
+    return {
+      ok: true,
+      entity: { kind: 'board', id: 'import' },
+      value: () => summary,
+      apply() {
+        const done = applyImport({ origin, bytes: payload.bytes, client, archive, analysis });
+        summary = done.report;
+        return {
+          value: done.report,
+          before: null,
+          after: { archive, origin, imported: done.imported, skipped: done.skipped },
+          effects: done.effects,
+        };
+      },
+    };
+  },
 
   /**
    * Undo what an actor did in a window of time.
@@ -1074,15 +1168,6 @@ const COMMANDS = {
   'history.revert'(payload, ctx) {
     const actor = typeof payload.actor === 'string' && payload.actor ? payload.actor : null;
     if (!actor) return refuse('PAYLOAD_INVALID', { type: 'history.revert', missing: ['actor'] });
-    // CONTROL PLANE. Rewriting history on somebody else's behalf is not the same act
-    // as writing a task, and it is the one place where an agent could destroy work it
-    // never made. An agent may at most take back its own.
-    if (actor !== ctx.actor && !isHumanActor(ctx.actor)) {
-      return refuse('FORBIDDEN', {
-        command: 'history.revert', actor: ctx.actor, target: actor,
-        why: 'an agent may only revert its own changes; reverting somebody else’s is the operator’s',
-      });
-    }
     const until = payload.until ? new Date(payload.until) : new Date();
     const since = payload.since ? new Date(payload.since) : new Date(until.getTime() - 3600 * 1000);
     if (Number.isNaN(since.getTime()) || Number.isNaN(until.getTime())) {
@@ -1101,11 +1186,25 @@ const COMMANDS = {
       return refuse('PAYLOAD_INVALID', { type: 'history.revert', missing: ['throughSeq as a number'] });
     }
 
-    const clauses = ["actor = ?", 'at >= ?', 'at <= ?', "type NOT IN ('history.revert', 'migration.entity', 'migration.complete')"];
+    // A revert that DID something is a change like any other and can be taken back in
+    // turn — undoing an undo is exactly what a safety net should survive. A revert
+    // that changed nothing stays out: there is nothing there to revert.
+    const clauses = [
+      'actor = ?', 'at >= ?', 'at <= ?',
+      "type <> 'migration.entity'", "type <> 'migration.complete'",
+      "(type <> 'history.revert' OR (effects_json IS NOT NULL AND effects_json <> '[]'))",
+    ];
     const params = [actor, since.toISOString(), until.toISOString()];
     if (throughSeq !== null) { clauses.push('seq <= ?'); params.push(throughSeq); }
     const events = db.prepare('SELECT * FROM events WHERE ' + clauses.join(' AND ') + ' ORDER BY seq DESC')
       .all(...params).map(rowToEvent);
+    /**
+     * The bound this plan is frozen at.
+     *
+     * With no explicit bound, it is the head at planning time — which is the same
+     * thing, said out loud, and the value the report hands back.
+     */
+    const bound = throughSeq !== null ? throughSeq : headSeq();
 
     const plan = [];
     const conflicts = [];
@@ -1124,11 +1223,17 @@ const COMMANDS = {
      * Note the bound: every foreign event after the oldest one being reverted, with no
      * time limit. A human edit five minutes after the window is exactly what must
      * still refuse the undo, so this deliberately reaches past `until`.
+     *
+     * And "foreign" now includes the SAME actor above the frozen bound. Shadow planning
+     * handles the actor's own events inside the plan; an event of theirs that lands
+     * after `throughSeq` is outside the thing the reader agreed to, and a plan that
+     * ignored it would delete a record out from under an edit made while the
+     * confirmation was on screen. Same actor, later, outside the window: foreign.
      */
     const foreignByRecord = new Map();
     const oldestRelevant = events.length ? Math.min(...events.map((e) => e.seq)) : headSeq() + 1;
-    db.prepare('SELECT * FROM events WHERE seq > ? AND actor <> ? ORDER BY seq')
-      .all(oldestRelevant, actor)
+    db.prepare('SELECT * FROM events WHERE seq > ? AND (actor <> ? OR seq > ?) ORDER BY seq')
+      .all(oldestRelevant, actor, bound)
       .forEach((row) => {
         const other = rowToEvent(row);
         (other.effects || []).forEach((effect) => {
@@ -1310,7 +1415,14 @@ const COMMANDS = {
         const clash = fields.filter((f) => state[f] !== effect.after[f] && String(state[f] ?? '') !== String(effect.after[f] ?? ''));
         if (clash.length) { conflict(event, key, 'the stored value is not the one the agent set', clash); continue; }
         const back = {};
-        fields.forEach((f) => { back[f] = effect.before ? effect.before[f] : null; });
+        const remove = [];
+        fields.forEach((f) => {
+          // A field the event's `before` does not name was not there before, and
+          // putting it back means taking it away — not writing null over it.
+          if (effect.before && Object.prototype.hasOwnProperty.call(effect.before, f)) back[f] = effect.before[f];
+          else remove.push(f);
+        });
+        if (remove.length) back.__remove = remove;
         schedule(event, makeEffect(effect.kind, effect.id, 'update', effect.after, back),
           () => putFieldsBack(effect.kind, effect.id, back));
       }
@@ -1318,7 +1430,7 @@ const COMMANDS = {
 
     const report = {
       actor, since: since.toISOString(), until: until.toISOString(),
-      throughSeq: throughSeq !== null ? throughSeq : headSeq(),
+      throughSeq: bound,
       frozen: throughSeq !== null,
       considered: events.length,
       willRevert: plan.map((p) => ({ seq: p.seq, type: p.type, entity: p.effect.kind + ':' + p.effect.id, op: p.effect.op, fields: effectFields(p.effect) })),
@@ -1400,10 +1512,7 @@ function runCommand(envelope, who) {
   // world that no longer existed. With it, the stale agent is refused, re-reads, and
   // acts on what is really there.
   if (String(actor).startsWith('agent:') && REVISION_BOUND.has(type) && (env.ifRev === undefined || env.ifRev === null)) {
-    return { ...refuse('REV_REQUIRED', {
-      kind: type.startsWith('task') ? 'task' : 'project',
-      id: (type.startsWith('task') ? payload.taskId : payload.projectId) || null,
-    }), commandId };
+    return { ...refuse('REV_REQUIRED', revisionTarget(type, payload)), commandId };
   }
 
   const checked = handler(payload, { actor, client, ifRev: env.ifRev, commandId });
@@ -1599,116 +1708,94 @@ function archiveBytes(origin, bytes, extra) {
   return name;
 }
 
-function importLegacy({ origin, bytes, client }) {
-  const report = analyseLegacy(bytes);
-  if (!report.ok) return { ok: false, ...refuse('PAYLOAD_INVALID', { type: 'legacy import', missing: [report.error] }), report };
-  // The bytes are archived BEFORE anything is written, under a name that says which
-  // origin they came from and when. If the import below fails, the archive is still
-  // there — it is the one thing here that is never conditional.
-  const archive = archiveBytes(origin, bytes, { counts: report.counts, conflicts: report.conflicts.length });
+/**
+ * Put an analysed legacy board on the board.
+ *
+ * No transaction of its own: it runs inside the command that asked for it, so the
+ * rows, the event and the effects commit together — and so an import that fails
+ * leaves nothing behind except the archive. What it returns is the effects list,
+ * which is what makes an import attributable and revertible.
+ */
+function applyImport({ origin, bytes, client, archive, analysis }) {
+  const report = analysis;
+  const at = new Date().toISOString();
+  const imported = { projects: 0, tasks: 0, run: false };
+  const skipped = { projects: 0, tasks: 0 };
+  const effects = [];
 
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    const actor = 'migration:localstorage';
-    const at = new Date().toISOString();
-    let seq = headSeq();
-    const imported = { projects: 0, tasks: 0, run: false };
-    const skipped = { projects: 0, tasks: 0 };
+  report.projects.forEach((raw) => {
+    const p = normaliseLegacyProject(raw);
+    if (readProject(p.id)) { skipped.projects++; return; }
+    const extra = {};
+    Object.keys(p).forEach((k) => { if (!TYPED_PROJECT_FIELDS.includes(k)) extra[k] = p[k]; });
+    db.prepare('INSERT INTO projects (id, name, description, created_at, archived_at, rev, extra_json) VALUES (?, ?, ?, ?, ?, 1, ?)')
+      .run(p.id, p.name, p.description, p.createdAt, p.archivedAt, JSON.stringify(extra));
+    imported.projects++;
+    effects.push(makeEffect('project', p.id, 'create', null, readProject(p.id)));
+  });
 
-    report.projects.forEach((raw) => {
-      const p = normaliseLegacyProject(raw);
-      if (readProject(p.id)) { skipped.projects++; return; }
-      const extra = {};
-      Object.keys(p).forEach((k) => { if (!TYPED_PROJECT_FIELDS.includes(k)) extra[k] = p[k]; });
-      db.prepare('INSERT INTO projects (id, name, description, created_at, archived_at, rev, extra_json) VALUES (?, ?, ?, ?, ?, 1, ?)')
-        .run(p.id, p.name, p.description, p.createdAt, p.archivedAt, JSON.stringify(extra));
-      seq++; imported.projects++;
-      db.prepare(`INSERT INTO events (seq, at, type, command_id, actor, client, entity_kind, entity_id, before_json, after_json, extra_json)
-                  VALUES (?, ?, 'migration.entity', ?, ?, ?, 'project', ?, NULL, ?, ?)`)
-        .run(seq, at, 'import:' + archive, actor, client || origin, p.id, jsonOf(readProject(p.id)), jsonOf({ archive, origin }));
-    });
+  report.tasks.forEach((raw) => {
+    const t = normaliseLegacyTask(raw);
+    if (readTask(t.id)) { skipped.tasks++; return; }
+    const extra = {};
+    Object.keys(t).forEach((k) => { if (!TYPED_TASK_FIELDS.includes(k)) extra[k] = t[k]; });
+    db.prepare(`INSERT INTO tasks (id, name, note, project_id, status, weight, start_day, deadline_day, gantt_row, order_index, created_at, rev, extra_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`)
+      .run(t.id, t.name, t.note, t.project || null, t.status, t.weight, t.start,
+        t.deadline === '' ? null : t.deadline, t.ganttRow, t.order, t.createdAt, JSON.stringify(extra));
+    imported.tasks++;
+    effects.push(makeEffect('task', t.id, 'create', null, readTask(t.id)));
+  });
 
-    report.tasks.forEach((raw) => {
-      const t = normaliseLegacyTask(raw);
-      if (readTask(t.id)) { skipped.tasks++; return; }
-      const extra = {};
-      Object.keys(t).forEach((k) => { if (!TYPED_TASK_FIELDS.includes(k)) extra[k] = t[k]; });
-      db.prepare(`INSERT INTO tasks (id, name, note, project_id, status, weight, start_day, deadline_day, gantt_row, order_index, created_at, rev, extra_json)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`)
-        .run(t.id, t.name, t.note, t.project || null, t.status, t.weight, t.start,
-          t.deadline === '' ? null : t.deadline, t.ganttRow, t.order, t.createdAt, JSON.stringify(extra));
-      seq++; imported.tasks++;
-      db.prepare(`INSERT INTO events (seq, at, type, command_id, actor, client, entity_kind, entity_id, before_json, after_json, extra_json)
-                  VALUES (?, ?, 'migration.entity', ?, ?, ?, 'task', ?, NULL, ?, ?)`)
-        .run(seq, at, 'import:' + archive, actor, client || origin, t.id, jsonOf(readTask(t.id)), jsonOf({ archive, origin }));
-    });
+  // The frozen run is imported as it was frozen: the members come from the snapshot,
+  // not from whatever the tasks look like now.
+  if (report.run && Array.isArray(report.run.members) && report.run.members.length && !readRun()) {
+    const run = report.run;
+    db.prepare('INSERT INTO runs (id, locked_at, target, total, rev, extra_json) VALUES (1, ?, ?, ?, 1, ?)')
+      .run(run.lockedAt || at, run.target || '', Number(run.total) || 0, JSON.stringify({}));
+    const insert = db.prepare('INSERT INTO run_members (run_id, task_id, position, name, weight, duration, starts_at, ends_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?)');
+    run.members.forEach((m, i) => insert.run(m.id, i, m.name || '', Number(m.weight) || 1, Number(m.duration) || 0, Number(m.startsAt) || 0, Number(m.endsAt) || 0));
+    imported.run = true;
+    effects.push(makeEffect('run', readRun().lockedAt, 'create', null, readRun()));
+  }
 
-    // The frozen run is imported as it was frozen: the members come from the
-    // snapshot, not from whatever the tasks look like now.
-    if (report.run && Array.isArray(report.run.members) && report.run.members.length && !readRun()) {
-      const run = report.run;
-      db.prepare('INSERT INTO runs (id, locked_at, target, total, rev, extra_json) VALUES (1, ?, ?, ?, 1, ?)')
-        .run(run.lockedAt || new Date().toISOString(), run.target || '', Number(run.total) || 0, JSON.stringify({}));
-      const insert = db.prepare('INSERT INTO run_members (run_id, task_id, position, name, weight, duration, starts_at, ends_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?)');
-      run.members.forEach((m, i) => insert.run(m.id, i, m.name || '', Number(m.weight) || 1, Number(m.duration) || 0, Number(m.startsAt) || 0, Number(m.endsAt) || 0));
-      seq++; imported.run = true;
-      db.prepare(`INSERT INTO events (seq, at, type, command_id, actor, client, entity_kind, entity_id, before_json, after_json, extra_json)
-                  VALUES (?, ?, 'migration.entity', ?, ?, ?, 'run', ?, NULL, ?, ?)`)
-        .run(seq, at, 'import:' + archive, actor, client || origin, String(run.lockedAt || ''), jsonOf(readRun()), jsonOf({ archive, origin }));
-    }
+  // Cockpit preferences came along too, under the client that migrated. Not a board
+  // record, so not an effect: nothing about it is a task or a project, and an undo
+  // has nothing to put back.
+  if (report.views) {
+    db.prepare(`INSERT INTO preferences (client, key, value_json, updated_at) VALUES (?, 'cockpit', ?, ?)
+                ON CONFLICT(client, key) DO NOTHING`)
+      .run(client || origin, JSON.stringify(report.views), at);
+  }
 
-    // Cockpit preferences came along too, under the client that migrated.
-    if (report.views) {
-      db.prepare(`INSERT INTO preferences (client, key, value_json, updated_at) VALUES (?, 'cockpit', ?, ?)
-                  ON CONFLICT(client, key) DO NOTHING`)
-        .run(client || origin, JSON.stringify(report.views), at);
-    }
+  const existingOrigin = db.prepare('SELECT * FROM origins WHERE origin = ?').get(origin);
+  db.prepare(`INSERT INTO origins (origin, first_seen, last_seen, imported_at, archive, counts_json, conflicts)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(origin) DO UPDATE SET last_seen = excluded.last_seen, imported_at = excluded.imported_at,
+                archive = excluded.archive, counts_json = excluded.counts_json, conflicts = excluded.conflicts`)
+    .run(origin, (existingOrigin && existingOrigin.first_seen) || at, at, at, archive, JSON.stringify(report.counts), report.conflicts.length);
 
-    seq++;
-    const summary = {
+  return {
+    imported,
+    skipped,
+    effects,
+    report: {
       origin,
       archive,
+      counts: report.counts,
       imported,
       skipped,
-      conflicts: report.conflicts.length,
+      conflicts: report.conflicts,
+      note: report.conflicts.length
+        ? 'Records whose id already exists with different contents were NOT imported. Two old stores are never merged by last-write-wins: the archive holds the bytes and a human decides.'
+        : undefined,
       dropped: { projects: report.droppedProjects, tasks: report.droppedTasks },
-    };
-    db.prepare(`INSERT INTO events (seq, at, type, command_id, actor, client, entity_kind, entity_id, before_json, after_json, extra_json)
-                VALUES (?, ?, 'migration.complete', ?, ?, ?, 'board', 'import', NULL, ?, ?)`)
-      .run(seq, at, 'import:' + archive, actor, client || origin, jsonOf(summary), jsonOf({ archive, origin }));
-    recordActor(actor);
-
-    const existingOrigin = db.prepare('SELECT * FROM origins WHERE origin = ?').get(origin);
-    db.prepare(`INSERT INTO origins (origin, first_seen, last_seen, imported_at, archive, counts_json, conflicts)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(origin) DO UPDATE SET last_seen = excluded.last_seen, imported_at = excluded.imported_at,
-                  archive = excluded.archive, counts_json = excluded.counts_json, conflicts = excluded.conflicts`)
-      .run(origin, (existingOrigin && existingOrigin.first_seen) || at, at, at, archive, JSON.stringify(report.counts), report.conflicts.length);
-
-    db.exec('COMMIT');
-    return {
-      ok: true,
-      archive,
-      report: {
-        origin,
-        counts: report.counts,
-        imported,
-        skipped,
-        conflicts: report.conflicts,
-        note: report.conflicts.length
-          ? 'Records whose id already exists with different contents were NOT imported. Two old stores are never merged by last-write-wins: the archive holds the bytes and a human decides.'
-          : undefined,
-        dropped: summary.dropped,
-        headSeq: headSeq(),
-      },
-      message: 'Imported ' + imported.tasks + ' tasks and ' + imported.projects + ' projects from ' + origin +
-        '; the exact bytes are archived as backups/' + archive + '.',
-    };
-  } catch (error) {
-    try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
-    return { ok: false, ...refuse('WRITE_FAILED', { reason: String((error && error.message) || error) }) };
-  }
+    },
+    message: 'Imported ' + imported.tasks + ' tasks and ' + imported.projects + ' projects from ' + origin +
+      '; the exact bytes are archived as backups/' + archive + '.',
+  };
 }
+
 
 /**
  * Who made this, and when. Derived columns maintained inside the command
@@ -1836,25 +1923,21 @@ function authorised(req, url) {
 }
 
 /**
- * The control plane.
+ * There is no control plane any more, and that is the decision, not an oversight.
  *
- * Data plane — create, edit, move, delete — is open to every credential: the creator
- * chose frictionless, and an agent that had to ask would not be one. The control
- * plane is different in kind: importing bytes records mutations the undo cannot see,
- * minting a credential is how authority is handed out, and reverting somebody else's
- * work is rewriting history that is not yours. Those are the operator's, and saying so
- * is not permission friction — it is the difference between an agent and an owner.
+ * The creator's policy is one user, one machine, no security constraint between the
+ * credentials, and agents that write directly. A half-guarded system was the worst of
+ * both: import was forbidden to an agent while writing itself into the log under an
+ * actor no undo could reach, and reverting somebody else's work was refused while
+ * every other change was not. The guards are gone, and what replaced them is the thing
+ * they were standing in for:
+ *
+ *   - import is a COMMAND (import.legacy) with an actor, an event and effects, so it
+ *     is attributed and revertible like every other change;
+ *   - so is history.revert, which is therefore itself revertible;
+ *   - identity is still the credential, which is not a permission: it is what makes
+ *     attribution possible at all.
  */
-function operatorOnly(req, res, who, what) {
-  if (who && isHumanActor(who.actor)) return false;
-  send(res, 403, {
-    ok: false,
-    code: 'FORBIDDEN',
-    message: 'That is the operator’s to do: ' + what + '. Nothing was changed.',
-    details: { actor: who ? who.actor : null, endpoint: req.url },
-  });
-  return true;
-}
 
 function send(res, status, body, headers) {
   const text = typeof body === 'string' ? body : JSON.stringify(body);
@@ -2035,7 +2118,6 @@ const server = createServer(async (req, res) => {
         // Only the operator may mint an agent, and only through this door: it is the
         // one place a token is written, so the credentials table and the file on disk
         // cannot drift apart.
-        if (operatorOnly(req, res, who, 'create an agent credential')) return undefined;
         const raw = await readBody(req);
         let body;
         try { body = JSON.parse(raw || '{}'); } catch { return send(res, 400, { ...refuse('PAYLOAD_INVALID', { type: 'agent', missing: ['a JSON body'] }) }); }
@@ -2057,7 +2139,6 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === '/v1/agents/revoke' && req.method === 'POST') {
-      if (operatorOnly(req, res, who, 'revoke an agent credential')) return undefined;
       const raw = await readBody(req);
       let body;
       try { body = JSON.parse(raw || '{}'); } catch { return send(res, 400, { ...refuse('PAYLOAD_INVALID', { type: 'revoke', missing: ['a JSON body'] }) }); }
@@ -2110,7 +2191,6 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === '/v1/imports' && req.method === 'GET') {
-      if (operatorOnly(req, res, who, 'read what has been imported')) return undefined;
       return send(res, 200, {
         ok: true,
         backups: readdirSync(BACKUPS_DIR).filter((f) => f.endsWith('.json') && !f.endsWith('.meta.json')),
@@ -2122,7 +2202,6 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === '/v1/import/inspect' && req.method === 'POST') {
-      if (operatorOnly(req, res, who, 'inspect a legacy board for import')) return undefined;
       const raw = await readBody(req);
       let body;
       try { body = JSON.parse(raw || '{}'); } catch { return send(res, 400, { ...refuse('PAYLOAD_INVALID', { type: 'legacy inspect', missing: ['a JSON body'] }) }); }
@@ -2143,19 +2222,21 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === '/v1/import' && req.method === 'POST') {
-      // Import writes rows that carry no actor of their own and are excluded from
-      // every undo, which is exactly why it is not an agent's to do: it would be a
-      // door into the board that attribution and history.revert both look away from.
-      if (operatorOnly(req, res, who, 'import a legacy board')) return undefined;
+      // A thin door onto the `import.legacy` COMMAND: same actor, same event, same
+      // effects, same refusals. It used to write the rows itself and file them under
+      // an actor nobody could revert, which made it the one way into the board that
+      // attribution and undo both looked away from.
       const raw = await readBody(req);
       let body;
       try { body = JSON.parse(raw || '{}'); } catch { return send(res, 400, { ...refuse('PAYLOAD_INVALID', { type: 'legacy import', missing: ['a JSON body'] }) }); }
-      if (typeof body.bytes !== 'string') return send(res, 400, { ...refuse('PAYLOAD_INVALID', { type: 'legacy import', missing: ['bytes'] }) });
-      if (!body.origin) return send(res, 400, { ...refuse('PAYLOAD_INVALID', { type: 'legacy import', missing: ['origin'] }) });
-      const result = importLegacy({ origin: body.origin, bytes: body.bytes, client: body.client });
-      const rows = db.prepare('SELECT * FROM events WHERE type LIKE ? ORDER BY seq').all('migration.%');
-      for (const row of rows) broadcast(rowToEvent(row));
-      return send(res, result.ok ? 200 : 400, result);
+      const result = runCommand({
+        type: 'import.legacy',
+        payload: { origin: body.origin, bytes: body.bytes },
+        client: body.client || (who && who.client),
+      }, who);
+      if (result.ok && result.event) broadcast(result.event);
+      if (!result.ok) return send(res, 409, result);
+      return send(res, 200, { ...result.value, ok: true });
     }
 
     if (url.pathname.startsWith('/v1/preferences/')) {

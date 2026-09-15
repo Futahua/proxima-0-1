@@ -127,24 +127,26 @@ log is the whole safety net, and an event log whose actor can be set by whoever 
 calling proves nothing. A token is read from a file, never passed on a command line —
 a command line is visible in the process table.
 
-### The control plane is the operator's
+### The control plane is gone, and that is the decision
 
-The creator chose frictionless, so **the data plane is open to every credential**:
-create, edit, move, delete — an agent that had to ask would not be one. Four things
-are not data, and are refused to an agent with `FORBIDDEN`:
+The creator's policy is one user, one machine, no security constraint between the
+credentials, and agents that write directly. The round before this one answered the
+review by forbidding an agent the control plane; that was half a policy, and the
+reviewer was right that it was the worst half — import was refused to an agent while
+writing rows into the log under an actor no undo could reach.
 
-| Act | Why it is not an agent's |
+So there are no permission guards left. What replaced them is the thing they were
+standing in for:
+
+| Act | Now |
 | --- | --- |
-| `POST /v1/import`, `/v1/import/inspect` | It writes rows attributed to `migration:localstorage`, which `history.revert` excludes — a door into the board that both attribution and undo look away from. |
-| `POST /v1/agents`, `/v1/agents/revoke` | Handing out or taking away authority is not writing a task. |
-| `history.revert` for another actor | Rewriting somebody else's history. **An agent may at most revert itself**; the operator may revert anyone. |
-| anything else the service later grows that is not a board change | The test is "is this a change to the board", not "is this dangerous". |
+| Import | A command (`import.legacy`) with the caller's actor, one event and one `create` effect per record — attributed and revertible like anything else. `POST /v1/import` is a thin door onto it. |
+| Minting and revoking credentials | Open to every credential. Identity is still the credential, which is not a permission: it is what makes attribution possible. |
+| `history.revert` for another actor | Allowed, and the revert is itself an effect-bearing event — so an undo can be undone. |
 
-Revocation is one call and it is immediate: `POST /v1/agents/revoke` removes the token
-file, deletes the `credentials` row and drops the cached credential in the same
-request. A token file deleted by hand is also honoured on the next request — the
-credential cache re-checks that the file still exists — because a revoked credential
-that keeps working until a restart is not revoked.
+`migration.*` events stay out of revert selection: they predate the command path and
+belong to an actor that no longer exists. A revert that changed nothing stays out too —
+there is nothing there to revert.
 
 A cockpit served from somewhere else (a dev static server) is trusted by naming its
 origin at startup: `--allow-origin http://127.0.0.1:4180`. Without that flag the
@@ -208,11 +210,15 @@ values were before.
   undoing the agent's work is not more agent work, and counting it would make the line
   grow every time somebody used it. An agent may only revert **itself**.
 - **The set is frozen between the plan and the act.** A dry run answers with the
-  sequence it planned against (`throughSeq`), and the execution is given it back. Two
-  calls that each computed "the last hour" would let everything that happened while the
-  reader was reading the confirmation join a set nobody described. Later *human* edits
-  still take part in conflict checking — but a later agent event cannot silently join
-  the undo.
+  sequence it planned against (`throughSeq`), and the execution is given it back —
+  from the CLI and from the cockpit, which hand back the same number. Two calls that
+  each computed "the last hour" would let everything that happened while the reader was
+  reading the confirmation join a set nobody described.
+- **Everything outside the frozen set is foreign, including the same actor.** Shadow
+  planning covers the actor's own events *inside* the plan; an event of theirs after
+  `throughSeq` is outside what the reader agreed to, and treating it as their own would
+  let a record-destructive compensation delete a record out from under an edit made
+  while the confirmation was on screen.
 - **Compensation is per EFFECT, newest first.** Two agent edits to the same field in a
   row are the normal case, not an edge case; the plan walks every effect of every
   event, and a shadow state records what each record will hold once the plan so far is
@@ -270,11 +276,20 @@ Both clients answer to the service now:
 
 - Changing the **weight** of a planned member → `RUN_MEMBER_LOCKED`.
 - Moving a planned member **out of** the running column → `RUN_MEMBER_LOCKED`.
-- Moving anything else **into** the running column while a run is locked → `RUN_LOCKED`.
+- Moving anything else **into** the running column while a run is locked → `RUN_LOCKED`
+  — and the same boundary at `task.create`, because creating straight into the column
+  is joining it.
 - Reordering a member *within* the column stays allowed: it does not touch the frozen
   plan, and the plan snapshots its own order.
 - Deleting the last member **ends the run**, and the delete event names the run it
   ended — so the undo puts both back rather than leaving a plan with nobody in it.
+- `run.unlock` says **which** run it means (`lockedAt`, and an agent must name the run's
+  revision): ending a plan is not reversible by repetition, so a caller that names a
+  run that has been replaced is refused rather than ending somebody else's horizon.
+- `task.layout` is derived, so a pass computed from a board that has moved on is stale:
+  a row that names a `rev` is held to it, and an agent must name one. A row with no
+  revision is still PLACED when the caller is not an agent — the cockpit draws and
+  sends in one gesture on one screen.
 
 Each carries `message` (a sentence for the reader) and `details` (fields for a
 client). The cockpit prevalidates for feel; the refusal is authoritative.
