@@ -45,6 +45,15 @@ design toward, no comment preservation problem, and no watcher to reconcile.
   backups/        exact bytes of everything imported, named by origin and time
 ```
 
+An archive's name is `<origin>-<YYYYMMDD-HHMMSS-mmm>-<command>-<sha8>-<nonce>.json`, and it
+is created with `wx`. The instant is to the millisecond, and it is not the only thing
+keeping two archives apart: the command id (or a random nonce when there is none) and the
+SHA-256 of the bytes are in the name too. The name used to be `<origin>-<YYYYMMDD-HHMMSS>`
+and the write was an ordinary one, so two imports of the same origin inside one second
+silently became one file — the second replaced the first, and nothing said so. Now a name
+that is somehow taken fails the create instead of overwriting it, and the writer takes a
+fresh nonce and tries again, reporting the retry rather than hiding it.
+
 The home defaults to `%USERPROFILE%\Proxima Data Home` — not in a browser profile,
 not in Papers, not in the source tree — and is moved with `--home` or
 `PROXIMA_HOME`. In this workspace it runs from `D:\Letters\MatTroiSeConMoc\Proxima
@@ -302,22 +311,49 @@ the path rather than pretending it opened something.
 ### Importing a vault
 
 `vault.import` takes the bytes of every source file and the list of project folders, and
-it is shaped by three rules:
+it is shaped by four rules:
 
 1. **The source is archived before anything is written.** One bundle in `backups/`, with
-   a SHA-256 per file, written outside the transaction and unconditionally — an import
-   that cannot be undone is not an import, it is a move. (This is why a second import of
-   the same vault still writes an archive: what was *offered* is worth recording even
-   when nothing was taken.)
+   a SHA-256 per file, written outside the transaction and before the first row — an
+   import that cannot be undone is not an import, it is a move. (This is why a second
+   import of the same vault still writes an archive: what was *offered* is worth recording
+   even when nothing was taken. An import that is *refused* archives nothing, because
+   nothing was going to be written in the first place.)
 2. **Ids and dates are preserved.** `event-1780320243719-dpooq.md` becomes a row with
    that id; a project id `proj-1780057127027-m1c` carries its creation instant in its own
-   name, used when the source has no `createdAt` rather than inventing "now".
-3. **Nothing is overwritten.** A file whose id already exists is skipped and counted, so
-   importing the same vault twice creates nothing and says so — and, because a command
-   that changed nothing writes no event, the log does not grow either.
+   name, used when the source has no `createdAt` rather than inventing "now". An instant
+   the import had to invent is never the reason two imports are called different — the
+   board's stored value stands.
+3. **Nothing is overwritten, and nothing that differs is quietly dropped.** A record whose
+   id is already on the board and whose content is *identical* is a no-op, so importing
+   the same vault twice creates nothing and says so — and, because a command that changed
+   nothing writes no event, the log does not grow either. A record whose id is already
+   there with *different* content is `VAULT_ID_CONFLICT`: the whole import refuses, naming
+   every colliding id and the fields that differ. It used to be counted as "skipped"
+   without ever being compared, which meant an import could report success while throwing
+   away a change the creator had made in the vault.
+4. **Every collision is found before any of them is acted on.** The plan is decided up
+   front, so a conflict cannot leave half an import on the board. Two source files in one
+   payload claiming the same id are a conflict too.
 
 Its effects are one `create` per record, so the whole import is attributed, revertible,
 and visible in the activity diff like any other change.
+
+Two consequences worth stating plainly, because they are refusals rather than conveniences:
+
+- **A different vault folder is a different source.** Each project row stores the folder
+  it links to, so importing the *same records* from a second copy of the vault refuses on
+  `link_path` — thirty times, once per project. That is the rule working, not a bug: the
+  import will not silently keep pointing at the old place while the source says otherwise.
+- **The import reads only inside the vault it was given.** The client canonicalizes the
+  vault root and the configured `eventsFolder`/`projectsFolder` with `realpath`, refuses a
+  configured folder whose `relative(realRoot, realDir)` escapes (including one reached
+  through a symlink or a junction), refuses any file that resolves outside the root, and
+  derives every stored source path with `relative(realRoot, realFile)`. The service checks
+  the payload on its own terms as well — a file path that is absolute or contains `..`, or
+  a folder path outside the declared root, is `VAULT_PATH_ESCAPE`. An import that reads
+  outside the directory it was pointed at has broken the only promise it makes.
+
 ### The locked plan is the service's rule, not the cockpit's
 
 A locked run freezes a plan, and the cockpit has always enforced that by disabling

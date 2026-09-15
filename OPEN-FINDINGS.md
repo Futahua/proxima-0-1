@@ -98,6 +98,34 @@ route renders `271 of 271 entries` grouped by day.
 | A project folder with no `index.md` | Created named by its id, and counted as `unnamed` in the report rather than given an invented name |
 | The packaged Papers launched with `--remote-debugging-port` | The port accepts TCP and never answers HTTP (`curl` exit 28); the packaged build was therefore verified by reading its asar (bridge present, loopback policy, `as-you-go-*` present) and driven at the same commit in the built checkout |
 
+## The three blockers a reviewer found in the import (round 9)
+
+The import shipped at `21ede262` and a remote reviewer found three things wrong with it.
+All three were real, all three are fixed here, and each fix has a regression that fails
+against the old code.
+
+| # | Blocker | What it actually was | Fix, and how it is proven |
+| --- | --- | --- | --- |
+| 1 | **Paths were never canonicalized.** `resolve()` tidies spelling; it does not follow a link. `eventsFolder: "../../outside/events"` from the plugin's `data.json` was joined and followed, and a `.md` inside the events folder that was really a link to a file elsewhere was read and imported. Source paths were derived by slicing the root string (`absolute.slice(root.length + 1)`), which is only correct when nothing is a link. | **Containment.** Root and configured folders now go through `realpathSync.native`; a configured folder whose `relative(realRoot, realDir)` is empty, `..`, or absolute is refused before anything is read; every file is resolved and measured the same way; source paths come from `relative(realRoot, realFile)`. The service checks the payload independently — an absolute or `..` file path, or a folder outside the declared root, is `VAULT_PATH_ESCAPE`. | Regressions: `../../outside/events` (the outside folder **exists**, so it fails on containment and not on absence), an in-vault junction whose name ends `.md` resolving outside, and a hand-built payload with an escaping path — all three refused with **no archive written**, which is how the test knows nothing reached the service. |
+| 2 | **A same-id record was skipped without ever being compared.** `if (readProject(id)) { skipped += 1; return; }` — so an import could report success while discarding a change the creator had made in the vault, and a record that differed was never even read. | **Preflight.** Every candidate is normalized into the exact row it would write, compared field by field against the row that is there (canonical JSON for `extra_json`; an invented `createdAt` is excluded, or a re-import would conflict with itself). Identical → no-op; different → `VAULT_ID_CONFLICT` naming the id and the fields. All collisions are found **before** the first write, so a conflict cannot leave half an import behind. | Regressions: same vault twice (301 identical, `headSeq` unchanged); a renamed project with a brand-new event in the same payload → refused, **the new event is on the board nowhere**, `headSeq` unchanged, the stored name still the old one, and creating it afterwards proves the refusal held the record rather than losing it; a changed event date → refused on `start_at`. Driven against the real board too: the real vault re-imports as **271 + 30 identical, `headSeq` 206 unchanged**, and the same records from a second folder refuse with 30 `link_path` conflicts and no rows touched. |
+| 3 | **Archive names could collide, and a collision overwrote.** `<origin>-<YYYYMMDD-HHMMSS>.json` at second resolution, written with an ordinary `writeFileSync`: two imports of one origin in one second silently became one file, and the first archive was gone with nothing to say so. | **Exclusive, content-addressed names.** `origin-YYYYMMDD-HHMMSS-mmm-<command>-<sha8>-<nonce>.json`, created with `wx`; a taken name fails the create, the writer takes a fresh nonce and retries (up to 8), and reports how many names were taken. Naming and the exclusive write live in `service/archive-store.mjs` so they can be tested directly with a frozen clock. | Regressions: frozen instant + same origin + **different payload** → two archives, both readable, names differing only in the content hash; identical payload and identical nonce → the second retries (`attempts: 1`) and both survive; a foreign file sitting at the chosen name is **untouched**; two imports through the daemon leave two archives. |
+
+Two smaller things were fixed because the tests could not be honest without them:
+`--no-actions` and `--dry-run` were read out of `positional`, which the flag loop has
+already stripped of anything starting with `--` — so both flags were documented and had
+never once taken effect (without `--no-actions` every test run would rewrite this
+repository's `actions.json`). And the archive is now written *after* the collision
+preflight, so a refused import writes nothing at all — the code comment that called the
+archive "unconditional" was corrected rather than left standing.
+
+**Limits of what was driven.** The service was restarted to load this code
+(`proxima.ps1 -Action stop`, then `-Action ensure -NoOpen`); the same instance marker
+(`inst_7f56a5706c7025a9`) and the same 30 projects / 271 entries / `headSeq 206` came back.
+This machine refuses file symlinks (`EPERM` — no Developer Mode), so the in-vault reparse
+point regression runs as a **directory junction under a `.md` name**, which takes the same
+code path (a path inside the vault that resolves elsewhere); the file-symlink case itself
+is unproven here. Nothing visual was checked.
+
 ## Open — from the import round
 
 | # | Finding | Original | State here |
@@ -105,7 +133,9 @@ route renders `271 of 271 entries` grouped by day.
 | 58 | **Schedule entries are read-only.** The import fills them; nothing edits one. There is no `event.patch`, no way to tick a class off, and no way to add an appointment the vault never had. | — | Open, and said out loud on the page. It is the next slice if the creator wants the calendar to be theirs rather than a copy of what the plugin left. |
 | 59 | **26 projects are named by their id.** Their folders carry no `index.md`, so no name exists anywhere on disk. | — | Open, and only the creator can close it. Renaming one is a `project` rename that does not exist yet either — the Hub has no rename. |
 | 60 | **`actions.json` is seeded, then the creator owns it.** Papers seeds its shortcut state from the project's `actions.json` only while `state.json` is absent; the first time the creator edits shortcuts in the launcher, that file appears and future edits to `actions.json` no longer reach it. | — | Open, and a property of the host, not of this project. Adding a folder link later means editing the launcher rather than the declaration. |
-| 61 | **The imported folder paths point into a copy.** Every link targets `…\vault-copy-20260913\…`, which is this workspace's copy. If the creator's real vault is elsewhere, the links open the copy. | — | Open, and deliberately not guessed at: the handoff named this path as the source, and pointing links at a vault nobody confirmed would be worse than pointing them at the one that was. |
+| 61 | **The imported folder paths point into a copy.** Every link targets `…\vault-copy-20260913\…`, which is this workspace's copy. If the creator's real vault is elsewhere, the links open the copy. | — | Open, and deliberately not guessed at: the handoff named this path as the source, and pointing links at a vault nobody confirmed would be worse than pointing them at the one that was. Note the new consequence: importing the *same records* from the real vault now refuses on `link_path` (see #62) rather than quietly keeping the copy. |
+| 62 | **There is no way to repoint a project's folder link, and the import will not do it silently.** Because `link_path` is part of what a project row is, importing records that already exist from a different vault folder is a conflict — 30 of them, one per project — not a no-op. | — | Open by design: the alternative is an import that keeps pointing at the old place while the source says otherwise, which is the bug this round was about. Closing it needs a `project.link` command (an attributed, revertible repoint), not a more permissive import. |
+| 63 | **Archives accumulate and nothing prunes them.** Every successful import writes one, including an import that changes nothing; the real vault's bundle is ~190 KB, and they now never overwrite each other. | — | Open, and harmless so far (14 files in `backups/`). A retention rule belongs with the compaction deferred when events became the log's source of truth. |
 ## Closed — the Papers bridge (round 7)
 
 Lane 4 built the host side (`backpack-local-service-bridge` @ `5d039f7`): `connect-src`

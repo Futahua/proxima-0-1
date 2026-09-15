@@ -41,9 +41,10 @@
 import { createServer } from 'node:http';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, copyFileSync, readdirSync, unlinkSync } from 'node:fs';
-import { dirname, join, resolve, extname, normalize } from 'node:path';
+import { dirname, join, resolve, extname, normalize, relative, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { storeArchive } from './archive-store.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const COCKPIT_DIR = resolve(HERE, '..', 'public');
@@ -602,6 +603,15 @@ const MESSAGES = {
   REV_REQUIRED: (d) => 'An agent has to say which revision it read before changing ' + d.kind + ' “' + d.id + '” (send ifRev). Read it again, then act on what you read.',
   RUN_MEMBER_LOCKED: (d) => '“' + (d.name || d.id) + '” is part of the locked plan, so its ' + d.field + ' is frozen until the run is unlocked.',
   RUN_LOCKED: () => 'A run is locked, so its members cannot leave the running column and nothing else can join it. Unlock it first.',
+  VAULT_PATH_ESCAPE: (d) => 'A vault import may only read inside the vault it names, and '
+    + ((d.paths || []).length) + ' path(s) in it do not: ' + (d.paths || []).slice(0, 3).join(', ')
+    + ((d.paths || []).length > 3 ? ', …' : '') + '. Nothing was imported.',
+  VAULT_ID_CONFLICT: (d) => ((d.conflicts || []).length) + ' record(s) in this vault have an id that is already '
+    + 'on the board with different content — ' + (d.conflicts || []).slice(0, 3)
+      .map((c) => c.id + ' (' + (c.fields || []).join(', ') + ')').join('; ')
+    + ((d.conflicts || []).length > 3 ? '; …' : '')
+    + '. An import never overwrites and never quietly skips a record that differs: resolve these in the source, '
+    + 'or import under different ids. Nothing was written.',
 };
 
 function refuse(code, details) {
@@ -610,14 +620,23 @@ function refuse(code, details) {
   return { ok: false, code, details: shape, message: build ? build(shape) : 'That command was refused (' + code + ').' };
 }
 
+/**
+ * One canonical form for a value, so two things can be compared by their content
+ * rather than by the accident of key order or whitespace.
+ *
+ * Used to fingerprint a command (a reused id with different content has to be caught)
+ * and to decide whether a record a vault offers is the same record the board already
+ * has. Those are the same question asked twice: is this the same thing?
+ */
+function stableJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value === undefined ? null : value);
+  if (Array.isArray(value)) return '[' + value.map(stableJson).join(',') + ']';
+  return '{' + Object.keys(value).sort().map((k) => JSON.stringify(k) + ':' + stableJson(value[k])).join(',') + '}';
+}
+
 /** A stable fingerprint, so a reused command id with different content is caught. */
 function fingerprint(type, payload) {
-  const stable = (v) => {
-    if (v === null || typeof v !== 'object') return JSON.stringify(v === undefined ? null : v);
-    if (Array.isArray(v)) return '[' + v.map(stable).join(',') + ']';
-    return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + stable(v[k])).join(',') + '}';
-  };
-  return type + ' ' + stable(payload || {});
+  return type + ' ' + stableJson(payload || {});
 }
 
 const newId = (prefix) => prefix + '_' + Date.now().toString(36) + randomBytes(3).toString('hex');
@@ -1184,8 +1203,11 @@ const COMMANDS = {
    *      carries its creation instant in its own name — which is used when the source
    *      has no record of one, rather than inventing "now".
    *
-   * A file whose id already exists is SKIPPED and reported. Nothing is overwritten:
-   * a second import of the same vault is a no-op with a report, not a rewrite.
+   * And one rule about what happens when an id is already here, which used to be the
+   * weakest thing in this handler: a record that is IDENTICAL to the one on the board
+   * is a no-op, and a record that DIFFERS from it refuses the whole import. It used to
+   * be counted as "skipped" without ever being compared, so an import could report
+   * success while quietly discarding a change the creator had made in the vault.
    */
   'vault.import'(payload, ctx) {
     const source = payload.source && typeof payload.source === 'object' ? payload.source : null;
@@ -1200,15 +1222,33 @@ const COMMANDS = {
     }
     const parsed = readVaultSources(payload, source);
     if (!parsed.ok) return parsed;
-    // Written outside the transaction, first, and unconditionally: the archive is the
-    // one thing here that is never conditional.
+    // EVERY collision is found before ANY of them is acted on. An import that wrote
+    // the records it could and then refused the rest would be the worst of both: a
+    // partial board and a report that has to be read very carefully to know which
+    // half landed.
+    const plan = planVaultImport(parsed);
+    if (plan.conflicts.length) {
+      return refuse('VAULT_ID_CONFLICT', {
+        root: parsed.root,
+        conflicts: plan.conflicts.slice(0, 50),
+        more: Math.max(0, plan.conflicts.length - 50),
+      });
+    }
+    // Written outside the transaction, first, and before anything is inserted: an
+    // import that fails after this point still leaves the bytes it was handed on disk.
+    // A refusal above is the one thing that archives nothing, because nothing was
+    // going to be written in the first place.
     const archive = archiveBytes(origin, JSON.stringify({
       schemaVersion: 1,
       origin,
       root: source.root,
       at: new Date().toISOString(),
       files: files.map((f) => ({ path: f.path, sha256: createHash('sha256').update(String(f.bytes ?? '')).digest('hex'), bytes: String(f.bytes ?? '') })),
-    }), { counts: { files: files.length, folders: folders.length }, conflicts: 0 });
+    }), {
+      counts: { files: files.length, folders: folders.length },
+      conflicts: 0,
+      identical: plan.identical.length,
+    }, ctx.commandId);
 
     const state = { report: null };
     return {
@@ -1216,7 +1256,7 @@ const COMMANDS = {
       entity: { kind: 'board', id: 'vault-import' },
       value: () => state.report,
       apply() {
-        const applied = applyVaultImport(parsed, { archive, origin });
+        const applied = applyVaultImport(parsed, { archive, origin, plan });
         state.report = applied.report;
         // A second import of the same vault creates nothing, and a command that
         // changed nothing must not write an event: an audit log with "imported 0" in
@@ -1253,7 +1293,7 @@ const COMMANDS = {
     if (!analysis.ok) return refuse('PAYLOAD_INVALID', { type: 'import.legacy', missing: [analysis.error] });
     // Written here, outside the transaction, for the same reason it always was: if the
     // import below fails, the archive is still there.
-    const archive = archiveBytes(payload.origin, payload.bytes, { counts: analysis.counts, conflicts: analysis.conflicts.length });
+    const archive = archiveBytes(payload.origin, payload.bytes, { counts: analysis.counts, conflicts: analysis.conflicts.length }, ctx.commandId);
     const origin = payload.origin;
     const client = ctx.client;
     let summary = null;
@@ -1822,17 +1862,14 @@ function normaliseLegacyProject(raw) {
   };
 }
 
-function archiveBytes(origin, bytes, extra) {
-  const slug = String(origin).replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'unknown-origin';
-  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
-  const name = slug + '-' + stamp + '.json';
-  const path = join(BACKUPS_DIR, name);
-  writeFileSync(path, bytes);
-  writeFileSync(path.replace(/\.json$/, '.meta.json'), JSON.stringify({
-    origin, at: new Date().toISOString(), bytes: Buffer.byteLength(bytes, 'utf8'),
-    sha256: createHash('sha256').update(bytes).digest('hex'), ...extra,
-  }, null, 2));
-  return name;
+/**
+ * Keep the exact bytes that were imported, and report the name they are kept under.
+ *
+ * The naming and the exclusive create live in archive-store.mjs: an archive is only
+ * worth having if a second import cannot land on top of the first one.
+ */
+function archiveBytes(origin, bytes, extra, tag) {
+  return storeArchive(BACKUPS_DIR, { origin, bytes, at: new Date(), tag, extra }).name;
 }
 
 /**
@@ -1887,6 +1924,28 @@ const asInstant = (value) => {
 };
 
 /**
+ * Containment, in the form the service can check on its own.
+ *
+ * The client does the load-bearing half: it canonicalizes the vault root and its
+ * configured folders with realpath, so a symlink or a junction that leaves the vault
+ * is caught at whatever it really resolved to, before a single byte is read. What the
+ * service adds is a payload it can trust on its own terms — a file path that stays
+ * relative with no `..` in it, and a link path that is genuinely inside the root the
+ * payload itself declares. A client that misdescribes its own paths is refused here,
+ * rather than having those paths stored as provenance.
+ */
+const underRoot = (root, target) => {
+  const rel = relative(root, target);
+  return rel !== '' && rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel);
+};
+
+const relativePathEscapes = (path) => {
+  const clean = String(path).replace(/\\/g, '/');
+  if (!clean || clean.startsWith('/') || /^[a-z]:/i.test(clean)) return true;
+  return clean.split('/').includes('..');
+};
+
+/**
  * Read the vault into records. NO WRITES: this half is validation, so a refusal can
  * happen before anything has been archived or inserted.
  */
@@ -1894,11 +1953,17 @@ function readVaultSources(payload, source) {
   const events = [];
   const projectsById = new Map();
   const rejected = [];
+  const escapes = [];
+  const rootResolved = resolve(source.root);
 
   (payload.folders || []).forEach((folder) => {
     const id = String((folder && folder.id) || '').trim();
     const path = String((folder && folder.path) || '').trim();
     if (!id || !path) { rejected.push({ path: path || '(folder)', why: 'a folder needs an id and an absolute path' }); return; }
+    // A folder link is a place on this machine. It may only be a place INSIDE the
+    // vault the import names: a link that points out of the vault is not something
+    // this import is entitled to record as if it had come from there.
+    if (!isAbsolute(path) || !underRoot(rootResolved, resolve(path))) { escapes.push(path); return; }
     projectsById.set(id, {
       id, linkPath: path, linkKind: 'folder',
       name: null, description: '', createdAt: null, extra: {}, sourceRef: null, note: '',
@@ -1908,6 +1973,7 @@ function readVaultSources(payload, source) {
   (payload.files || []).forEach((file) => {
     const path = String((file && file.path) || '');
     const bytes = typeof (file && file.bytes) === 'string' ? file.bytes : '';
+    if (relativePathEscapes(path)) { escapes.push(path || '(empty path)'); return; }
     const eventMatch = /(?:^|\/)events\/([^/]+)\.md$/.exec(path);
     const projectMatch = /(?:^|\/)projects\/([^/]+)\/index\.md$/.exec(path);
     if (eventMatch) {
@@ -1945,6 +2011,10 @@ function readVaultSources(payload, source) {
     name: project.name || project.id,
     named: Boolean(project.name),
     createdAt: project.createdAt || millisFromId(project.id) || new Date().toISOString(),
+    // Whether that instant came from the source or was invented here. An invented one
+    // is different every time it is read, so it can never be the reason two imports
+    // are called different — the board's stored value stands instead.
+    createdAtFromSource: Boolean(project.createdAt || millisFromId(project.id)),
   }));
 
   const known = new Set(projects.map((p) => p.id));
@@ -1972,6 +2042,7 @@ function readVaultSources(payload, source) {
       recurrenceDays: f.recurrenceDays || null,
       occurrenceOf: f.parentTaskId || null,
       createdAt: asInstant(f.createdAt) || millisFromId(event.id) || new Date().toISOString(),
+      createdAtFromSource: Boolean(asInstant(f.createdAt) || millisFromId(event.id)),
       extra,
       rawStart: f.startDate,
       rawDeadline: f.deadline,
@@ -1979,16 +2050,148 @@ function readVaultSources(payload, source) {
   });
 
   const undated = prepared.filter((e) => !e.startAt || !e.endAt);
+  if (escapes.length) return refuse('VAULT_PATH_ESCAPE', { root: source.root, paths: escapes });
   return { ok: true, projects, events: prepared, rejected, undated, root: source.root, origin: source.origin };
+}
+
+/**
+ * The exact row a candidate would be written as.
+ *
+ * The comparison and the insert read the SAME image, so they cannot drift apart: if
+ * these were written twice — once to compare, once to insert — a change in one would
+ * quietly turn a re-import of identical bytes into a conflict with itself, or worse,
+ * into a silent difference nobody compares.
+ */
+const projectImage = (candidate) => ({
+  id: candidate.id,
+  name: candidate.name,
+  description: candidate.description || '',
+  created_at: candidate.createdAt,
+  created_at_from_source: candidate.createdAtFromSource !== false,
+  archived_at: null,
+  link_kind: candidate.linkKind === undefined ? null : candidate.linkKind,
+  link_path: candidate.linkPath === undefined ? null : candidate.linkPath,
+  extra_json: JSON.stringify(candidate.extra || {}),
+});
+
+const scheduleImage = (candidate) => ({
+  id: candidate.id,
+  name: candidate.name,
+  note: candidate.note || '',
+  project_id: candidate.project === undefined ? null : candidate.project,
+  start_at: candidate.startAt === undefined ? null : candidate.startAt,
+  end_at: candidate.endAt === undefined ? null : candidate.endAt,
+  completed: candidate.completed ? 1 : 0,
+  color: candidate.color || null,
+  recurrence: candidate.recurrence || null,
+  recurrence_until: candidate.recurrenceUntil || null,
+  recurrence_exceptions: candidate.recurrenceExceptions || null,
+  recurrence_days: candidate.recurrenceDays || null,
+  occurrence_of: candidate.occurrenceOf || null,
+  source_ref: candidate.path || null,
+  created_at: candidate.createdAt,
+  created_at_from_source: candidate.createdAtFromSource !== false,
+  extra_json: JSON.stringify(candidate.extra || {}),
+});
+
+const IMAGE_FIELDS = {
+  project: ['name', 'description', 'created_at', 'archived_at', 'link_kind', 'link_path', 'extra_json'],
+  schedule_event: ['name', 'note', 'project_id', 'start_at', 'end_at', 'completed', 'color', 'recurrence',
+    'recurrence_until', 'recurrence_exceptions', 'recurrence_days', 'occurrence_of', 'source_ref', 'created_at',
+    'extra_json'],
+};
+
+const readProjectRow = (id) => db.prepare('SELECT * FROM projects WHERE id = ?').get(id) || null;
+const readScheduleRow = (id) => db.prepare('SELECT * FROM schedule_events WHERE id = ?').get(id) || null;
+
+/** Which fields of an existing row differ from the row this candidate would write. */
+function differingFields(kind, image, row) {
+  const differs = [];
+  IMAGE_FIELDS[kind].forEach((field) => {
+    // An instant the import had to invent (the source stated none, and the id carries
+    // none) is different every time it is read. Comparing it would make a re-import of
+    // unchanged bytes look like a conflict with itself, so the stored value stands.
+    if (field === 'created_at' && image.created_at_from_source === false) return;
+    const offered = image[field] === undefined ? null : image[field];
+    const stored = row[field] === undefined ? null : row[field];
+    if (field === 'extra_json') {
+      if (stableJson(parseJsonObject(offered)) !== stableJson(parseJsonObject(stored))) differs.push(field);
+      return;
+    }
+    if (offered !== stored) differs.push(field);
+  });
+  return differs;
+}
+
+const parseJsonObject = (value) => {
+  try {
+    const parsed = JSON.parse(value === null || value === undefined || value === '' ? '{}' : value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch { return {}; }
+};
+
+/**
+ * Decide, for every record this vault offers, what would happen to it — BEFORE
+ * anything is written.
+ *
+ * There are exactly three answers and there is no fourth. A record the board has
+ * never seen is created. A record the board already has, byte for byte the same, is a
+ * no-op — which is what makes a second import of the same vault safe. A record the
+ * board already has with DIFFERENT content is a conflict that refuses the whole
+ * import: it used to be counted as "skipped", which meant an import could report
+ * success while quietly discarding a change the creator had made in the vault. Being
+ * told "1 skipped" is not the same as being told "this id means two different things".
+ *
+ * All of it is decided up front, so a conflict cannot leave half of an import behind.
+ */
+function planVaultImport(parsed) {
+  const decisions = new Map();
+  const conflicts = [];
+  const identical = [];
+  const claimed = new Map();
+
+  const consider = (kind, id, image, readRow, source) => {
+    const key = kind + ':' + id;
+    const first = claimed.get(key);
+    if (first) {
+      conflicts.push({ kind, id, fields: [], why: 'two source files in this import claim the same id (' + first + ' and ' + source + ')' });
+      decisions.set(key, { action: 'conflict', image });
+      return;
+    }
+    claimed.set(key, source);
+    const row = readRow(id);
+    if (!row) { decisions.set(key, { action: 'create', image }); return; }
+    const fields = differingFields(kind, image, row);
+    if (!fields.length) {
+      decisions.set(key, { action: 'identical', image });
+      identical.push({ kind, id });
+      return;
+    }
+    decisions.set(key, { action: 'conflict', image, fields });
+    conflicts.push({ kind, id, fields });
+  };
+
+  parsed.projects.forEach((project) => consider('project', project.id, projectImage(project), readProjectRow, project.linkPath || (parsed.root || 'this vault')));
+  parsed.events.filter((event) => event.startAt && event.endAt)
+    .forEach((event) => consider('schedule_event', event.id, scheduleImage(event), readScheduleRow, event.path));
+
+  return {
+    decisions,
+    conflicts,
+    identical,
+    creates: [...decisions.values()].filter((d) => d.action === 'create').length,
+  };
 }
 
 /**
  * Write what was read, and report every record that was already there.
  *
- * Skipping is the whole idempotency story: a second import of the same vault creates
- * nothing, overwrites nothing, and says so.
+ * Only records the plan calls `create` are written, and only records it calls
+ * `identical` are reported as skipped. A plan that contains a conflict never reaches
+ * here — the command refuses first — and if one did, this throws and the transaction
+ * takes the whole import back rather than writing part of it.
  */
-function applyVaultImport(parsed, { archive, origin }) {
+function applyVaultImport(parsed, { archive, origin, plan }) {
   const effects = [];
   const report = {
     origin,
@@ -2000,12 +2203,26 @@ function applyVaultImport(parsed, { archive, origin }) {
     at: new Date().toISOString(),
   };
 
+  const decisionFor = (kind, id) => plan.decisions.get(kind + ':' + id) || { action: 'create' };
+  const insistWritable = (kind, id, decision) => {
+    if (decision.action !== 'conflict') return;
+    throw new Error('VAULT_ID_CONFLICT ' + kind + ' ' + id + ' (' + (decision.fields || []).join(', ') + ')');
+  };
+
+  const insertProject = db.prepare(`INSERT INTO projects (id, name, description, created_at, archived_at, link_kind, link_path, rev, extra_json)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`);
+  const insertEvent = db.prepare(`INSERT INTO schedule_events
+              (id, name, note, project_id, start_at, end_at, completed, color, recurrence, recurrence_until,
+               recurrence_exceptions, recurrence_days, occurrence_of, source_ref, created_at, rev, extra_json)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`);
+
   parsed.projects.forEach((project) => {
-    if (readProject(project.id)) { report.projects.skipped += 1; return; }
-    db.prepare(`INSERT INTO projects (id, name, description, created_at, archived_at, link_kind, link_path, rev, extra_json)
-                VALUES (?, ?, ?, ?, NULL, ?, ?, 1, ?)`)
-      .run(project.id, project.name, project.description, project.createdAt,
-        project.linkKind, project.linkPath, JSON.stringify(project.extra));
+    const decision = decisionFor('project', project.id);
+    insistWritable('project', project.id, decision);
+    if (decision.action === 'identical') { report.projects.skipped += 1; return; }
+    const image = decision.image;
+    insertProject.run(image.id, image.name, image.description, image.created_at, image.archived_at,
+      image.link_kind, image.link_path, image.extra_json);
     if (!project.named) report.projects.unnamed += 1;
     if (project.linkPath) report.projects.linked += 1;
     report.projects.created += 1;
@@ -2021,15 +2238,13 @@ function applyVaultImport(parsed, { archive, origin }) {
       report.rejected.push({ path: event.path, why: 'startDate/deadline are not readable instants: ' + JSON.stringify([event.rawStart, event.rawDeadline]) });
       return;
     }
-    if (readScheduleEvent(event.id)) { report.events.skipped += 1; return; }
-    db.prepare(`INSERT INTO schedule_events
-                (id, name, note, project_id, start_at, end_at, completed, color, recurrence, recurrence_until,
-                 recurrence_exceptions, recurrence_days, occurrence_of, source_ref, created_at, rev, extra_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`)
-      .run(event.id, event.name, event.note, event.project, event.startAt, event.endAt,
-        event.completed ? 1 : 0, event.color, event.recurrence, event.recurrenceUntil,
-        event.recurrenceExceptions, event.recurrenceDays, event.occurrenceOf,
-        event.path, event.createdAt, JSON.stringify(event.extra));
+    const decision = decisionFor('schedule_event', event.id);
+    insistWritable('schedule_event', event.id, decision);
+    if (decision.action === 'identical') { report.events.skipped += 1; return; }
+    const image = decision.image;
+    insertEvent.run(image.id, image.name, image.note, image.project_id, image.start_at, image.end_at,
+      image.completed, image.color, image.recurrence, image.recurrence_until, image.recurrence_exceptions,
+      image.recurrence_days, image.occurrence_of, image.source_ref, image.created_at, image.extra_json);
     if (!event.project && event.referencedProject) report.events.unfiled += 1;
     // Counted separately from `unfiled`: an event that never named a project is not
     // an event whose project went missing, and reporting them as one number would

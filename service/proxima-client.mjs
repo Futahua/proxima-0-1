@@ -37,8 +37,8 @@
  * on what you have actually seen, or be refused and read again.
  */
 
-import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { readFileSync, writeFileSync, existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { join, resolve, dirname, relative, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
@@ -50,6 +50,11 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--home') flags.home = argv[++i];
   else if (a === '--as') flags.as = argv[++i];
   else if (a === '--json') flags.json = true;
+  // These two are read by name below; they used to be looked for in `positional`,
+  // which the loop above has already stripped of everything starting with `--`, so
+  // the flags were documented and never once took effect.
+  else if (a === '--no-actions') flags.noActions = true;
+  else if (a === '--dry-run') flags.dryRun = true;
   else positional.push(a);
 }
 
@@ -381,11 +386,37 @@ async function main() {
       const [sub, vaultPath] = bare(rest);
       if (sub !== 'scan' && sub !== 'import') throw new Error('vault needs a subcommand: scan <path> or import <path>');
       if (!vaultPath) throw new Error('vault ' + sub + ' needs the vault path');
-      const root = resolve(vaultPath);
-      if (!existsSync(root)) { console.error('No such vault: ' + root); process.exit(2); }
+      if (!existsSync(vaultPath)) { console.error('No such vault: ' + resolve(vaultPath)); process.exit(2); }
+
+      // THE VAULT IS THE REAL VAULT, AND NOTHING OUTSIDE IT IS READ.
+      //
+      // `resolve` only tidies up the spelling; it does not follow a symlink or a
+      // junction. A vault reached through a link, or holding one, would otherwise let
+      // this read a file that is not in the vault at all — and an import that reads
+      // outside the directory it was pointed at has broken the one promise it makes.
+      // So the root is canonicalized once, every folder and every file is measured
+      // against it in its canonical form, and a configured folder or a file that
+      // resolves elsewhere STOPS the import before anything is read or sent.
+      const root = realpathSync.native(vaultPath);
+      if (!statSync(root).isDirectory()) { console.error('Not a folder: ' + root); process.exit(2); }
+
+      const contained = (real) => {
+        const rel = relative(root, real);
+        return Boolean(rel) && rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel);
+      };
+      const sourcePath = (absolute) => relative(root, absolute).split(sep).join('/');
+      const escape = (what, real) => {
+        console.error('Refused: ' + what + ' resolves to ' + real + ',');
+        console.error('which is outside the vault ' + root + '.');
+        console.error('An import reads only inside the vault it was given. Nothing was read, nothing was sent.');
+        process.exit(2);
+      };
+      const refused = [];
 
       // The plugin's own settings name its folders. Reading them beats guessing:
-      // a vault whose folders have been renamed still imports.
+      // a vault whose folders have been renamed still imports. They are settings, not
+      // instructions: a value that is absolute, or that climbs out of the vault, is a
+      // misconfiguration this refuses rather than follows.
       let eventsRel = '-Hide/Proxima/events';
       let projectsRel = '-Hide/Proxima/projects';
       const settingsPath = join(root, '.obsidian', 'plugins', 'proxima', 'data.json');
@@ -396,40 +427,71 @@ async function main() {
           if (typeof settings.projectsFolder === 'string' && settings.projectsFolder) projectsRel = settings.projectsFolder;
         } catch { /* unreadable settings: the documented folder names stand */ }
       }
-      const eventsDir = join(root, ...eventsRel.split('/'));
-      const projectsDir = join(root, ...projectsRel.split('/'));
-      if (!existsSync(eventsDir)) { console.error('No events folder at ' + eventsDir); process.exit(2); }
-      if (!existsSync(projectsDir)) { console.error('No projects folder at ' + projectsDir); process.exit(2); }
+      const configuredDir = (value, label) => {
+        if (isAbsolute(value) || /^[a-z]:/i.test(value)) {
+          console.error('Refused: the configured ' + label + ' (“' + value + '”) is an absolute path.');
+          console.error('It has to be a folder inside the vault (' + root + '). Nothing was read, nothing was sent.');
+          process.exit(2);
+        }
+        const candidate = join(root, ...value.split('/'));
+        let real;
+        try { real = realpathSync.native(candidate); }
+        catch { console.error('No ' + label + ' at ' + candidate); process.exit(2); }
+        if (!contained(real)) escape('the configured ' + label + ' (' + candidate + ')', real);
+        if (!statSync(real).isDirectory()) { console.error('Not a folder: ' + real); process.exit(2); }
+        return real;
+      };
+      const eventsDir = configuredDir(eventsRel, 'events folder');
+      const projectsDir = configuredDir(projectsRel, 'projects folder');
 
       // ONLY the events and the project's own record are read. The contents of a
       // project folder are the creator's own files, and a cockpit that ingests a
       // folder has decided it owns what is inside it.
       const files = [];
-      const rel = (absolute) => absolute.slice(root.length + 1).split('\\').join('/');
+      const readMarkdown = (absolute) => {
+        let real;
+        try { real = realpathSync.native(absolute); }
+        catch { refused.push({ path: sourcePath(absolute), why: 'could not be resolved — a broken link, or it is not there' }); return; }
+        if (!contained(real)) escape(absolute, real);
+        if (!statSync(real).isFile()) { refused.push({ path: sourcePath(real), why: 'not a file' }); return; }
+        files.push({ path: sourcePath(real), bytes: readFileSync(real, 'utf8') });
+      };
+
       for (const entry of readdirSync(eventsDir)) {
         if (!entry.endsWith('.md')) continue;
-        files.push({ path: rel(join(eventsDir, entry)), bytes: readFileSync(join(eventsDir, entry), 'utf8') });
+        readMarkdown(join(eventsDir, entry));
       }
-      const folders = readdirSync(projectsDir, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => ({ id: entry.name, path: join(projectsDir, entry.name) }));
-      for (const folder of folders) {
-        const index = join(folder.path, 'index.md');
-        if (existsSync(index)) files.push({ path: rel(index), bytes: readFileSync(index, 'utf8') });
+
+      // A project folder is a place on this machine, so a link is a folder wherever
+      // it really is — but only while that is still inside the vault. A directory
+      // entry that is a reparse point does not report itself as a directory, which is
+      // why this resolves first and asks afterwards.
+      const folders = [];
+      for (const entry of readdirSync(projectsDir, { withFileTypes: true })) {
+        const absolute = join(projectsDir, entry.name);
+        let real;
+        try { real = realpathSync.native(absolute); }
+        catch { refused.push({ path: sourcePath(absolute), why: 'could not be resolved — a broken link, or it is not there' }); continue; }
+        if (!contained(real)) escape(absolute, real);
+        if (!statSync(real).isDirectory()) continue;
+        folders.push({ id: entry.name, path: real });
+        const index = join(real, 'index.md');
+        if (existsSync(index)) readMarkdown(index);
       }
 
       const summary = {
         root,
-        origin: f.origin || 'vault:' + vaultPath.replace(/\\/g, '/'),
-        eventsDir: rel(eventsDir),
-        projectsDir: rel(projectsDir),
+        origin: f.origin || 'vault:' + root.replace(/\\/g, '/'),
+        eventsDir: sourcePath(eventsDir),
+        projectsDir: sourcePath(projectsDir),
         eventFiles: files.filter((x) => x.path.includes('/events/')).length,
         projectRecords: files.filter((x) => x.path.endsWith('/index.md')).length,
         folders: folders.length,
         folderPaths: folders.map((x) => x.path),
+        refused,
       };
       if (sub === 'scan') { show(summary); return undefined; }
-      if (rest.includes('--dry-run') || f['dry-run'] !== undefined) {
+      if (flags.dryRun || rest.includes('--dry-run')) {
         // The dry run is the scan: the same read, and nothing sent.
         console.log('dry run — nothing was sent to the service.');
         show(summary);
@@ -444,10 +506,14 @@ async function main() {
       console.log('vault   ' + root);
       console.log('origin  ' + report.origin);
       console.log('archive backups/' + report.archive);
-      console.log('events  ' + report.events.created + ' created, ' + report.events.skipped + ' already there, ' +
+      console.log('events  ' + report.events.created + ' created, ' + report.events.skipped + ' already there and identical, ' +
         report.events.unfiled + ' with no project of their own, ' + report.events.undated + ' refused as unreadable');
       console.log('projects ' + report.projects.created + ' created (' + report.projects.linked + ' with a folder link, ' +
-        report.projects.unnamed + ' with no name in the source), ' + report.projects.skipped + ' already there');
+        report.projects.unnamed + ' with no name in the source), ' + report.projects.skipped + ' already there and identical');
+      if (refused.length) {
+        console.log('refused before reading ' + refused.length + ':');
+        refused.slice(0, 10).forEach((r) => console.log('   ' + r.path + ' — ' + r.why));
+      }
       if (report.rejected.length) {
         console.log('refused ' + report.rejected.length + ':');
         report.rejected.slice(0, 10).forEach((r) => console.log('   ' + r.path + ' — ' + r.why));
@@ -456,7 +522,7 @@ async function main() {
       // The links the creator clicks. Papers reads `actions.json` beside project.json
       // and can open each target with the machine's own handler; nothing else has to
       // know how to open a folder.
-      if (!rest.includes('--no-actions')) {
+      if (!flags.noActions && !rest.includes('--no-actions')) {
         // This file lives in <project>/service, and the project root is where Papers looks
         // for actions.json — beside project.json and local-service.json.
         const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
