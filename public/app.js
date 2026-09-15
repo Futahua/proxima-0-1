@@ -1363,10 +1363,47 @@
   // nothing they do here will be kept. A read-only copy is honest; a local write is
   // how two boards start disagreeing.
 
+  /**
+   * Why this page cannot reach the service — when the reason is this page.
+   *
+   * "Not reachable" is the right sentence for a daemon that is down, and the wrong
+   * one for a page that was never allowed to ask. Papers serves every backpack page
+   * under `connect-src 'none'`, so a Proxima opened inside Papers cannot open a
+   * connection to anything: no origin allowance, cookie or token changes that,
+   * because the request is refused before it leaves. Telling the reader "not
+   * reachable" there is how they learn to ignore the one banner that has to be
+   * believed, so this names the wall and the way around it.
+   */
+  function blockedReason(state) {
+    const where = state.serviceAddress || 'http://127.0.0.1:4181/';
+    if (state.blockedBy === 'policy' && state.originKind === 'papers-backpack') {
+      return 'This page is a Papers backpack page, and Papers serves those under a policy that forbids ' +
+        'them every connection (connect-src \'none\'). The service is running — this page is not allowed ' +
+        'to ask it anything, and no setting on either side changes that. Open Proxima from ' + where +
+        ' instead: that page is served by the service itself, so it needs nobody\'s permission.';
+    }
+    if (state.blockedBy === 'policy') {
+      return 'This page is served under a policy that forbids it every connection (connect-src), so it ' +
+        'cannot reach the Proxima service' + (state.blockedTarget ? ' at ' + state.blockedTarget : '') +
+        '. The service is running — this page is not allowed to ask it anything. Open Proxima from ' + where +
+        ' instead: that page is served by the service itself.';
+    }
+    if (state.originKind === 'file') {
+      return 'This page was opened as a local file, so the service cannot tell who is asking and refuses it. ' +
+        'Open Proxima from ' + where + ' instead: that page is served by the service itself.';
+    }
+    return 'This page was served from ' + state.originKind + ':, which the service cannot accept a session from. ' +
+      'Open Proxima from ' + where + ' instead: that page is served by the service itself.';
+  }
+
   function updateServiceBanner(status) {
     const banner = $('#serviceBanner');
     if (!banner) return;
-    const state = status || Store.loadStatus();
+    // The live reason wins for the facts this function does not own (was it a policy,
+    // which origin, where is the service), while the event's own fields win for the
+    // state it is reporting. A banner that guessed from half a status object is how
+    // "the service is down" got printed over a service that was running.
+    const state = { ...Store.loadStatus(), ...(status || {}) };
     // `mode` is what the store reports live; `kind` is the same thing in the shape the
     // rest of the cockpit asks for. Either will do here.
     const mode = state.mode || (state.kind === 'offline' ? 'offline' : state.kind === 'connecting' ? 'connecting' : 'online');
@@ -1375,6 +1412,13 @@
     banner.classList.toggle('connecting', mode === 'connecting');
     if (mode === 'connecting') {
       banner.textContent = 'Contacting the Proxima service…';
+      return;
+    }
+    // Blame the right party, and make the notice actionable rather than a condition
+    // report the reader has to diagnose themselves.
+    banner.classList.toggle('blocked', Boolean(state.blocked));
+    if (state.blocked) {
+      banner.textContent = blockedReason(state);
       return;
     }
     const when = Store.cachedAt() ? new Date(Store.cachedAt()).toLocaleString() : null;
@@ -3510,6 +3554,10 @@
     $('#migrateDialog').close();
   });
   $('#serviceBanner').addEventListener('click', () => {
+    // On a page that is not allowed to talk to the service, the only useful thing the
+    // notice can do when clicked is take the reader to the page that can.
+    const status = Store.loadStatus();
+    if (status.blocked) { window.open(status.serviceAddress, '_blank'); return; }
     if (Store.mode() === 'offline') { Store.reconnect().catch(() => {}); return; }
     if (legacyWantsAttention()) openMigrateDialog();
   });

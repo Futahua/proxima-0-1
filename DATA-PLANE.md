@@ -461,6 +461,59 @@ a per-agent credential exists so that it is not something anyone waves around.
 and send it as `ifRev`. That is the same requirement the service puts on an agent
 (`REV_REQUIRED`), done for the caller so the honest path is the easy one.
 
+## Where the cockpit is served from, and why it is not a detail
+
+The service serves the cockpit itself (`GET /`), and that is the only arrangement in
+which the cockpit can talk to it. Two others exist and both fail, for reasons that are
+worth writing down because they are invisible from the outside:
+
+| Served from | What happens |
+| --- | --- |
+| **the service** — `http://127.0.0.1:4181/` | Same origin as the API. No CORS, the session cookie is first-party, SSE works. **This is the way in.** |
+| **a dev static server** — `http://127.0.0.1:4180` | Works only with `--allow-origin http://127.0.0.1:4180` and `?api=http://127.0.0.1:4181/v1`: the nonce is injected by the service when it serves the page, and a page the service did not serve has none. |
+| **a Papers backpack** — `papers-backpack://<projectId>` | **Cannot work at all.** Papers answers every asset of a backpack project with `default-src 'none'; …; connect-src 'none'` and registers the scheme `corsEnabled: false` (`App/resources/app.asar`, `installBackpackProjectProtocol` / `registerBackpackProjectSchemePrivileges`). The document's own policy forbids it every connection, so the request is refused before DNS, before CORS and before any cookie question — no origin allowance, session or token can change it. |
+
+A cockpit that finds itself unable to reach the service therefore has to say *which*
+of these it is, or the reader learns to ignore the one banner that has to be believed.
+It listens for `securitypolicyviolation` (installed before the first request, and
+re-stating the status when it fires, because the violation arrives one task after the
+failure it explains) and names the wall and the way around it. When the service really
+is not answering, the old sentence stands unchanged — the difference is measured, not
+guessed: `blockedBy` is `policy`, `origin` or `null`.
+
+## Running proximad on this machine day to day
+
+The daemon owns the board and serves the cockpit, so "Proxima is not running" and
+"Proxima cannot be reached" are the same sentence, and the arrangement has to make the
+first one rare and repairable:
+
+```
+service/Proxima.cmd                    the thing to click: starts proximad if it is not
+                                       answering, then opens http://127.0.0.1:4181/
+service/proxima.ps1 -Action ensure     the same, headless (-NoOpen for logon use)
+service/proxima.ps1 -Action status     is it up, on which home, at which head sequence
+service/proxima.ps1 -Action stop       stop the process holding the port
+```
+
+The launcher finds the data home by what is on disk — an explicit `-DataHome` or
+`PROXIMA_HOME`, then the home the running daemon reports, then the nearest
+`Proxima Data Home` above the script that holds a `proxima.db`, then the per-user
+default — because the board the creator has been using is the one that must be opened,
+and a launcher that picked a fresh empty home would look exactly like data loss.
+
+For it to be there before anything is opened, register it once, from a normal shell:
+
+```
+schtasks /Create /TN "Proxima service (proximad)" /SC ONLOGON /F ^
+  /TR "pwsh -NoProfile -ExecutionPolicy Bypass -File \"<path>\service\proxima.ps1\" -Action ensure -NoOpen"
+```
+
+(A shortcut to `Proxima.cmd` in the Startup folder does the same job.) Neither could be
+installed by the agent that wrote this — the Task Scheduler refused every form of the
+command and the Startup folder refused the write — so this is the creator's one step.
+Until it is done, the daemon's lifetime is whatever started it, which for the session
+that built this was the agent's own process tree.
+
 ---
 
 ## What is not built, and why that is next

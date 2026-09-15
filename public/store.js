@@ -311,7 +311,17 @@ const Store = (() => {
     // class toggle, and a missed transition leaves the reader looking at a banner that
     // says the service is down while the cockpit is happily writing to it.
     if (statusHandler) {
-      try { statusHandler({ mode, detail, cachedAt }); } catch { /* reporting must never throw */ }
+      try {
+        statusHandler({
+          mode, detail, cachedAt,
+          // The reason travels WITH the status, so a listener cannot render the wrong
+          // sentence by only looking at what it was handed.
+          originKind: originKind(), blocked: blocked(),
+          blockedBy: blockedByPolicy() ? 'policy' : (blockedByOrigin() ? 'origin' : null),
+          blockedTarget: policyBlocks.length ? policyBlocks[0].blocked : null,
+          serviceAddress: serviceAddress(),
+        });
+      } catch { /* reporting must never throw */ }
     }
   }
 
@@ -338,6 +348,61 @@ const Store = (() => {
     } catch { /* no boot block: fall through */ }
     return '/v1';
   };
+
+  /** Where the service is, for a page that has to be TOLD because it cannot look. */
+  const serviceAddress = () => {
+    const base = apiBase();
+    if (/^https?:/i.test(base)) return base.replace(/\/v1\/?$/, '/');
+    return 'http://127.0.0.1:4181/';
+  };
+
+  /**
+   * What kind of place this page was served from — and whether it can reach anything.
+   *
+   * This is not a nicety. A page served from a custom scheme can be under a policy
+   * that forbids it every connection, and then "the service is not reachable" is a
+   * LIE about a service running four inches away: no origin allowance, cookie or
+   * token can help, because the request is refused before it leaves the page. Papers
+   * serves its backpack pages exactly that way (`connect-src 'none'`, and the scheme
+   * is registered `corsEnabled: false`), so a Proxima opened inside Papers can never
+   * talk to the daemon, and saying so is the only honest banner.
+   */
+  function originKind() {
+    let protocol = '';
+    try { protocol = location.protocol || ''; } catch { protocol = ''; }
+    if (protocol === 'http:' || protocol === 'https:') return 'http';
+    if (protocol === 'papers-backpack:') return 'papers-backpack';
+    if (protocol === 'file:') return 'file';
+    return protocol ? protocol.replace(/:$/, '') : 'unknown';
+  }
+
+  /**
+   * Did this page's OWN policy refuse the connection?
+   *
+   * This is the honest signal, and it is better than sniffing the scheme: the browser
+   * raises `securitypolicyviolation` with `violatedDirective: connect-src` when a
+   * policy stops a request, whoever set the policy and whatever the origin is. It is
+   * installed here, at load, before the first fetch — a listener added afterwards would
+   * miss the very violation it exists to report.
+   */
+  const policyBlocks = [];
+  try {
+    document.addEventListener('securitypolicyviolation', (event) => {
+      const directive = String((event && event.violatedDirective) || '');
+      if (!directive.startsWith('connect-src')) return;
+      policyBlocks.push({ directive: directive, blocked: (event && event.blockedURI) || '' });
+      // Re-state the status, because this fact arrives one task AFTER the failure it
+      // explains: the fetch rejects first, the page draws "not reachable", and only
+      // then does the browser say a policy refused it. Without this the reader keeps
+      // the wrong sentence — the exact thing this listener exists to prevent.
+      try { setStatus(mode, detail); } catch { /* nothing to redraw yet */ }
+    });
+  } catch { /* no document to watch: nothing can be blocked either */ }
+
+  const blockedByPolicy = () => policyBlocks.length > 0;
+  const blockedByOrigin = () => originKind() !== 'http';
+  /** The service is fine and this page cannot ask it — which is not "not reachable". */
+  const blocked = () => blockedByPolicy() || blockedByOrigin();
 
   async function request(method, path, body) {
     const response = await fetch(apiBase() + path, {
@@ -416,7 +481,9 @@ const Store = (() => {
    * both cheaper than reasoning about that and impossible to get subtly wrong.
    */
   function subscribe() {
-    if (source || typeof EventSource === 'undefined') return;
+    // On a page that is not allowed to open a connection, an EventSource is one more
+    // refused request per second and nothing else. The banner already says why.
+    if (source || typeof EventSource === 'undefined' || blocked()) return;
     const url = apiBase() + '/events?after=' + headSeq;
     source = new EventSource(url, { withCredentials: true });
     source.onmessage = (event) => {
@@ -472,6 +539,10 @@ const Store = (() => {
    */
   function recoverSoon() {
     window.clearTimeout(streamRetry);
+    // There is nothing to recover from on a page that cannot make the request at all:
+    // retrying would be a banner flicker every five seconds, forever, about a service
+    // that is running perfectly well.
+    if (blocked()) return;
     streamRetry = window.setTimeout(() => {
       if (mode === 'online') return;
       refresh()
@@ -651,9 +722,13 @@ const Store = (() => {
         ok: false,
         code: 'SERVICE_UNAVAILABLE',
         commandId: env.commandId || null,
-        details: { mode: mode, detail: detail },
-        message: 'The Proxima service is not reachable, so nothing was changed. This board is a read-only copy' +
-          (cachedAt ? ' from ' + new Date(cachedAt).toLocaleString() : '') + '.',
+        details: { mode: mode, detail: detail, originKind: originKind() },
+        // The sentence has to match the CAUSE. "Not reachable" is right when the
+        // daemon is down and wrong when this page was never allowed to ask.
+        message: blocked()
+          ? 'This page cannot reach the Proxima service at all — see the notice above. Nothing was changed.'
+          : 'The Proxima service is not reachable, so nothing was changed. This board is a read-only copy' +
+            (cachedAt ? ' from ' + new Date(cachedAt).toLocaleString() : '') + '.',
       };
     }
 
@@ -775,8 +850,9 @@ const Store = (() => {
       } catch (error) {
         setStatus('offline', String((error && error.message) || error));
         // A cockpit that opens while the service is away keeps trying, so the reader
-        // does not have to guess that clicking the banner is the way back.
-        recoverSoon();
+        // does not have to guess that clicking the banner is the way back — unless
+        // this page was never allowed to ask in the first place.
+        if (!blocked()) recoverSoon();
       }
       return { mode, cachedAt };
     },
@@ -942,7 +1018,17 @@ const Store = (() => {
     },
 
     // ── Failures, reported rather than swallowed ─────────────────────────────
-    loadStatus: () => ({ kind: mode === 'offline' ? 'offline' : mode === 'connecting' ? 'connecting' : 'ok', mode: mode, detail: detail, cachedAt: cachedAt }),
+    loadStatus: () => ({
+      kind: mode === 'offline' ? 'offline' : mode === 'connecting' ? 'connecting' : 'ok',
+      mode: mode, detail: detail, cachedAt: cachedAt,
+      // Who to blame, when it is not the service: this page's policy, this page's
+      // origin, or nobody — in which case the service really is not answering.
+      originKind: originKind(),
+      blocked: blocked(),
+      blockedBy: blockedByPolicy() ? 'policy' : (blockedByOrigin() ? 'origin' : null),
+      blockedTarget: policyBlocks.length ? policyBlocks[0].blocked : null,
+      serviceAddress: serviceAddress(),
+    }),
     writeError: () => (lastError ? { ...lastError } : null),
     onWriteFailure(handler) { failureHandler = typeof handler === 'function' ? handler : null; },
   };

@@ -56,6 +56,9 @@ main { padding: 16px; max-width: 1200px; }
   background: #3a2f22; border: 1px solid #7a5c33; color: #f0d6a8; font-size: 13px; }
 .service-banner.connecting { background: var(--panel-2); border-color: var(--line); color: var(--dim);
   cursor: default; }
+/* A page that was never allowed to ask is a different notice from a service that is
+   down: no retry, and the whole banner is the way out of it. */
+.service-banner.blocked { background: var(--panel-2); border-color: var(--accent); color: var(--ink); }
 .migrate-report { margin: 10px 0 0; padding: 10px; border-radius: 6px; background: var(--panel-2);
   border: 1px solid var(--line); font-size: 12px; color: var(--ink); }
 /* A route with nothing derived to draw: a title and a sentence. Narrower than the
