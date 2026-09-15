@@ -18,6 +18,18 @@
  *   3. ARCHIVES. See archive-store.test.mjs; the end-to-end half is here — two imports
  *      of one vault leave two archives.
  *
+ * And the two a second review found:
+ *
+ *   4. THE SETTINGS FILE IS A SOURCE OF SOURCES. `data.json` decides which folders are
+ *      read, so a `data.json` that is really a link out of the vault would let the vault
+ *      name its own sources from anywhere. It is canonicalized and contained like
+ *      everything else, and refused as a CONTAINMENT failure — never mistaken for a
+ *      missing or unreadable file, which is the ordinary case with a fallback.
+ *   5. TWO SOURCES, ONE ID. `projects/<id>/index.md` fed a Map that took the last write:
+ *      two records for one id collapsed into one row and the loser was never mentioned.
+ *      A folder and its own record are the expected pairing; a second record that
+ *      differs, or a second folder claiming a different path, refuses the import.
+ *
  * Run: node --test  (or: node --test "service/tests/*.test.mjs")
  */
 
@@ -151,17 +163,18 @@ const writeEvent = (v, id, fields = {}) => {
   writeFileSync(join(v.eventsDir, id + '.md'), eventDoc(id, fields));
 };
 
+const projectDoc = (id, name, extra = {}) => frontmatter({
+  id,
+  name,
+  description: 'A project.',
+  createdAt: '2026-05-30T00:00:00.000Z',
+  ...extra,
+});
+
 const writeProject = (v, id, fields) => {
   const dir = join(v.projectsDir, id);
   mkdirSync(dir, { recursive: true });
-  if (fields) {
-    writeFileSync(join(dir, 'index.md'), frontmatter({
-      id,
-      name: fields.name,
-      description: fields.description || 'A project.',
-      createdAt: fields.createdAt || '2026-05-30T00:00:00.000Z',
-    }));
-  }
+  if (fields) writeFileSync(join(dir, 'index.md'), projectDoc(id, fields.name, { description: fields.description || 'A project.', createdAt: fields.createdAt || '2026-05-30T00:00:00.000Z' }));
   return dir;
 };
 
@@ -386,4 +399,173 @@ test('an event whose id is already on the board with a different date refuses th
   assert.equal(after.headSeq, before.headSeq);
   assert.equal(after.board.schedule.find((e) => e.id === v.ids.event).startAt,
     before.board.schedule.find((e) => e.id === v.ids.event).startAt, 'the stored instant is unchanged');
+});
+
+// ── 3. The settings file, and two sources claiming one id ───────────────────
+
+/**
+ * Make the vault's own `data.json` a link to one that lives outside it.
+ *
+ * Returns which shape it had to use, or null when this machine allows neither. A real
+ * file symlink is what a synced or hand-linked vault would hold; without the privilege
+ * for one, a junction replacing the settings folder puts the same external file at the
+ * same path, through the same realpath.
+ */
+function pointSettingsOutside(vaultDir, externalDir, t) {
+  const settingsDir = join(vaultDir, '.obsidian', 'plugins', 'proxima');
+  const settingsPath = join(settingsDir, 'data.json');
+  rmSync(settingsPath, { force: true });
+  try {
+    symlinkSync(join(externalDir, 'data.json'), settingsPath, 'file');
+    return 'file symlink to data.json';
+  } catch (error) {
+    if (error.code !== 'EPERM' && error.code !== 'EACCES' && error.code !== 'UNKNOWN') throw error;
+    rmSync(settingsDir, { recursive: true, force: true });
+    try {
+      symlinkSync(externalDir, settingsDir, 'junction');
+      return 'directory junction around data.json';
+    } catch (fallback) {
+      t.skip('this machine refuses both file symlinks (' + error.code + ') and junctions (' + fallback.code + ')');
+      return null;
+    }
+  }
+}
+
+test('a settings file that resolves outside the vault is refused, even when it names folders inside it', async (t) => {
+  const before = await snapshot();
+  const beforeArchives = archives().length;
+
+  // The settings say what a perfectly ordinary vault would say. Nothing about their
+  // CONTENT is unusual — the problem is that they came from outside the vault, and the
+  // settings file is what decides which folders are read. If it were honoured, this
+  // import would succeed and look completely normal, which is exactly why it may not.
+  const external = join(root, 'external-settings-plain');
+  mkdirSync(external, { recursive: true });
+  writeFileSync(join(external, 'data.json'), JSON.stringify({
+    eventsFolder: '-Hide/Proxima/events',
+    projectsFolder: '-Hide/Proxima/projects',
+  }));
+
+  const v = vault();
+  writeEvent(v, 'event-1780320243796-vvvvv', {});
+  const kind = pointSettingsOutside(v.dir, external, t);
+  if (!kind) return;
+
+  const run = client('vault', 'import', v.dir);
+
+  assert.equal(run.status, 2, 'settings from outside the vault must be refused (' + kind + '): ' + run.output);
+  assert.match(run.output, /plugin settings/, 'the refusal must name the settings file, not a folder it named');
+  assert.match(run.output, /outside the vault/);
+  assert.equal(archives().length, beforeArchives, 'nothing may reach the service — not even an archive');
+  const after = await snapshot();
+  assert.equal(after.headSeq, before.headSeq);
+  assert.ok(!after.board.schedule.some((e) => e.id === 'event-1780320243796-vvvvv'),
+    'the import must not have run at all, however ordinary its settings looked');
+});
+
+test('a settings file that resolves outside the vault cannot pull external folders in', async (t) => {
+  const before = await snapshot();
+  const beforeArchives = archives().length;
+
+  const external = join(root, 'external-settings');
+  mkdirSync(join(external, 'events'), { recursive: true });
+  mkdirSync(join(external, 'projects'), { recursive: true });
+  writeFileSync(join(external, 'events', 'event-1780320243797-wwwww.md'),
+    eventDoc('event-1780320243797-wwwww', {}));
+  writeFileSync(join(external, 'data.json'), JSON.stringify({
+    eventsFolder: '../../external-settings/events',
+    projectsFolder: '../../external-settings/projects',
+  }));
+
+  const v = vault();
+  const kind = pointSettingsOutside(v.dir, external, t);
+  if (!kind) return;
+
+  const run = client('vault', 'import', v.dir);
+
+  assert.equal(run.status, 2, 'settings from outside the vault must be refused (' + kind + '): ' + run.output);
+  assert.match(run.output, /plugin settings/);
+  assert.equal(archives().length, beforeArchives, 'nothing may reach the service — not even an archive');
+  const after = await snapshot();
+  assert.equal(after.headSeq, before.headSeq);
+  assert.ok(!after.board.schedule.some((e) => e.id === 'event-1780320243797-wwwww'),
+    'the external record must not be on the board');
+});
+
+test('two source records claiming one project id are refused, not merged', async () => {
+  const before = await snapshot();
+  const beforeArchives = archives().length;
+  const id = 'proj-1780057127099-dup';
+
+  // Two `projects/<same-id>/index.md` files with different names. The Map this used to
+  // feed took the last write, so one of these names would simply have vanished.
+  const run = await command('vault.import', {
+    source: { root: join(root, 'declared-vault'), origin: 'vault:test' },
+    files: [
+      { path: 'one/projects/' + id + '/index.md', bytes: projectDoc(id, 'First name') },
+      { path: 'two/projects/' + id + '/index.md', bytes: projectDoc(id, 'Second name') },
+    ],
+    folders: [],
+  });
+
+  assert.equal(run.ok, false, JSON.stringify(run));
+  assert.equal(run.code, 'VAULT_ID_CONFLICT');
+  const conflict = run.details.conflicts.find((c) => c.id === id);
+  assert.ok(conflict, JSON.stringify(run.details));
+  assert.match(conflict.why, /one\/projects\//);
+  assert.match(conflict.why, /two\/projects\//);
+  assert.match(run.message, /two source records claim this id/);
+
+  const after = await snapshot();
+  assert.equal(after.headSeq, before.headSeq, 'a refused import writes no event');
+  assert.ok(!after.board.projects.some((p) => p.id === id), 'neither name may land');
+  assert.equal(archives().length, beforeArchives, 'a refused import writes no archive');
+});
+
+test('two folders claiming one project id are refused', async () => {
+  const before = await snapshot();
+  const id = 'proj-1780057127097-two';
+
+  const run = await command('vault.import', {
+    source: { root: join(root, 'declared-vault'), origin: 'vault:test' },
+    files: [],
+    folders: [
+      { id, path: join(root, 'declared-vault', 'a', id) },
+      { id, path: join(root, 'declared-vault', 'b', id) },
+    ],
+  });
+
+  assert.equal(run.ok, false, JSON.stringify(run));
+  assert.equal(run.code, 'VAULT_ID_CONFLICT');
+  assert.match(run.details.conflicts[0].why, /two source folders claim this id/);
+
+  const after = await snapshot();
+  assert.equal(after.headSeq, before.headSeq);
+  assert.ok(!after.board.projects.some((p) => p.id === id));
+});
+
+test('a folder and its own record are the expected pairing, and consistent duplicates are not collisions', async () => {
+  const id = 'proj-1780057127098-pair';
+  const folderPath = join(root, 'declared-vault', 'projects', id);
+
+  const run = await command('vault.import', {
+    source: { root: join(root, 'declared-vault'), origin: 'vault:test' },
+    // The same folder twice, and the same record twice: idempotent duplicates, which
+    // say nothing new rather than contradicting anything.
+    folders: [{ id, path: folderPath }, { id, path: folderPath }],
+    files: [
+      { path: 'projects/' + id + '/index.md', bytes: projectDoc(id, 'Paired') },
+      { path: 'projects/' + id + '/index.md', bytes: projectDoc(id, 'Paired') },
+    ],
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run));
+  assert.equal(run.value.projects.created, 1);
+  assert.equal(run.value.projects.linked, 1);
+  assert.equal(run.value.projects.skipped, 0);
+
+  const after = await snapshot();
+  const row = after.board.projects.find((p) => p.id === id);
+  assert.equal(row.name, 'Paired', 'the record names the project');
+  assert.equal(row.link.path, folderPath, 'the folder says where it is');
 });

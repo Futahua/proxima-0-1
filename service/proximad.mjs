@@ -607,8 +607,8 @@ const MESSAGES = {
     + ((d.paths || []).length) + ' path(s) in it do not: ' + (d.paths || []).slice(0, 3).join(', ')
     + ((d.paths || []).length > 3 ? ', …' : '') + '. Nothing was imported.',
   VAULT_ID_CONFLICT: (d) => ((d.conflicts || []).length) + ' record(s) in this vault have an id that is already '
-    + 'on the board with different content — ' + (d.conflicts || []).slice(0, 3)
-      .map((c) => c.id + ' (' + (c.fields || []).join(', ') + ')').join('; ')
+    + 'on the board with different content, or that two source files claim — ' + (d.conflicts || []).slice(0, 3)
+      .map((c) => c.id + ' (' + ((c.fields || []).length ? c.fields.join(', ') : (c.why || 'two sources')) + ')').join('; ')
     + ((d.conflicts || []).length > 3 ? '; …' : '')
     + '. An import never overwrites and never quietly skips a record that differs: resolve these in the source, '
     + 'or import under different ids. Nothing was written.',
@@ -1956,6 +1956,51 @@ function readVaultSources(payload, source) {
   const escapes = [];
   const rootResolved = resolve(source.root);
 
+  // WHICH SOURCE SAID WHAT ABOUT A PROJECT.
+  //
+  // A project arrives as two kinds of claim: a folder (which says WHERE it is) and a
+  // record — its own `index.md` — which says WHAT it is called. One of each is the
+  // expected pairing. Anything else has to be looked at, because this used to be a Map
+  // that took the last write and said nothing: two `projects/<id>/index.md` files with
+  // different names collapsed into one row, and the losing file was never mentioned
+  // again. A silently discarded source is exactly the failure the collision preflight
+  // exists to prevent, one layer further in.
+  const claimOfFolder = (id, path) => ({ kind: 'folder', id, image: stableJson({ path: resolve(path) }), at: path });
+  const claimOfRecord = (id, fields, extra, path) => ({
+    kind: 'record',
+    id,
+    // Only what the row would carry: a project stores its name, its description, its
+    // creation instant and its unknown fields. The body of the note is not stored on a
+    // project at all, so two records that differ only in prose are the same record.
+    image: stableJson({
+      name: fields.name || null,
+      description: fields.description || '',
+      createdAt: fields.createdAt || null,
+      extra: extra || {},
+    }),
+    at: path,
+  });
+  const claims = new Map(); // id -> { folder, record }
+  const duplicates = [];
+
+  const claim = (entry) => {
+    const held = claims.get(entry.id) || {};
+    const first = held[entry.kind];
+    if (first && first.image !== entry.image) {
+      duplicates.push({
+        kind: 'project',
+        id: entry.id,
+        fields: [],
+        why: 'two source ' + (entry.kind === 'folder' ? 'folders' : 'records') + ' claim this id with different content ('
+          + first.at + ' and ' + entry.at + ')',
+      });
+      return false;
+    }
+    if (!first) held[entry.kind] = entry;
+    claims.set(entry.id, held);
+    return true;
+  };
+
   (payload.folders || []).forEach((folder) => {
     const id = String((folder && folder.id) || '').trim();
     const path = String((folder && folder.path) || '').trim();
@@ -1964,6 +2009,7 @@ function readVaultSources(payload, source) {
     // vault the import names: a link that points out of the vault is not something
     // this import is entitled to record as if it had come from there.
     if (!isAbsolute(path) || !underRoot(rootResolved, resolve(path))) { escapes.push(path); return; }
+    if (!claim(claimOfFolder(id, path))) return;
     projectsById.set(id, {
       id, linkPath: path, linkKind: 'folder',
       name: null, description: '', createdAt: null, extra: {}, sourceRef: null, note: '',
@@ -1990,6 +2036,10 @@ function readVaultSources(payload, source) {
       ['projectType', 'status', 'linkedFolder', 'linkedFolders', 'icon', 'type'].forEach((key) => {
         if (fields[key] !== undefined) extra[key] = fields[key];
       });
+      // A record that disagrees with an earlier record for the same id is not merged
+      // and it does not win: the import refuses below, before anything is archived or
+      // written, and the refusal names both files.
+      if (!claim(claimOfRecord(id, fields, extra, path))) return;
       projectsById.set(id, {
         ...known,
         name: fields.name || known.name,
@@ -2051,6 +2101,10 @@ function readVaultSources(payload, source) {
 
   const undated = prepared.filter((e) => !e.startAt || !e.endAt);
   if (escapes.length) return refuse('VAULT_PATH_ESCAPE', { root: source.root, paths: escapes });
+  // Two sources claiming one id is refused before the archive is written, so a vault
+  // that contradicts itself leaves no archive and no row — there is nothing to undo,
+  // because nothing happened.
+  if (duplicates.length) return refuse('VAULT_ID_CONFLICT', { root: source.root, conflicts: duplicates });
   return { ok: true, projects, events: prepared, rejected, undated, root: source.root, origin: source.origin };
 }
 

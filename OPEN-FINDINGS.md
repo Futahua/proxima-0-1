@@ -126,6 +126,24 @@ point regression runs as a **directory junction under a `.md` name**, which take
 code path (a path inside the vault that resolves elsewhere); the file-symlink case itself
 is unproven here. Nothing visual was checked.
 
+## Two more blockers, a layer further in (round 10)
+
+A second review of `1db8e55` closed the three earlier blockers and found two more. Both were
+real, both are fixed here, and both new regressions were run against `1db8e55` to prove they
+catch it — the four that must fail there do, with the old behaviour quoted below.
+
+| # | Blocker | What it actually was, on `1db8e55` | Fix, and the proof |
+| --- | --- | --- | --- |
+| 4 | **The settings file was read without being contained.** `.obsidian/plugins/proxima/data.json` decides which folders are read, but it was read with a bare `readFileSync` after an `existsSync`: a `data.json` that is really a link out of the vault was followed, and the vault could name its own sources from anywhere on the machine. | `existsSync` follows links, so a `data.json` that is a junction to an external file **is** "a settings file", and its contents were honoured. Against `1db8e55`: a settings file outside the vault, naming folders *inside* it, imported successfully — **`actual: 0, expected: 2`** — and one naming external folders followed it and failed on `No events folder at …\external-settings\events`, a folder **outside the vault**, instead of refusing the settings. | The settings path is canonicalized with `realpathSync.native`, required to be contained under the canonical root, and required to be a regular file, all **before** it is read. Outside → hard refusal that names the settings file, exit 2, no archive, no board mutation. Missing settings stay ordinary (the documented folder names stand) — the two cases are refused and reported differently, because in a log they must never look alike. |
+| 5 | **Two source records for one project id collapsed silently.** `projects/<id>/index.md` fed a Map that took the last write, so two records with different names became one row and the losing file was never mentioned again; two `folders[]` entries with one id did the same. | Against `1db8e55` a raw `vault.import` with `one/projects/<id>/index.md` ("First name") and `two/projects/<id>/index.md` ("Second name") answered **`"ok":true … "projects":{"created":1}`** with the stored row named **"Second name"** — the last write won, and "First name" was never mentioned. Two folders claiming one id were likewise accepted. | `readVaultSources` records a claim per id — one folder claim (where it is) and one record claim (what it is called) — and refuses a second folder claiming a different path or a second record whose stored fields differ, as `VAULT_ID_CONFLICT`, before the archive is written. The expected folder + record pairing is untouched, and identical duplicates stay consistent rather than becoming collisions (the same folder named twice, the same record twice). Two files claiming one *event* id remain refused, because an event stores the path it came from. |
+
+**Driven after the change, on the live service** (restarted again — same instance marker
+`inst_7f56a5706c7025a9`): the real vault re-imports as **271 events + 30 projects all
+identical, `headSeq` 206, no conflicts** — the expected folder + `index.md` pairing is
+recognised on real data and does not manufacture duplicates.
+
+
+
 ## Open — from the import round
 
 | # | Finding | Original | State here |

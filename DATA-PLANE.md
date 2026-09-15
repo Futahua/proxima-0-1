@@ -311,7 +311,7 @@ the path rather than pretending it opened something.
 ### Importing a vault
 
 `vault.import` takes the bytes of every source file and the list of project folders, and
-it is shaped by four rules:
+it is shaped by five rules:
 
 1. **The source is archived before anything is written.** One bundle in `backups/`, with
    a SHA-256 per file, written outside the transaction and before the first row — an
@@ -335,11 +335,20 @@ it is shaped by four rules:
 4. **Every collision is found before any of them is acted on.** The plan is decided up
    front, so a conflict cannot leave half an import on the board. Two source files in one
    payload claiming the same id are a conflict too.
+5. **One id, one source.** A project arrives as two kinds of claim: a folder, which says
+   *where* it is, and its own `index.md`, which says *what it is called*. One of each is the
+   expected pairing. A second record that differs, or a second folder claiming a different
+   path, is `VAULT_ID_CONFLICT` and the whole import refuses — the parser used to feed a Map
+   that took the last write, so two records for one id collapsed into one row and the losing
+   file was never mentioned again. Records that are identical, and the same folder named
+   twice, are consistent and say nothing new; they are not collisions. Two files claiming one
+   *event* id are always refused, because an event stores the path it came from and two paths
+   make that field a guess.
 
 Its effects are one `create` per record, so the whole import is attributed, revertible,
 and visible in the activity diff like any other change.
 
-Two consequences worth stating plainly, because they are refusals rather than conveniences:
+Three consequences worth stating plainly, because they are refusals rather than conveniences:
 
 - **A different vault folder is a different source.** Each project row stores the folder
   it links to, so importing the *same records* from a second copy of the vault refuses on
@@ -353,6 +362,15 @@ Two consequences worth stating plainly, because they are refusals rather than co
   the payload on its own terms as well — a file path that is absolute or contains `..`, or
   a folder path outside the declared root, is `VAULT_PATH_ESCAPE`. An import that reads
   outside the directory it was pointed at has broken the only promise it makes.
+- **The settings file is a source of sources, so it is contained too.**
+  `.obsidian/plugins/proxima/data.json` decides which folders are read; a `data.json` that
+  is really a link out of the vault would let the vault name its own sources from anywhere
+  on the machine, and the containment above would then be enforcing a rule the settings had
+  already walked around. It is canonicalized with `realpath` and it has to be a regular file
+  inside the vault. Settings that are *missing* are ordinary — the documented folder names
+  stand — but settings that resolve *outside* are a containment refusal that says so: "there
+  are no settings here" and "the settings came from somewhere else" must never look alike in
+  a log.
 
 ### The locked plan is the service's rule, not the cockpit's
 

@@ -421,8 +421,30 @@ async function main() {
       let projectsRel = '-Hide/Proxima/projects';
       const settingsPath = join(root, '.obsidian', 'plugins', 'proxima', 'data.json');
       if (existsSync(settingsPath)) {
+        // THE SETTINGS FILE DECIDES WHICH FOLDERS ARE READ, so it is not a detail. A
+        // data.json that is really a link out of the vault would let the vault name its
+        // own sources from anywhere on the machine — the containment above would then be
+        // enforcing a rule the settings had already walked around. It is canonicalized
+        // and measured against the same root as everything else, and it has to be a
+        // regular file that is really there.
+        //
+        // Settings that are MISSING are ordinary and the documented folder names stand.
+        // Settings that resolve OUTSIDE are refused, loudly and separately: "there are no
+        // settings here" and "the settings came from somewhere else" must never look the
+        // same in a log, and neither may be mistaken for the other.
+        let realSettings = null;
+        try { realSettings = realpathSync.native(settingsPath); }
+        catch { /* exists but will not resolve: the read below decides, as it always did */ }
+        if (realSettings !== null) {
+          if (!contained(realSettings)) escape('the plugin settings (' + settingsPath + ')', realSettings);
+          if (!statSync(realSettings).isFile()) {
+            console.error('Refused: the plugin settings (' + settingsPath + ') resolve to ' + realSettings + ',');
+            console.error('which is not a regular file. Nothing was read, nothing was sent.');
+            process.exit(2);
+          }
+        }
         try {
-          const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+          const settings = JSON.parse(readFileSync(realSettings || settingsPath, 'utf8'));
           if (typeof settings.eventsFolder === 'string' && settings.eventsFolder) eventsRel = settings.eventsFolder;
           if (typeof settings.projectsFolder === 'string' && settings.projectsFolder) projectsRel = settings.projectsFolder;
         } catch { /* unreadable settings: the documented folder names stand */ }
