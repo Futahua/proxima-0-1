@@ -419,7 +419,7 @@ const Store = (() => {
         count: Math.max(0, Math.min(365, Math.round(Number(raw.recurrence.count) || 0))),
         until: isRealDay(raw.recurrence.until) ? raw.recurrence.until : '',
         weekdays: Array.isArray(raw.recurrence.weekdays) ? raw.recurrence.weekdays.map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6).filter((day, index, all) => all.indexOf(day) === index).sort((a, b) => a - b) : [],
-        unit: ['days', 'weeks', 'months'].includes(raw.recurrence.unit) ? raw.recurrence.unit : 'days',
+        unit: raw.recurrence.frequency === 'daily' ? 'days' : raw.recurrence.frequency === 'weekly' ? 'weeks' : raw.recurrence.frequency === 'monthly' ? 'months' : ['days', 'weeks', 'months'].includes(raw.recurrence.unit) ? raw.recurrence.unit : 'days',
       }
       : { frequency: 'none', interval: 1, count: 0, until: '', weekdays: [], unit: 'days' };
     const exceptions = Array.isArray(raw.exceptions)
@@ -468,7 +468,7 @@ const Store = (() => {
       count: Math.max(0, Math.min(365, Math.round(Number(raw.count) || 0))),
       until: isRealDay(raw.until) ? raw.until : '',
       weekdays: Array.isArray(raw.weekdays) ? raw.weekdays.map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6).filter((day, index, all) => all.indexOf(day) === index).sort((a, b) => a - b) : [],
-      unit: ['days', 'weeks', 'months'].includes(raw.unit) ? raw.unit : 'days',
+      unit: frequency === 'daily' ? 'days' : frequency === 'weekly' ? 'weeks' : frequency === 'monthly' ? 'months' : ['days', 'weeks', 'months'].includes(raw.unit) ? raw.unit : 'days',
     };
   }
 
