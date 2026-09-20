@@ -58,6 +58,19 @@ const ProjectCanvas = (() => {
     requestAnimationFrame(() => { renderQueued = false; if (root && !root.hidden) render(); });
   }
 
+  function syncSelectionUi() {
+    if (!root) return;
+    $$('#canvasWorld .canvas-node').forEach((node) => node.classList.toggle('selected', selected.has(node.dataset.taskId)));
+    $('#canvasSelection').textContent = selected.size ? selected.size + ' selected' : 'Drag cards to arrange';
+  }
+
+  function cancelGestures() {
+    activeDrag = null;
+    activeMarquee = null;
+    activePan = null;
+    if (root) $('#canvasMarquee').hidden = true;
+  }
+
   function nodeFor(task, placement) {
     const node = document.createElement('article');
     node.className = 'canvas-node canvas-node-' + task.status;
@@ -126,7 +139,7 @@ const ProjectCanvas = (() => {
   function toggleSelection(taskId, additive) {
     if (!additive) selected.clear();
     if (additive && selected.has(taskId)) selected.delete(taskId); else selected.add(taskId);
-    scheduleRender();
+    syncSelectionUi();
   }
 
   function viewportPoint(event) {
@@ -148,7 +161,7 @@ const ProjectCanvas = (() => {
     tasks().forEach((task, index) => {
       if (selected.has(task.id) || task.id === taskId) positions.set(task.id, placementFor(task, index, state));
     });
-    activeDrag = { pointerId: event.pointerId, start: viewportPoint(event), positions, moved: false };
+    activeDrag = { projectId, pointerId: event.pointerId, start: viewportPoint(event), positions, moved: false };
     event.currentTarget.setPointerCapture(event.pointerId);
     event.currentTarget.classList.add('dragging');
     event.currentTarget.addEventListener('pointermove', moveNodeDrag);
@@ -156,7 +169,7 @@ const ProjectCanvas = (() => {
   }
 
   function moveNodeDrag(event) {
-    if (!activeDrag) return;
+    if (!activeDrag || activeDrag.projectId !== projectId) { cancelGestures(); return; }
     const now = viewportPoint(event);
     const dx = now.x - activeDrag.start.x;
     const dy = now.y - activeDrag.start.y;
@@ -170,7 +183,7 @@ const ProjectCanvas = (() => {
   async function endNodeDrag(event) {
     const drag = activeDrag;
     activeDrag = null;
-    if (!drag) return;
+    if (!drag || drag.projectId !== projectId) return;
     const now = viewportPoint(event);
     const dx = now.x - drag.start.x;
     const dy = now.y - drag.start.y;
@@ -178,7 +191,7 @@ const ProjectCanvas = (() => {
     event.currentTarget.removeEventListener('pointermove', moveNodeDrag);
     if (!drag.moved) { scheduleRender(); return; }
     for (const [taskId, position] of drag.positions) {
-      await Store.command({ type: 'project-canvas.task-place', payload: { projectId, taskId, x: Math.round(position.x + dx), y: Math.round(position.y + dy) }, commandId: Store.newCommandId() });
+      await Store.command({ type: 'project-canvas.task-place', payload: { projectId, taskId, parentId: position.parentId, x: Math.round(position.x + dx), y: Math.round(position.y + dy) }, commandId: Store.newCommandId() });
     }
     render();
   }
@@ -191,17 +204,17 @@ const ProjectCanvas = (() => {
     const viewport = $('#canvasViewport');
     const rect = viewport.getBoundingClientRect();
     if (event.shiftKey) {
-      activeMarquee = { startX: event.clientX - rect.left, startY: event.clientY - rect.top, rect };
+      activeMarquee = { projectId, startX: event.clientX - rect.left, startY: event.clientY - rect.top, rect };
       $('#canvasMarquee').hidden = false;
       updateMarquee(event);
     } else {
-      activePan = { startX: event.clientX, startY: event.clientY, x: Number(state.view?.x) || 0, y: Number(state.view?.y) || 0 };
+      activePan = { projectId, startX: event.clientX, startY: event.clientY, x: Number(state.view?.x) || 0, y: Number(state.view?.y) || 0 };
     }
     viewport.setPointerCapture(event.pointerId);
   }
 
   function updateMarquee(event) {
-    if (!activeMarquee) return;
+    if (!activeMarquee || activeMarquee.projectId !== projectId) { cancelGestures(); return; }
     const box = $('#canvasViewport').getBoundingClientRect();
     const x = event.clientX - box.left;
     const y = event.clientY - box.top;
@@ -218,14 +231,14 @@ const ProjectCanvas = (() => {
       if (r.left < range.right && r.right > range.left && r.top < range.bottom && r.bottom > range.top) selected.add(node.dataset.taskId);
       node.classList.toggle('selected', selected.has(node.dataset.taskId));
     });
-    $('#canvasSelection').textContent = selected.size ? selected.size + ' selected' : 'Drag cards to arrange';
+    syncSelectionUi();
   }
 
   async function endViewportGesture(event) {
-    if (activeMarquee) {
+    if (activeMarquee && activeMarquee.projectId === projectId) {
       activeMarquee = null; $('#canvasMarquee').hidden = true; return;
     }
-    if (!activePan) return;
+    if (!activePan || activePan.projectId !== projectId) { cancelGestures(); return; }
     const pan = activePan; activePan = null;
     const patch = { x: Math.round(pan.x + event.clientX - pan.startX), y: Math.round(pan.y + event.clientY - pan.startY) };
     await Store.command({ type: 'project-canvas.view.patch', payload: { projectId, patch }, commandId: Store.newCommandId() });
@@ -258,6 +271,7 @@ const ProjectCanvas = (() => {
   }
 
   function mount(nextProject) {
+    if (projectId && nextProject?.id && projectId !== nextProject.id) cancelGestures();
     project = nextProject;
     projectId = nextProject?.id || '';
     root = $('#projectCanvas');
@@ -268,7 +282,7 @@ const ProjectCanvas = (() => {
   }
 
   function unmount() {
-    activeDrag = null; activeMarquee = null; activePan = null; selected.clear();
+    cancelGestures(); selected.clear();
     if (root) root.hidden = true;
     project = null; projectId = '';
   }

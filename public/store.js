@@ -1219,16 +1219,19 @@ const Store = (() => {
       const project = findProject(payload.projectId);
       const task = findTask(payload.taskId);
       if (!project) return refuse('PROJECT_NOT_FOUND', { projectId: payload.projectId });
+      if (project.projectType !== 'task') return refuse('PROJECT_TYPE_INVALID', {});
       if (!task || task.project !== project.id) return refuse('ENTITY_NOT_FOUND', { kind: 'task', id: payload.taskId });
       if (!Number.isFinite(Number(payload.x)) || !Number.isFinite(Number(payload.y))) return refuse('PAYLOAD_INVALID', { type: 'project-canvas.task-place', missing: ['x and y'] });
-      const parentId = payload.parentId || null;
+      const hasParent = Object.prototype.hasOwnProperty.call(payload, 'parentId');
+      const requestedParent = hasParent ? (payload.parentId || null) : undefined;
       const canvas = findProjectCanvas(project.id);
-      if (parentId && (!canvas || !canvas.groups.some((group) => group.id === parentId))) return refuse('ENTITY_NOT_FOUND', { kind: 'canvas group', id: parentId });
+      if (requestedParent && (!canvas || !canvas.groups.some((group) => group.id === requestedParent))) return refuse('ENTITY_NOT_FOUND', { kind: 'canvas group', id: requestedParent });
       return { ok: true, apply: () => {
         const target = canvas || { projectId: project.id, schemaVersion: 1, rev: 1, groups: [], placements: [], view: { x: 0, y: 0, scale: 1, expandedGroupIds: [] } };
         if (!canvas) state.projectCanvases.push(target);
         const current = target.placements.find((placement) => placement.taskId === task.id);
         const before = current ? { ...current } : null;
+        const parentId = hasParent ? requestedParent : (current ? current.parentId : null);
         const next = { taskId: task.id, parentId: parentId, order: Number.isFinite(Number(payload.order)) ? Math.max(0, Math.round(Number(payload.order))) : (current ? current.order : target.placements.length), x: Number(payload.x), y: Number(payload.y) };
         if (current) Object.assign(current, next); else target.placements.push(next);
         return { value: { ...next }, entity: { kind: 'project-canvas', id: project.id }, before, after: { ...next }, changed: !before || JSON.stringify(before) !== JSON.stringify(next) };
@@ -1238,6 +1241,7 @@ const Store = (() => {
     'project-canvas.group.create'(payload, ctx) {
       const project = findProject(payload.projectId);
       if (!project) return refuse('PROJECT_NOT_FOUND', { projectId: payload.projectId });
+      if (project.projectType !== 'task') return refuse('PROJECT_TYPE_INVALID', {});
       if (typeof payload.name !== 'string' || !payload.name.trim()) return refuse('NAME_REQUIRED', {});
       const canvas = findProjectCanvas(project.id);
       return { ok: true, apply: () => {
@@ -1254,6 +1258,7 @@ const Store = (() => {
       const canvas = project && findProjectCanvas(project.id);
       const group = canvas && canvas.groups.find((candidate) => candidate.id === payload.groupId);
       if (!project) return refuse('PROJECT_NOT_FOUND', { projectId: payload.projectId });
+      if (project.projectType !== 'task') return refuse('PROJECT_TYPE_INVALID', {});
       if (!group || !canvas) return refuse('ENTITY_NOT_FOUND', { kind: 'canvas group', id: payload.groupId });
       return { ok: true, apply: () => {
         canvas.groups = canvas.groups.filter((candidate) => candidate.id !== group.id);

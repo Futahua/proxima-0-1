@@ -2593,7 +2593,10 @@
    */
   function currentSurface() {
     const r = route();
-    if (r.name === 'project') return Store.project(r.id) ? 'project' : 'missing';
+    if (r.name === 'project') {
+      const project = Store.project(r.id);
+      return project && project.projectType === 'task' ? 'project' : 'missing';
+    }
     return r.name;
   }
 
