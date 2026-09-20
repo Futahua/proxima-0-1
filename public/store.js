@@ -295,6 +295,7 @@ const Store = (() => {
       });
 
     const knownProjects = new Set(projects.map((p) => p.id));
+    const knownScheduleProjects = new Set(projects.filter((p) => p.projectType === 'schedule').map((p) => p.id));
     const tasks = (Array.isArray(parsed.tasks) ? parsed.tasks : [])
       .map((raw) => normaliseTask(raw, knownProjects, notes))
       .filter((task) => {
@@ -305,7 +306,7 @@ const Store = (() => {
 
     const events = (Array.isArray(parsed.events) ? parsed.events : []).filter((e) => e && typeof e === 'object');
     const scheduleEvents = (Array.isArray(parsed.scheduleEvents) ? parsed.scheduleEvents : [])
-      .map((raw) => normaliseScheduleEvent(raw, knownProjects))
+      .map((raw) => normaliseScheduleEvent(raw, knownScheduleProjects))
       .filter(Boolean);
     const seqFromEvents = events.reduce((max, e) => (Number.isFinite(Number(e.seq)) ? Math.max(max, Number(e.seq)) : max), 0);
     const commands = parsed.commands && typeof parsed.commands === 'object' && !Array.isArray(parsed.commands)
@@ -405,7 +406,7 @@ const Store = (() => {
     };
   }
 
-  function normaliseScheduleEvent(raw, knownProjects) {
+  function normaliseScheduleEvent(raw, knownScheduleProjects) {
     if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || !raw.id) return null;
     if (!validInstant(raw.start) || !validInstant(raw.deadline)) return null;
     const start = new Date(raw.start);
@@ -413,12 +414,14 @@ const Store = (() => {
     if (deadline.getTime() <= start.getTime()) return null;
     const recurrence = raw.recurrence && typeof raw.recurrence === 'object'
       ? {
-        frequency: raw.recurrence.frequency === 'daily' || raw.recurrence.frequency === 'weekly' ? raw.recurrence.frequency : 'none',
+        frequency: ['daily', 'weekly', 'monthly', 'custom'].includes(raw.recurrence.frequency) ? raw.recurrence.frequency : 'none',
         interval: Math.max(1, Math.min(52, Math.round(Number(raw.recurrence.interval) || 1))),
         count: Math.max(0, Math.min(365, Math.round(Number(raw.recurrence.count) || 0))),
         until: isRealDay(raw.recurrence.until) ? raw.recurrence.until : '',
+        weekdays: Array.isArray(raw.recurrence.weekdays) ? raw.recurrence.weekdays.map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6).filter((day, index, all) => all.indexOf(day) === index).sort((a, b) => a - b) : [],
+        unit: ['days', 'weeks', 'months'].includes(raw.recurrence.unit) ? raw.recurrence.unit : 'days',
       }
-      : { frequency: 'none', interval: 1, count: 0, until: '' };
+      : { frequency: 'none', interval: 1, count: 0, until: '', weekdays: [], unit: 'days' };
     const exceptions = Array.isArray(raw.exceptions)
       ? raw.exceptions.map(normaliseScheduleException).filter(Boolean)
       : [];
@@ -427,7 +430,7 @@ const Store = (() => {
       id: raw.id,
       name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim().slice(0, 200) : 'Untitled event',
       note: typeof raw.note === 'string' ? raw.note.slice(0, 1000) : '',
-      project: knownProjects.has(raw.project) ? raw.project : '',
+      project: knownScheduleProjects.has(raw.project) ? raw.project : '',
       start: start.toISOString(),
       deadline: deadline.toISOString(),
       recurrence: recurrence,
@@ -456,14 +459,16 @@ const Store = (() => {
   }
 
   function normaliseRecurrence(raw) {
-    if (!raw || typeof raw !== 'object') return { frequency: 'none', interval: 1, count: 0, until: '' };
-    const frequency = raw.frequency === 'daily' || raw.frequency === 'weekly' ? raw.frequency : raw.frequency === 'none' ? 'none' : null;
+    if (!raw || typeof raw !== 'object') return { frequency: 'none', interval: 1, count: 0, until: '', weekdays: [], unit: 'days' };
+    const frequency = ['daily', 'weekly', 'monthly', 'custom'].includes(raw.frequency) ? raw.frequency : raw.frequency === 'none' ? 'none' : null;
     if (!frequency) return null;
     return {
       frequency: frequency,
       interval: Math.max(1, Math.min(52, Math.round(Number(raw.interval) || 1))),
       count: Math.max(0, Math.min(365, Math.round(Number(raw.count) || 0))),
       until: isRealDay(raw.until) ? raw.until : '',
+      weekdays: Array.isArray(raw.weekdays) ? raw.weekdays.map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6).filter((day, index, all) => all.indexOf(day) === index).sort((a, b) => a - b) : [],
+      unit: ['days', 'weeks', 'months'].includes(raw.unit) ? raw.unit : 'days',
     };
   }
 
@@ -1137,7 +1142,7 @@ const Store = (() => {
       if (!validInstant(payload.deadline)) return refuse('EVENT_TIME_INVALID', { field: 'deadline', value: payload.deadline });
       if (new Date(payload.deadline).getTime() <= new Date(payload.start).getTime()) return refuse('EVENT_END_BEFORE_START', {});
       if (payload.project && !findProject(payload.project)) return refuse('PROJECT_NOT_FOUND', { projectId: payload.project });
-      if (payload.project && findProject(payload.project).projectType !== 'schedule') return refuse('PROJECT_TYPE_INVALID', {});
+      if (payload.project && (findProject(payload.project).projectType !== 'schedule' || findProject(payload.project).archivedAt)) return refuse('PROJECT_TYPE_INVALID', {});
       const recurrence = normaliseRecurrence(payload.recurrence);
       if (!recurrence) return refuse('RECURRENCE_INVALID', {});
       const item = {
@@ -1170,7 +1175,7 @@ const Store = (() => {
       if ('id' in patch || 'createdAt' in patch) return refuse('FIELD_NOT_PATCHABLE', { field: 'id/createdAt', use: 'nothing — provenance is immutable' });
       if ('name' in patch && (typeof patch.name !== 'string' || !patch.name.trim())) return refuse('NAME_REQUIRED', {});
       if ('project' in patch && patch.project && !findProject(patch.project)) return refuse('PROJECT_NOT_FOUND', { projectId: patch.project });
-      if ('project' in patch && patch.project && findProject(patch.project).projectType !== 'schedule') return refuse('PROJECT_TYPE_INVALID', {});
+      if ('project' in patch && patch.project && (findProject(patch.project).projectType !== 'schedule' || findProject(patch.project).archivedAt)) return refuse('PROJECT_TYPE_INVALID', {});
       if ('recurrence' in patch && !normaliseRecurrence(patch.recurrence)) return refuse('RECURRENCE_INVALID', {});
       const next = {};
       if ('name' in patch) next.name = patch.name.trim().slice(0, 200);
