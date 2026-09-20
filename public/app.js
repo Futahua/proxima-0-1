@@ -938,6 +938,11 @@
     taskDialog.showModal();
   }
 
+  // The project canvas is a separate controller, but opening a node must land in
+  // the same canonical task dialog as the board. This is a callback boundary, not
+  // a second task editor.
+  window.__proximaOpenTask = openTask;
+
   /**
    * The dialog's one error line. It carries the cockpit's own prevalidation AND
    * anything the store refuses, because from the reader's seat those are the same
@@ -2602,9 +2607,10 @@
   const navProject = $('#navProject');
 
   function setRouteVisibility(surface, project) {
-    const board = surface === 'daily' || surface === 'project';
+    const board = surface === 'daily';
     ['#boardHead', '#runbar', '#columns', '#timekeeping']
       .forEach((sel) => { $(sel).hidden = !board; });
+    $('#projectCanvas').hidden = surface !== 'project';
     $('#projectsHub').hidden = surface !== 'hub';
     $('#schedule').hidden = surface !== 'schedule';
     $('#routeMissing').hidden = surface !== 'missing';
@@ -2682,9 +2688,9 @@
    * surprise.
    */
   function renderProject(project) {
-    renderBoardHead(project);
-    render();
-    renderTimekeeping();
+    if (!project) return;
+    $('#canvasBreadcrumb').textContent = project.name;
+    ProjectCanvas.mount(project);
   }
 
   function scheduleDay(date) {
@@ -3078,6 +3084,7 @@
    */
   function renderRoute() {
     const surface = currentSurface();
+    if (surface !== 'project') ProjectCanvas.unmount();
     if (surface === 'daily') renderDaily();
     else if (surface === 'project') renderProject(Store.project(route().id));
     else if (surface === 'hub') renderHub();
@@ -3115,7 +3122,7 @@
       // otherwise settle the numbers on a surface that is no longer mounted.
       if (!boardMounted()) return;
       runningHeight = 0;
-      paint();
+      if (surface === 'daily') paint();
     });
   }
 

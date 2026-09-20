@@ -184,6 +184,10 @@ const Store = (() => {
     // Proxima-owned calendar records. These are deliberately separate from the
     // append-only command event log below and are never imported from a vault.
     scheduleEvents: [],
+    // Project-canvas layout records. A canvas stores only references to canonical
+    // Proxima tasks plus view/layout facts; it never copies task content or reads
+    // the As you Go store.
+    projectCanvases: [],
     // Append-only record of what changed, and the counter that numbers it.
     events: [],
     seq: 0,
@@ -308,6 +312,9 @@ const Store = (() => {
     const scheduleEvents = (Array.isArray(parsed.scheduleEvents) ? parsed.scheduleEvents : [])
       .map((raw) => normaliseScheduleEvent(raw, knownScheduleProjects))
       .filter(Boolean);
+    const projectCanvases = (Array.isArray(parsed.projectCanvases) ? parsed.projectCanvases : [])
+      .map((raw) => normaliseProjectCanvas(raw, knownProjects, tasks))
+      .filter(Boolean);
     const seqFromEvents = events.reduce((max, e) => (Number.isFinite(Number(e.seq)) ? Math.max(max, Number(e.seq)) : max), 0);
     const commands = parsed.commands && typeof parsed.commands === 'object' && !Array.isArray(parsed.commands)
       ? parsed.commands
@@ -317,7 +324,7 @@ const Store = (() => {
     // silently stripped of a section this build does not know about yet. `views` is
     // the one exception: it moved to the cockpit, and is adopted there rather than
     // left behind here to be read as board data.
-    const known = new Set(['version', 'projects', 'tasks', 'run', 'scheduleEvents', 'events', 'seq', 'commands']);
+    const known = new Set(['version', 'projects', 'tasks', 'run', 'scheduleEvents', 'projectCanvases', 'events', 'seq', 'commands']);
     const extras = {};
     Object.keys(parsed).forEach((key) => {
       if (!known.has(key) && key !== 'views') extras[key] = parsed[key];
@@ -331,6 +338,7 @@ const Store = (() => {
         tasks: tasks,
         run: parsed.run && typeof parsed.run === 'object' ? parsed.run : null,
         scheduleEvents: scheduleEvents,
+        projectCanvases: projectCanvases,
         events: events,
         seq: Number.isFinite(Number(parsed.seq)) ? Math.max(Number(parsed.seq), seqFromEvents) : seqFromEvents,
         commands: commands,
@@ -403,6 +411,43 @@ const Store = (() => {
       order: Number.isFinite(Number(raw.order)) ? Math.round(Number(raw.order)) : 0,
       createdAt: typeof raw.createdAt === 'string' && raw.createdAt ? raw.createdAt : new Date().toISOString(),
       rev: positiveInt(raw.rev, 1),
+    };
+  }
+
+  function normaliseProjectCanvas(raw, knownProjects, tasks) {
+    if (!raw || typeof raw !== 'object' || typeof raw.projectId !== 'string' || !knownProjects.has(raw.projectId)) return null;
+    const taskIds = new Set(tasks.filter((task) => task.project === raw.projectId).map((task) => task.id));
+    const groups = Array.isArray(raw.groups)
+      ? raw.groups.filter((group) => group && typeof group.id === 'string').map((group, index) => ({
+        id: group.id,
+        parentId: typeof group.parentId === 'string' ? group.parentId : null,
+        name: typeof group.name === 'string' && group.name.trim() ? group.name.trim().slice(0, 120) : 'Untitled group',
+        order: Number.isFinite(Number(group.order)) ? Math.max(0, Math.round(Number(group.order))) : index,
+      }))
+      : [];
+    const groupIds = new Set(groups.map((group) => group.id));
+    const placements = Array.isArray(raw.placements)
+      ? raw.placements.filter((placement) => placement && taskIds.has(placement.taskId)).map((placement, index) => ({
+        taskId: placement.taskId,
+        parentId: typeof placement.parentId === 'string' && groupIds.has(placement.parentId) ? placement.parentId : null,
+        order: Number.isFinite(Number(placement.order)) ? Math.max(0, Math.round(Number(placement.order))) : index,
+        x: Number.isFinite(Number(placement.x)) ? Number(placement.x) : 0,
+        y: Number.isFinite(Number(placement.y)) ? Number(placement.y) : 0,
+      }))
+      : [];
+    const view = raw.view && typeof raw.view === 'object' ? raw.view : {};
+    return {
+      projectId: raw.projectId,
+      schemaVersion: 1,
+      rev: positiveInt(raw.rev, 1),
+      groups,
+      placements,
+      view: {
+        x: Number.isFinite(Number(view.x)) ? Number(view.x) : 0,
+        y: Number.isFinite(Number(view.y)) ? Number(view.y) : 0,
+        scale: Number.isFinite(Number(view.scale)) ? Math.min(1.8, Math.max(0.55, Number(view.scale))) : 1,
+        expandedGroupIds: Array.isArray(view.expandedGroupIds) ? view.expandedGroupIds.filter((id) => groupIds.has(id)) : [],
+      },
     };
   }
 
@@ -671,6 +716,7 @@ const Store = (() => {
 
   const findTask = (taskId) => state.tasks.find((t) => t.id === taskId) || null;
   const findProject = (projectId) => state.projects.find((p) => p.id === projectId) || null;
+  const findProjectCanvas = (projectId) => state.projectCanvases.find((canvas) => canvas.projectId === projectId) || null;
   const findScheduleEvent = (eventId) => state.scheduleEvents.find((e) => e.id === eventId) || null;
   const findScheduleException = (event, key) => (event && Array.isArray(event.exceptions) ? event.exceptions.find((exception) => exception.key === key) : null) || null;
 
@@ -680,6 +726,7 @@ const Store = (() => {
     if (kind === 'project') { const p = findProject(targetId); return p ? p.rev : null; }
     if (kind === 'run') return state.run ? positiveInt(state.run.rev, 1) : null;
     if (kind === 'schedule-event') { const e = findScheduleEvent(targetId); return e ? e.rev : null; }
+    if (kind === 'project-canvas') { const canvas = findProjectCanvas(targetId); return canvas ? canvas.rev : 1; }
     return null;
   }
 
@@ -843,7 +890,13 @@ const Store = (() => {
       return {
         ok: true,
         apply: () => {
+          const previousProject = task.project;
           Object.assign(task, next);
+          if ('project' in next && previousProject !== task.project) {
+            state.projectCanvases.forEach((canvas) => {
+              if (canvas.projectId === previousProject) canvas.placements = canvas.placements.filter((placement) => placement.taskId !== task.id);
+            });
+          }
           return { value: { ...task }, entity: { kind: 'task', id: task.id }, before: before, after: after, changed: true };
         },
       };
@@ -961,6 +1014,9 @@ const Store = (() => {
         ok: true,
         apply: () => {
           state.tasks = state.tasks.filter((t) => t.id !== task.id);
+          state.projectCanvases.forEach((canvas) => {
+            canvas.placements = canvas.placements.filter((placement) => placement.taskId !== task.id);
+          });
           // A run's frozen plan references tasks, not projects or the board, so it
           // is untouched here: the run ends only when its members stop being
           // running, not when a record disappears. See endRunIfEmpty in the app.
@@ -1045,6 +1101,7 @@ const Store = (() => {
         apply: () => {
           state.tasks.forEach((t) => { if (t.project === project.id) { t.project = ''; t.rev = positiveInt(t.rev, 1) + 1; } });
           state.scheduleEvents = state.scheduleEvents.filter((event) => event.project !== project.id);
+          state.projectCanvases = state.projectCanvases.filter((canvas) => canvas.projectId !== project.id);
           state.projects = state.projects.filter((p) => p.id !== project.id);
           return {
             value: { orphaned: orphans.length, orphanedTaskIds: orphans, deletedScheduleEvents: scheduleEvents.length, deletedScheduleEventIds: scheduleEvents },
@@ -1133,6 +1190,78 @@ const Store = (() => {
           return { value: { ended: snapshot }, entity: { kind: 'run', id: snapshot.lockedAt }, before: snapshot, after: null, changed: true };
         },
       };
+    },
+
+    'project-canvas.view.patch'(payload, ctx) {
+      const project = findProject(payload.projectId);
+      if (!project) return refuse('PROJECT_NOT_FOUND', { projectId: payload.projectId });
+      if (project.projectType !== 'task') return refuse('PROJECT_TYPE_INVALID', {});
+      const patch = payload.patch && typeof payload.patch === 'object' ? payload.patch : null;
+      if (!patch || !Object.keys(patch).length) return refuse('PAYLOAD_INVALID', { type: 'project-canvas.view.patch', missing: ['patch'] });
+      const allowed = ['x', 'y', 'scale', 'expandedGroupIds'];
+      if (Object.keys(patch).some((key) => !allowed.includes(key))) return refuse('PAYLOAD_INVALID', { type: 'project-canvas.view.patch', missing: ['known view fields'] });
+      if ('x' in patch && !Number.isFinite(Number(patch.x))) return refuse('PAYLOAD_INVALID', { type: 'project-canvas.view.patch', missing: ['x as a number'] });
+      if ('y' in patch && !Number.isFinite(Number(patch.y))) return refuse('PAYLOAD_INVALID', { type: 'project-canvas.view.patch', missing: ['y as a number'] });
+      if ('scale' in patch && (!Number.isFinite(Number(patch.scale)) || Number(patch.scale) < 0.55 || Number(patch.scale) > 1.8)) return refuse('PAYLOAD_INVALID', { type: 'project-canvas.view.patch', missing: ['scale between 0.55 and 1.8'] });
+      const canvas = findProjectCanvas(project.id);
+      return { ok: true, apply: () => {
+        const target = canvas || { projectId: project.id, schemaVersion: 1, rev: 1, groups: [], placements: [], view: { x: 0, y: 0, scale: 1, expandedGroupIds: [] } };
+        if (!canvas) state.projectCanvases.push(target);
+        const before = { ...target.view };
+        Object.assign(target.view, patch);
+        if (Array.isArray(target.view.expandedGroupIds)) target.view.expandedGroupIds = target.view.expandedGroupIds.filter((id) => target.groups.some((group) => group.id === id));
+        const changed = JSON.stringify(before) !== JSON.stringify(target.view);
+        return { value: { ...target, view: { ...target.view } }, entity: { kind: 'project-canvas', id: project.id }, before: before, after: { ...target.view }, changed };
+      } };
+    },
+
+    'project-canvas.task-place'(payload, ctx) {
+      const project = findProject(payload.projectId);
+      const task = findTask(payload.taskId);
+      if (!project) return refuse('PROJECT_NOT_FOUND', { projectId: payload.projectId });
+      if (!task || task.project !== project.id) return refuse('ENTITY_NOT_FOUND', { kind: 'task', id: payload.taskId });
+      if (!Number.isFinite(Number(payload.x)) || !Number.isFinite(Number(payload.y))) return refuse('PAYLOAD_INVALID', { type: 'project-canvas.task-place', missing: ['x and y'] });
+      const parentId = payload.parentId || null;
+      const canvas = findProjectCanvas(project.id);
+      if (parentId && (!canvas || !canvas.groups.some((group) => group.id === parentId))) return refuse('ENTITY_NOT_FOUND', { kind: 'canvas group', id: parentId });
+      return { ok: true, apply: () => {
+        const target = canvas || { projectId: project.id, schemaVersion: 1, rev: 1, groups: [], placements: [], view: { x: 0, y: 0, scale: 1, expandedGroupIds: [] } };
+        if (!canvas) state.projectCanvases.push(target);
+        const current = target.placements.find((placement) => placement.taskId === task.id);
+        const before = current ? { ...current } : null;
+        const next = { taskId: task.id, parentId: parentId, order: Number.isFinite(Number(payload.order)) ? Math.max(0, Math.round(Number(payload.order))) : (current ? current.order : target.placements.length), x: Number(payload.x), y: Number(payload.y) };
+        if (current) Object.assign(current, next); else target.placements.push(next);
+        return { value: { ...next }, entity: { kind: 'project-canvas', id: project.id }, before, after: { ...next }, changed: !before || JSON.stringify(before) !== JSON.stringify(next) };
+      } };
+    },
+
+    'project-canvas.group.create'(payload, ctx) {
+      const project = findProject(payload.projectId);
+      if (!project) return refuse('PROJECT_NOT_FOUND', { projectId: payload.projectId });
+      if (typeof payload.name !== 'string' || !payload.name.trim()) return refuse('NAME_REQUIRED', {});
+      const canvas = findProjectCanvas(project.id);
+      return { ok: true, apply: () => {
+        const target = canvas || { projectId: project.id, schemaVersion: 1, rev: 1, groups: [], placements: [], view: { x: 0, y: 0, scale: 1, expandedGroupIds: [] } };
+        if (!canvas) state.projectCanvases.push(target);
+        const group = { id: id('cgrp'), parentId: null, name: payload.name.trim().slice(0, 120), order: target.groups.length };
+        target.groups.push(group);
+        return { value: { ...group }, entity: { kind: 'project-canvas', id: project.id }, before: null, after: { ...group }, changed: true };
+      } };
+    },
+
+    'project-canvas.group.delete'(payload, ctx) {
+      const project = findProject(payload.projectId);
+      const canvas = project && findProjectCanvas(project.id);
+      const group = canvas && canvas.groups.find((candidate) => candidate.id === payload.groupId);
+      if (!project) return refuse('PROJECT_NOT_FOUND', { projectId: payload.projectId });
+      if (!group || !canvas) return refuse('ENTITY_NOT_FOUND', { kind: 'canvas group', id: payload.groupId });
+      return { ok: true, apply: () => {
+        canvas.groups = canvas.groups.filter((candidate) => candidate.id !== group.id);
+        canvas.groups.forEach((candidate) => { if (candidate.parentId === group.id) candidate.parentId = null; });
+        canvas.placements.forEach((placement) => { if (placement.parentId === group.id) placement.parentId = null; });
+        canvas.view.expandedGroupIds = canvas.view.expandedGroupIds.filter((id) => id !== group.id);
+        return { value: { id: group.id }, entity: { kind: 'project-canvas', id: project.id }, before: { ...group }, after: null, changed: true };
+      } };
     },
 
     /** Proxima-owned Schedule records. They never read from the task or vault data. */
@@ -1363,6 +1492,9 @@ const Store = (() => {
         } else if (entity.kind === 'schedule-event') {
           const scheduleEvent = findScheduleEvent(entity.id);
           if (scheduleEvent) scheduleEvent.rev = positiveInt(scheduleEvent.rev, 1) + 1;
+        } else if (entity.kind === 'project-canvas') {
+          const canvas = findProjectCanvas(entity.id);
+          if (canvas) canvas.rev = positiveInt(canvas.rev, 1) + 1;
         }
       }
       const rev = revisionOf(entity.kind, entity.id);
@@ -1428,6 +1560,11 @@ const Store = (() => {
     projects: () => state.projects.slice(),
 
     project: (projectId) => state.projects.find((p) => p.id === projectId) ?? null,
+
+    projectCanvas: (projectId) => {
+      const canvas = findProjectCanvas(projectId);
+      return canvas ? structuredClone(canvas) : null;
+    },
 
     tasks: () => state.tasks.slice(),
 
