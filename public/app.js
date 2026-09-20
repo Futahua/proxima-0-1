@@ -37,8 +37,14 @@
 
   let editingId = null;
   let ticker = null;
+  const scheduleViewModes = new Set(['day', 'four-day', 'week', 'month', 'year', 'agenda']);
+  const scheduleViewKey = 'proxima.schedule.view.v1';
   let scheduleMode = 'month';
   let scheduleCursor = new Date();
+  try {
+    const savedScheduleView = JSON.parse(localStorage.getItem(scheduleViewKey) || 'null');
+    if (savedScheduleView && scheduleViewModes.has(savedScheduleView.mode)) scheduleMode = savedScheduleView.mode;
+  } catch { /* a missing or unreadable view preference falls back to Month today */ }
   let editingEventId = null;
   let editingOccurrenceKey = '';
   let editingOccurrence = null;
@@ -2685,6 +2691,10 @@
     return new Date(date.getFullYear(), date.getMonth(), date.getDate());
   }
 
+  function rememberScheduleView() {
+    try { localStorage.setItem(scheduleViewKey, JSON.stringify({ mode: scheduleMode })); } catch { /* view persistence is best effort and never blocks the schedule */ }
+  }
+
   function schedulePeriod() {
     const cursor = scheduleDay(scheduleCursor);
     if (scheduleMode === 'day') return { start: cursor, end: new Date(cursor.getTime() + DAY_MS), label: cursor.toLocaleDateString(undefined, { dateStyle: 'full' }) };
@@ -3046,6 +3056,7 @@
   }
 
   function renderSchedule() {
+    rememberScheduleView();
     const range = schedulePeriod(); $('#scheduleRange').textContent = range.label;
     const scheduleProject = route().id ? Store.project(route().id) : null;
     $('#schedule').querySelector('h1').textContent = scheduleProject ? scheduleProject.name : 'Schedule';
