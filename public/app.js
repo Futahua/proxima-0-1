@@ -24,6 +24,8 @@
   const projectDialog = $('#projectDialog');
   const projectForm = $('#projectForm');
   const confirmDialog = $('#confirmDialog');
+  const eventDialog = $('#eventDialog');
+  const eventForm = $('#eventForm');
 
   /** Floor height for one running card, and the baseline horizon of the board. */
   const MIN_CARD_HEIGHT = 125;
@@ -35,6 +37,11 @@
 
   let editingId = null;
   let ticker = null;
+  let scheduleMode = 'month';
+  let scheduleCursor = new Date();
+  let editingEventId = null;
+  let createEventCommandId = null;
+  let hubKind = 'task';
 
   const pad = (n) => String(n).padStart(2, '0');
   const toLocalInput = (date) =>
@@ -1061,7 +1068,7 @@
       projectForm.elements.name.focus();
       return;
     }
-    const result = await send('project.create', { name: name, description: projectForm.elements.description.value });
+    const result = await send('project.create', { name: name, description: projectForm.elements.description.value, projectType: projectForm.elements.projectType.value });
     if (!result.ok) {
       // The dialog stays open with the store's refusal in it, rather than closing
       // over a project that was never created.
@@ -1085,6 +1092,50 @@
     $('#projectError').hidden = true;
   });
 
+  eventForm.elements.start.addEventListener('change', () => {
+    const start = fromLocalInput(eventForm.elements.start.value); const end = fromLocalInput(eventForm.elements.deadline.value);
+    setEventError(start && end && end <= start ? 'An event must end after it starts.' : '');
+  });
+  eventForm.elements.deadline.addEventListener('change', () => eventForm.elements.start.dispatchEvent(new Event('change')));
+
+  eventForm.addEventListener('submit', async (event) => {
+    const action = event.submitter ? event.submitter.value : 'save';
+    if (action === 'cancel') return;
+    if (action === 'delete') {
+      event.preventDefault();
+      if (!editingEventId) return;
+      const result = await send('schedule-event.delete', { eventId: editingEventId });
+      if (!result.ok) { setEventError(result.message); return; }
+      eventDialog.close(); renderSchedule();
+      return;
+    }
+    event.preventDefault();
+    const start = fromLocalInput(eventForm.elements.start.value); const deadline = fromLocalInput(eventForm.elements.deadline.value);
+    if (!eventForm.elements.name.value.trim()) { setEventError('An event needs a name.'); return; }
+    if (!start || !deadline || deadline <= start) { setEventError('Choose a valid time range, with the end after the start.'); return; }
+    const recurrence = { frequency: eventForm.elements.frequency.value, interval: 1, count: Number(eventForm.elements.count.value) || 0, until: eventForm.elements.until.value || '' };
+    const fields = { name: eventForm.elements.name.value, note: eventForm.elements.note.value, project: eventForm.elements.project.value, start: start.toISOString(), deadline: deadline.toISOString(), recurrence: recurrence };
+    const result = editingEventId
+      ? await send('schedule-event.patch', { eventId: editingEventId, patch: fields })
+      : await send('schedule-event.create', fields, { commandId: createEventCommandId });
+    if (!result.ok) { setEventError(result.message); return; }
+    createEventCommandId = null; eventDialog.close(); renderSchedule();
+  });
+
+  eventDialog.addEventListener('close', () => { eventForm.reset(); setEventError(''); editingEventId = null; createEventCommandId = null; });
+
+  $('#scheduleNew').addEventListener('click', () => openScheduleEvent(null, scheduleCursor));
+  $('#schedulePrev').addEventListener('click', () => {
+    const amount = scheduleMode === 'day' ? 1 : scheduleMode === 'four-day' ? 4 : scheduleMode === 'week' ? 7 : scheduleMode === 'year' ? 12 : 1;
+    scheduleCursor = new Date(scheduleCursor); if (scheduleMode === 'month' || scheduleMode === 'year') scheduleCursor.setMonth(scheduleCursor.getMonth() - amount); else scheduleCursor.setDate(scheduleCursor.getDate() - amount); renderSchedule();
+  });
+  $('#scheduleNext').addEventListener('click', () => {
+    const amount = scheduleMode === 'day' ? 1 : scheduleMode === 'four-day' ? 4 : scheduleMode === 'week' ? 7 : scheduleMode === 'year' ? 12 : 1;
+    scheduleCursor = new Date(scheduleCursor); if (scheduleMode === 'month' || scheduleMode === 'year') scheduleCursor.setMonth(scheduleCursor.getMonth() + amount); else scheduleCursor.setDate(scheduleCursor.getDate() + amount); renderSchedule();
+  });
+  $('#scheduleToday').addEventListener('click', () => { scheduleCursor = new Date(); renderSchedule(); });
+  $$('#schedule [data-schedule-mode]').forEach((button) => button.addEventListener('click', () => { scheduleMode = button.dataset.scheduleMode; renderSchedule(); }));
+
   /**
    * One confirmation dialog for destructive actions. Cancelling does nothing at
    * all — no write, no state change — because the work lives in the OK handler and
@@ -1101,13 +1152,19 @@
   });
 
   $('#newTaskBtn').addEventListener('click', () => openTask(null));
-  $('#newProjectBtn').addEventListener('click', () => projectDialog.showModal());
-  $('#hubNewProject').addEventListener('click', () => projectDialog.showModal());
+  const openProjectDialog = () => { projectForm.reset(); projectForm.elements.projectType.value = hubKind; projectDialog.showModal(); };
+  $('#newProjectBtn').addEventListener('click', openProjectDialog);
+  $('#hubNewProject').addEventListener('click', openProjectDialog);
   $('#hubShowArchived').addEventListener('change', (event) => {
     // Which projects are listed is presentation only; nothing is written.
     showArchived = event.currentTarget.checked;
     renderHub();
   });
+  $$('.hub-tab').forEach((button) => button.addEventListener('click', () => {
+    hubKind = button.dataset.projectKind;
+    $$('.hub-tab').forEach((tab) => { const active = tab === button; tab.classList.toggle('active', active); tab.setAttribute('aria-selected', active ? 'true' : 'false'); });
+    renderHub();
+  }));
   // The lens scopes the Daily board. On a project route it is hidden and the
   // address decides, so this handler can only ever fire on Daily.
   projectFilter.addEventListener('change', renderRoute);
@@ -2457,6 +2514,10 @@
     if (path === '') return { name: 'daily', id: '' };
     if (path === 'hub') return { name: 'hub', id: '' };
     if (path === 'schedule') return { name: 'schedule', id: '' };
+    if (path.indexOf('schedule/') === 0) {
+      const id = decodeURIComponent(path.slice('schedule/'.length));
+      if (id) return { name: 'schedule', id: id };
+    }
     if (path.indexOf('project/') === 0) {
       let id = '';
       try {
@@ -2581,11 +2642,240 @@
     renderTimekeeping();
   }
 
+  function scheduleDay(date) {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  }
+
+  function schedulePeriod() {
+    const cursor = scheduleDay(scheduleCursor);
+    if (scheduleMode === 'day') return { start: cursor, end: new Date(cursor.getTime() + DAY_MS), label: cursor.toLocaleDateString(undefined, { dateStyle: 'full' }) };
+    if (scheduleMode === 'four-day') return { start: cursor, end: new Date(cursor.getTime() + 4 * DAY_MS), label: cursor.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }) + ' – ' + new Date(cursor.getTime() + 3 * DAY_MS).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) };
+    if (scheduleMode === 'week') {
+      const start = new Date(cursor); start.setDate(start.getDate() - start.getDay());
+      const end = new Date(start.getTime() + 7 * DAY_MS);
+      return { start, end, label: start.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' – ' + new Date(end.getTime() - DAY_MS).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) };
+    }
+    if (scheduleMode === 'year') {
+      const start = new Date(cursor.getFullYear(), 0, 1);
+      return { start, end: new Date(cursor.getFullYear() + 1, 0, 1), label: String(cursor.getFullYear()) };
+    }
+    if (scheduleMode === 'agenda') {
+      return { start: cursor, end: new Date(cursor.getFullYear() + 1, cursor.getMonth(), cursor.getDate()), label: 'Upcoming events' };
+    }
+    const start = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+    const end = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+    return { start, end, label: cursor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' }) };
+  }
+
+  function scheduleOccurrences(item, range) {
+    const result = [];
+    const baseStart = new Date(item.start);
+    const baseEnd = new Date(item.deadline);
+    const recurrence = item.recurrence || { frequency: 'none', interval: 1, count: 0 };
+    const stepDays = recurrence.frequency === 'weekly' ? 7 * recurrence.interval : recurrence.frequency === 'daily' ? recurrence.interval : 0;
+    let index = 0;
+    let start = new Date(baseStart);
+    while (index < 366) {
+      const end = new Date(start.getTime() + (baseEnd.getTime() - baseStart.getTime()));
+      if (recurrence.until && start > new Date(recurrence.until + 'T23:59:59')) break;
+      if (end > range.start && start < range.end) result.push({ item, start, end, occurrence: index });
+      if (!stepDays || (recurrence.count && index + 1 >= recurrence.count)) break;
+      start = new Date(start); start.setDate(start.getDate() + stepDays); index++;
+      if (start >= range.end && index > 0) break;
+    }
+    return result;
+  }
+
+  function scheduleEventsIn(range) {
+    const projectId = route().id;
+    return Store.scheduleEvents()
+      .filter((item) => !projectId || item.project === projectId)
+      .flatMap((item) => scheduleOccurrences(item, range));
+  }
+
+  async function moveScheduleEvent(eventId, targetStart) {
+    const item = Store.scheduleEvents().find((event) => event.id === eventId);
+    if (!item) return;
+    const oldStart = new Date(item.start); const oldEnd = new Date(item.deadline);
+    const nextStart = new Date(targetStart); const nextEnd = new Date(nextStart.getTime() + oldEnd.getTime() - oldStart.getTime());
+    const result = await send('schedule-event.patch', { eventId: eventId, patch: { start: nextStart.toISOString(), deadline: nextEnd.toISOString() } }, { ifRev: item.rev });
+    if (result.ok) renderSchedule(); else reportRefusal(result, $('#scheduleBody'));
+  }
+
+  function scheduleTimeLabel(date) {
+    return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  }
+
+  function scheduleEventButton(occurrence, compact) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'schedule-event' + (occurrence.occurrence ? ' is-repeat' : '');
+    button.dataset.eventId = occurrence.item.id;
+    button.draggable = true;
+    button.title = occurrence.item.note || occurrence.item.name;
+    const title = document.createElement('span');
+    title.className = 'schedule-event-name';
+    title.textContent = occurrence.item.name;
+    button.append(title);
+    if (!compact) {
+      const time = document.createElement('span');
+      time.className = 'schedule-event-time';
+      time.textContent = scheduleTimeLabel(occurrence.start) + '–' + scheduleTimeLabel(occurrence.end);
+      button.append(time);
+      const resize = document.createElement('span');
+      resize.className = 'schedule-resize'; resize.title = 'Drag to change the end time';
+      resize.addEventListener('pointerdown', (event) => {
+        event.preventDefault(); event.stopPropagation(); resize.setPointerCapture(event.pointerId);
+        const column = button.parentElement; const rect = column.getBoundingClientRect(); const dayParts = column.dataset.day.split('-').map(Number);
+        const start = occurrence.start; const originalHeight = Math.max(30, (occurrence.end.getTime() - occurrence.start.getTime()) / 60000);
+        const updatePreview = (move) => { const minutesIntoDay = Math.max(start.getHours() * 60 + start.getMinutes() + 30, Math.min(1439, Math.round(((move.clientY - rect.top) / 60) * 60 / 15) * 15)); button.style.height = Math.max(24, (minutesIntoDay - (start.getHours() * 60 + start.getMinutes())) / 60) + 'px'; };
+        const move = (moveEvent) => updatePreview(moveEvent);
+        const finish = async (up) => { resize.removeEventListener('pointermove', move); resize.removeEventListener('pointerup', finish); resize.releasePointerCapture(event.pointerId); document.body.classList.remove('schedule-resizing'); const minutesIntoDay = Math.max(start.getHours() * 60 + start.getMinutes() + 30, Math.min(1439, Math.round(((up.clientY - rect.top) / 60) * 60 / 15) * 15)); const nextEnd = new Date(dayParts[0], dayParts[1] - 1, dayParts[2], Math.floor(minutesIntoDay / 60), minutesIntoDay % 60); const item = Store.scheduleEvents().find((candidate) => candidate.id === occurrence.item.id); if (!item) return; const duration = nextEnd.getTime() - start.getTime(); const baseStart = new Date(item.start); const baseEnd = new Date(item.deadline); const baseDuration = Math.max(30 * 60000, duration); const result = await send('schedule-event.patch', { eventId: item.id, patch: { deadline: new Date(baseStart.getTime() + baseDuration).toISOString() } }, { ifRev: item.rev }); if (result.ok) renderSchedule(); else reportRefusal(result, button); };
+        document.body.classList.add('schedule-resizing'); resize.addEventListener('pointermove', move); resize.addEventListener('pointerup', finish);
+      });
+      button.append(resize);
+    }
+    button.addEventListener('click', () => openScheduleEvent(occurrence.item.id, occurrence.start));
+    button.addEventListener('dragstart', (event) => {
+      event.dataTransfer.setData('text/plain', occurrence.item.id);
+      event.dataTransfer.effectAllowed = 'move';
+    });
+    return button;
+  }
+
+  function scheduleDayKey(date) { return dayString(date); }
+
+  function renderScheduleMonth(range) {
+    const body = $('#scheduleBody');
+    const grid = document.createElement('div'); grid.className = 'schedule-month-grid';
+    ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach((name) => { const head = document.createElement('div'); head.className = 'schedule-weekday'; head.textContent = name; grid.append(head); });
+    const first = new Date(range.start); first.setDate(first.getDate() - first.getDay());
+    const last = new Date(range.end); last.setDate(last.getDate() + (6 - last.getDay()));
+    const events = scheduleEventsIn({ start: first, end: new Date(last.getTime() + DAY_MS) });
+    for (let day = new Date(first); day <= last; day.setDate(day.getDate() + 1)) {
+      const cellDay = new Date(day); const cell = document.createElement('div'); cell.className = 'schedule-month-cell';
+      if (cellDay.getMonth() !== range.start.getMonth()) cell.classList.add('is-muted');
+      if (scheduleDayKey(cellDay) === todayDay()) cell.classList.add('is-today');
+      const head = document.createElement('div'); head.className = 'schedule-cell-head';
+      head.textContent = String(cellDay.getDate());
+      const add = document.createElement('button'); add.type = 'button'; add.className = 'schedule-cell-add'; add.textContent = '+'; add.title = 'Add event';
+      add.addEventListener('click', () => openScheduleEvent(null, cellDay)); head.append(add); cell.append(head);
+      cell.addEventListener('dragover', (event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; });
+      cell.addEventListener('drop', (event) => { event.preventDefault(); const id = event.dataTransfer.getData('text/plain'); if (id) moveScheduleEvent(id, cellDay); });
+      events.filter((entry) => scheduleDayKey(entry.start) === scheduleDayKey(cellDay)).slice(0, 6).forEach((entry) => cell.append(scheduleEventButton(entry, true)));
+      grid.append(cell);
+    }
+    body.append(grid);
+  }
+
+  function renderScheduleTimed(range) {
+    const body = $('#scheduleBody');
+    const days = []; for (let day = new Date(range.start); day < range.end; day.setDate(day.getDate() + 1)) days.push(new Date(day));
+    const wrap = document.createElement('div'); wrap.className = 'schedule-timed';
+    const header = document.createElement('div'); header.className = 'schedule-timed-header';
+    const corner = document.createElement('div'); corner.className = 'schedule-time-corner'; header.append(corner);
+    header.style.gridTemplateColumns = '48px repeat(' + Math.max(1, Math.min(7, days.length)) + ', minmax(110px, 1fr))';
+    days.forEach((day) => { const h = document.createElement('div'); h.className = 'schedule-day-head' + (scheduleDayKey(day) === todayDay() ? ' is-today' : ''); h.textContent = day.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }); header.append(h); });
+    wrap.append(header);
+    const content = document.createElement('div'); content.className = 'schedule-timed-content';
+    const labels = document.createElement('div'); labels.className = 'schedule-time-labels';
+    for (let hour = 0; hour < 24; hour += 1) { const label = document.createElement('div'); label.textContent = (hour === 0 ? '12' : hour > 12 ? hour - 12 : hour) + (hour < 12 ? 'a' : 'p'); labels.append(label); }
+    content.append(labels);
+    const columnsEl = document.createElement('div'); columnsEl.className = 'schedule-day-columns'; columnsEl.style.gridTemplateColumns = 'repeat(' + days.length + ', minmax(110px, 1fr))';
+    days.forEach((day) => {
+      const col = document.createElement('div'); col.className = 'schedule-day-column'; col.dataset.day = scheduleDayKey(day);
+      for (let hour = 0; hour < 24; hour += 1) { const slot = document.createElement('button'); slot.type = 'button'; slot.className = 'schedule-slot'; slot.dataset.start = toLocalInput(new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour)); slot.addEventListener('click', () => openScheduleEvent(null, new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour))); col.append(slot); }
+      col.addEventListener('dragover', (event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; });
+      col.addEventListener('drop', (event) => { event.preventDefault(); const id = event.dataTransfer.getData('text/plain'); if (!id) return; const rect = col.getBoundingClientRect(); const minutesIntoDay = Math.max(0, Math.min(1439, Math.round(((event.clientY - rect.top) / 60) * 60 / 15) * 15)); moveScheduleEvent(id, new Date(day.getFullYear(), day.getMonth(), day.getDate(), Math.floor(minutesIntoDay / 60), minutesIntoDay % 60)); });
+      scheduleEventsIn(range).filter((entry) => scheduleDayKey(entry.start) === scheduleDayKey(day)).forEach((entry) => {
+        const event = scheduleEventButton(entry, false); event.classList.add('schedule-timed-event');
+        const startMinutes = entry.start.getHours() * 60 + entry.start.getMinutes(); const duration = Math.max(30, (entry.end.getTime() - entry.start.getTime()) / 60000);
+        event.style.top = (startMinutes / 60) + 'px'; event.style.height = Math.max(24, duration / 60) + 'px'; col.append(event);
+      });
+      columnsEl.append(col);
+    });
+    content.append(columnsEl); wrap.append(content); body.append(wrap);
+  }
+
+  function renderScheduleYear(range) {
+    const body = $('#scheduleBody'); const grid = document.createElement('div'); grid.className = 'schedule-year-grid';
+    for (let month = 0; month < 12; month += 1) {
+      const box = document.createElement('button'); box.type = 'button'; box.className = 'schedule-year-month';
+      const title = document.createElement('strong'); title.textContent = new Date(range.start.getFullYear(), month, 1).toLocaleDateString(undefined, { month: 'long' }); box.append(title);
+      const count = scheduleEventsIn({ start: new Date(range.start.getFullYear(), month, 1), end: new Date(range.start.getFullYear(), month + 1, 1) }).length;
+      const meta = document.createElement('span'); meta.textContent = count + (count === 1 ? ' event' : ' events'); box.append(meta);
+      box.addEventListener('click', () => { scheduleMode = 'month'; scheduleCursor = new Date(range.start.getFullYear(), month, 1); renderSchedule(); }); grid.append(box);
+    }
+    body.append(grid);
+  }
+
+  function renderScheduleAgenda(range) {
+    const body = $('#scheduleBody'); const list = document.createElement('div'); list.className = 'schedule-agenda';
+    const entries = scheduleEventsIn(range).sort((a, b) => a.start - b.start);
+    if (!entries.length) { const empty = document.createElement('p'); empty.className = 'schedule-empty'; empty.textContent = 'No scheduled events yet. Create one to start your calendar.'; list.append(empty); }
+    entries.forEach((entry) => { const row = document.createElement('button'); row.type = 'button'; row.className = 'schedule-agenda-row'; row.addEventListener('click', () => openScheduleEvent(entry.item.id, entry.start)); const when = document.createElement('time'); when.textContent = entry.start.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); const name = document.createElement('strong'); name.textContent = entry.item.name; const end = document.createElement('span'); end.textContent = 'until ' + scheduleTimeLabel(entry.end); row.append(when, name, end); list.append(row); });
+    body.append(list);
+  }
+
+  function refreshEventProjectOptions(current) {
+    const select = eventForm.elements.project; const value = current === undefined ? select.value : current; select.replaceChildren(new Option('Uncategorised', ''));
+    Store.projects().forEach((project) => select.append(new Option(project.archivedAt ? project.name + ' (archived)' : project.name, project.id)));
+    select.value = value || '';
+  }
+
+  function setEventError(text) { const error = $('#eventError'); error.textContent = text || ''; error.hidden = !text; }
+
+  function openScheduleEvent(eventId, suggestedStart) {
+    editingEventId = eventId; createEventCommandId = eventId ? null : Store.newCommandId();
+    const item = eventId ? Store.scheduleEvents().find((event) => event.id === eventId) : null;
+    const start = item ? new Date(item.start) : (suggestedStart instanceof Date ? new Date(suggestedStart) : new Date());
+    if (!item) { start.setMinutes(Math.ceil(start.getMinutes() / 30) * 30, 0, 0); }
+    const end = item ? new Date(item.deadline) : new Date(start.getTime() + 60 * 60000);
+    $('#eventDialogTitle').textContent = item ? 'Edit event' : 'New event'; $('#deleteEventBtn').style.display = item ? '' : 'none';
+    refreshEventProjectOptions(item ? item.project : ''); setEventError('');
+    eventForm.elements.name.value = item ? item.name : ''; eventForm.elements.note.value = item ? item.note : '';
+    eventForm.elements.start.value = toLocalInput(start); eventForm.elements.deadline.value = toLocalInput(end);
+    eventForm.elements.frequency.value = item && item.recurrence ? item.recurrence.frequency : 'none'; eventForm.elements.count.value = item && item.recurrence ? item.recurrence.count : 0; eventForm.elements.until.value = item && item.recurrence ? (item.recurrence.until || '') : '';
+    eventDialog.showModal(); eventForm.elements.name.focus();
+  }
+
+  async function seedRequestedSchedule() {
+    const fixture = window.PROXIMA_SCHEDULE_FIXTURE;
+    if (!fixture || !fixture.project || !Array.isArray(fixture.events)) return;
+    let project = Store.projects().find((candidate) => candidate.sourceKey === fixture.project.sourceKey || (candidate.projectType === 'schedule' && candidate.name === fixture.project.name));
+    if (!project) {
+      const created = await send('project.create', { name: fixture.project.name, description: fixture.project.description, projectType: 'schedule', sourceKey: fixture.project.sourceKey });
+      if (!created.ok) { reportRefusal(created, null); return; }
+      project = created.value;
+    }
+    const existing = new Set(Store.scheduleEvents().filter((event) => event.project === project.id).map((event) => event.sourceKey).filter(Boolean));
+    for (const source of fixture.events) {
+      if (existing.has(source.sourceKey)) continue;
+      const created = await send('schedule-event.create', {
+        name: source.name,
+        note: source.note,
+        project: project.id,
+        start: source.start,
+        deadline: source.deadline,
+        color: source.color,
+        sourceKey: source.sourceKey,
+        recurrence: { frequency: 'weekly', interval: 1, until: source.until, count: 0 },
+      });
+      if (!created.ok) { reportRefusal(created, null); return; }
+    }
+    renderRoute();
+  }
+
   function renderSchedule() {
-    // Deliberately empty. The Schedule is a destination, not a surface: it says in
-    // static markup that it is not built, and derives nothing to draw. The branch
-    // exists so the dispatch has one arm per surface instead of a silent
-    // fall-through that would read as an oversight.
+    const range = schedulePeriod(); $('#scheduleRange').textContent = range.label;
+    const scheduleProject = route().id ? Store.project(route().id) : null;
+    $('#schedule').querySelector('h1').textContent = scheduleProject ? scheduleProject.name : 'Schedule';
+    $$('#scheduleBody').forEach((node) => { node.replaceChildren(); });
+    $$('#schedule [data-schedule-mode]').forEach((button) => button.classList.toggle('active', button.dataset.scheduleMode === scheduleMode));
+    if (scheduleMode === 'month') renderScheduleMonth(range);
+    else if (scheduleMode === 'year') renderScheduleYear(range);
+    else if (scheduleMode === 'agenda') renderScheduleAgenda(range);
+    else renderScheduleTimed(range);
   }
 
   /**
@@ -2718,14 +3008,19 @@
     const now = Date.now();
     const projects = Store.projects().slice().sort((a, b) =>
       String(a.name).localeCompare(String(b.name)));
-    const listed = projects.filter((p) => Boolean(p.archivedAt) === showArchived);
+    const taskProjects = projects.filter((p) => p.projectType !== 'schedule');
+    const scheduleProjects = projects.filter((p) => p.projectType === 'schedule');
+    $('#taskProjectCount').textContent = String(taskProjects.length);
+    $('#scheduleProjectCount').textContent = String(scheduleProjects.length);
+    const listed = projects.filter((p) => p.projectType === hubKind && Boolean(p.archivedAt) === showArchived);
 
-    const archivedCount = projects.filter((p) => p.archivedAt).length;
-    $('#hubCount').textContent = projects.length === 0
-      ? 'No projects'
+    const scopedProjects = hubKind === 'schedule' ? scheduleProjects : taskProjects;
+    const archivedCount = scopedProjects.filter((p) => p.archivedAt).length;
+    $('#hubCount').textContent = scopedProjects.length === 0
+      ? (hubKind === 'schedule' ? 'No schedules' : 'No projects')
       : showArchived
         ? archivedCount + (archivedCount === 1 ? ' archived project' : ' archived projects')
-        : (projects.length - archivedCount) + ' active of ' + projects.length;
+        : (scopedProjects.length - archivedCount) + ' active of ' + scopedProjects.length;
 
     const grid = $('#hubGrid');
     grid.replaceChildren();
@@ -2734,12 +3029,40 @@
     grid.hidden = none;
     if (none) {
       $('#hubEmpty').textContent = showArchived
-        ? 'No archived projects.'
-        : 'No projects yet. Create one and its tasks will gather here.';
+        ? 'No archived ' + (hubKind === 'schedule' ? 'schedules.' : 'projects.')
+        : hubKind === 'schedule'
+          ? 'No schedules yet. Create one to hold calendar events.'
+          : 'No projects yet. Create one and its tasks will gather here.';
       return;
     }
 
-    listed.forEach((project) => grid.append(hubCardFor(project, projectStats(project, tasks, now), now)));
+    listed.forEach((project) => grid.append(project.projectType === 'schedule'
+      ? scheduleHubCardFor(project, now)
+      : hubCardFor(project, projectStats(project, tasks, now), now)));
+  }
+
+  function scheduleHubCardFor(project, now) {
+    const card = document.createElement('article');
+    card.className = 'hub-card schedule-hub-card' + (project.archivedAt ? ' archived' : '');
+    card.dataset.id = project.id;
+    const events = Store.scheduleEvents().filter((event) => event.project === project.id);
+    const upcoming = events.filter((event) => new Date(event.deadline).getTime() >= now).length;
+    const head = document.createElement('div'); head.className = 'hub-head';
+    const mark = document.createElement('span'); mark.className = 'hub-mark schedule-mark'; mark.textContent = '▦'; mark.setAttribute('aria-hidden', 'true');
+    const title = document.createElement('div'); title.className = 'hub-title';
+    const name = document.createElement('h3'); name.textContent = project.name; title.append(name);
+    const meta = document.createElement('p'); meta.className = 'hub-meta'; meta.textContent = project.description || 'Schedule'; title.append(meta); head.append(mark, title);
+    card.append(head);
+    const pressure = document.createElement('div'); pressure.className = 'hub-pressure';
+    pressure.append(hubStat(events.length + ' Events', 'Calendar event series in this schedule'), hubStat(upcoming + ' Upcoming', 'Event series that have not ended'));
+    card.append(pressure);
+    const acts = document.createElement('div'); acts.className = 'hub-acts';
+    const open = document.createElement('a'); open.className = 'primary'; open.href = '#/schedule/' + encodeURIComponent(project.id); open.textContent = 'Open Schedule'; acts.append(open);
+    if (!project.archivedAt) acts.append(hubAction('Archive', 'Hide from the Hub without touching its events', async (button) => { const result = await send('project.archive', { projectId: project.id }); if (reportRefusal(result, button)) return; refreshAfterWrite(); }));
+    else acts.append(hubAction('Restore', 'Return this schedule to the active list', async (button) => { const result = await send('project.restore', { projectId: project.id }); if (reportRefusal(result, button)) return; refreshAfterWrite(); }));
+    acts.append(hubAction('Delete', 'Delete this schedule and its event series', () => confirmDeleteSchedule(project, events.length)));
+    card.append(acts);
+    return card;
   }
 
   function hubCardFor(project, stats, now) {
@@ -2852,6 +3175,19 @@
     span.textContent = value;
     span.title = title;
     return span;
+  }
+
+  function confirmDeleteSchedule(project, eventCount) {
+    $('#confirmTitle').textContent = 'Delete “' + project.name + '”?';
+    $('#confirmBody').textContent = 'This will delete ' + eventCount + (eventCount === 1 ? ' event series' : ' event series') + '. This cannot be undone.';
+    $('#confirmOk').textContent = 'Delete schedule';
+    confirmDialog.__onOk = async () => {
+      const result = await send('project.delete', { projectId: project.id });
+      if (reportRefusal(result, null)) return;
+      refreshAfterWrite();
+      flash('Deleted “' + project.name + '”.', null, {});
+    };
+    confirmDialog.showModal();
   }
 
   function hubAction(label, title, onClick) {
@@ -3082,6 +3418,10 @@
   // walking there, and a refresh lands on the surface it names.
   window.addEventListener('hashchange', applyRoute);
   applyRoute();
+  // Seed only the explicitly requested schedule, once per Proxima store. The
+  // fixture is bundled with this build; no vault reader or unrelated note scan
+  // runs at startup.
+  void seedRequestedSchedule();
   // Said after the surface is drawn, so the reader sees the app and the explanation
   // together rather than a notice over a blank page.
   reportLoadStatus();

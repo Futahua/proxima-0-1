@@ -181,6 +181,9 @@ const Store = (() => {
     projects: [],
     tasks: [],
     run: null,
+    // Proxima-owned calendar records. These are deliberately separate from the
+    // append-only command event log below and are never imported from a vault.
+    scheduleEvents: [],
     // Append-only record of what changed, and the counter that numbers it.
     events: [],
     seq: 0,
@@ -301,6 +304,9 @@ const Store = (() => {
       });
 
     const events = (Array.isArray(parsed.events) ? parsed.events : []).filter((e) => e && typeof e === 'object');
+    const scheduleEvents = (Array.isArray(parsed.scheduleEvents) ? parsed.scheduleEvents : [])
+      .map((raw) => normaliseScheduleEvent(raw, knownProjects))
+      .filter(Boolean);
     const seqFromEvents = events.reduce((max, e) => (Number.isFinite(Number(e.seq)) ? Math.max(max, Number(e.seq)) : max), 0);
     const commands = parsed.commands && typeof parsed.commands === 'object' && !Array.isArray(parsed.commands)
       ? parsed.commands
@@ -310,7 +316,7 @@ const Store = (() => {
     // silently stripped of a section this build does not know about yet. `views` is
     // the one exception: it moved to the cockpit, and is adopted there rather than
     // left behind here to be read as board data.
-    const known = new Set(['version', 'projects', 'tasks', 'run', 'events', 'seq', 'commands']);
+    const known = new Set(['version', 'projects', 'tasks', 'run', 'scheduleEvents', 'events', 'seq', 'commands']);
     const extras = {};
     Object.keys(parsed).forEach((key) => {
       if (!known.has(key) && key !== 'views') extras[key] = parsed[key];
@@ -323,6 +329,7 @@ const Store = (() => {
         projects: projects,
         tasks: tasks,
         run: parsed.run && typeof parsed.run === 'object' ? parsed.run : null,
+        scheduleEvents: scheduleEvents,
         events: events,
         seq: Number.isFinite(Number(parsed.seq)) ? Math.max(Number(parsed.seq), seqFromEvents) : seqFromEvents,
         commands: commands,
@@ -341,6 +348,7 @@ const Store = (() => {
       id: raw.id,
       name: typeof raw.name === 'string' && raw.name ? raw.name : 'Untitled project',
       description: typeof raw.description === 'string' ? raw.description : '',
+      projectType: raw.projectType === 'schedule' ? 'schedule' : 'task',
       // Age is read from this, so it has to be a real instant. A project written
       // before the field existed is dated from now rather than left unusable.
       createdAt: validInstant(raw.createdAt) ? raw.createdAt : new Date().toISOString(),
@@ -394,6 +402,48 @@ const Store = (() => {
       order: Number.isFinite(Number(raw.order)) ? Math.round(Number(raw.order)) : 0,
       createdAt: typeof raw.createdAt === 'string' && raw.createdAt ? raw.createdAt : new Date().toISOString(),
       rev: positiveInt(raw.rev, 1),
+    };
+  }
+
+  function normaliseScheduleEvent(raw, knownProjects) {
+    if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || !raw.id) return null;
+    if (!validInstant(raw.start) || !validInstant(raw.deadline)) return null;
+    const start = new Date(raw.start);
+    const deadline = new Date(raw.deadline);
+    if (deadline.getTime() <= start.getTime()) return null;
+    const recurrence = raw.recurrence && typeof raw.recurrence === 'object'
+      ? {
+        frequency: raw.recurrence.frequency === 'daily' || raw.recurrence.frequency === 'weekly' ? raw.recurrence.frequency : 'none',
+        interval: Math.max(1, Math.min(52, Math.round(Number(raw.recurrence.interval) || 1))),
+        count: Math.max(0, Math.min(365, Math.round(Number(raw.recurrence.count) || 0))),
+        until: isRealDay(raw.recurrence.until) ? raw.recurrence.until : '',
+      }
+      : { frequency: 'none', interval: 1, count: 0, until: '' };
+    return {
+      ...raw,
+      id: raw.id,
+      name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim().slice(0, 200) : 'Untitled event',
+      note: typeof raw.note === 'string' ? raw.note.slice(0, 1000) : '',
+      project: knownProjects.has(raw.project) ? raw.project : '',
+      start: start.toISOString(),
+      deadline: deadline.toISOString(),
+      recurrence: recurrence,
+      sourceKey: typeof raw.sourceKey === 'string' ? raw.sourceKey : '',
+      color: typeof raw.color === 'string' ? raw.color : '',
+      createdAt: validInstant(raw.createdAt) ? raw.createdAt : new Date().toISOString(),
+      rev: positiveInt(raw.rev, 1),
+    };
+  }
+
+  function normaliseRecurrence(raw) {
+    if (!raw || typeof raw !== 'object') return { frequency: 'none', interval: 1, count: 0, until: '' };
+    const frequency = raw.frequency === 'daily' || raw.frequency === 'weekly' ? raw.frequency : raw.frequency === 'none' ? 'none' : null;
+    if (!frequency) return null;
+    return {
+      frequency: frequency,
+      interval: Math.max(1, Math.min(52, Math.round(Number(raw.interval) || 1))),
+      count: Math.max(0, Math.min(365, Math.round(Number(raw.count) || 0))),
+      until: isRealDay(raw.until) ? raw.until : '',
     };
   }
 
@@ -541,6 +591,9 @@ const Store = (() => {
     STATUS_UNKNOWN: (d) => '“' + d.value + '” is not a column this board has (' + (d.allowed || []).join(', ') + ').',
     PROJECT_NOT_FOUND: (d) => 'There is no project with the id “' + d.projectId + '”.',
     GANTT_ROW_INVALID: (d) => '“' + d.value + '” is not a timeline row.',
+    EVENT_TIME_INVALID: (d) => '“' + d.value + '” is not a valid event time.',
+    EVENT_END_BEFORE_START: (d) => 'The event ends before it starts. Nothing was written.',
+    RECURRENCE_INVALID: () => 'That recurrence is not supported. Choose none, daily, or weekly.',
     FIELD_NOT_PATCHABLE: (d) => 'task.patch cannot change ' + d.field + ' — use ' + d.use + '.',
     MOVE_ANCHOR_NOT_IN_COLUMN: (d) => 'The task to insert before is not in that column any more.',
     RUN_HAS_NO_MEMBERS: () => 'Nothing to lock — no tasks are in the running column.',
@@ -591,12 +644,14 @@ const Store = (() => {
 
   const findTask = (taskId) => state.tasks.find((t) => t.id === taskId) || null;
   const findProject = (projectId) => state.projects.find((p) => p.id === projectId) || null;
+  const findScheduleEvent = (eventId) => state.scheduleEvents.find((e) => e.id === eventId) || null;
 
   /** The revision a command's `ifRev` is checked against. */
   function revisionOf(kind, targetId) {
     if (kind === 'task') { const t = findTask(targetId); return t ? t.rev : null; }
     if (kind === 'project') { const p = findProject(targetId); return p ? p.rev : null; }
     if (kind === 'run') return state.run ? positiveInt(state.run.rev, 1) : null;
+    if (kind === 'schedule-event') { const e = findScheduleEvent(targetId); return e ? e.rev : null; }
     return null;
   }
 
@@ -892,6 +947,8 @@ const Store = (() => {
         id: id('prj'),
         name: String(payload.name).trim().slice(0, 120),
         description: typeof payload.description === 'string' ? payload.description.trim().slice(0, 500) : '',
+        projectType: payload.projectType === 'schedule' ? 'schedule' : 'task',
+        sourceKey: typeof payload.sourceKey === 'string' ? payload.sourceKey : '',
         createdAt: new Date().toISOString(),
         archivedAt: null,
         rev: 1,
@@ -953,21 +1010,23 @@ const Store = (() => {
       const conflict = checkRev(ctx, 'project', payload.projectId);
       if (conflict) return conflict;
       const orphans = state.tasks.filter((t) => t.project === project.id).map((t) => t.id);
+      const scheduleEvents = state.scheduleEvents.filter((event) => event.project === project.id).map((event) => event.id);
       const snapshot = { ...project };
       return {
         ok: true,
         apply: () => {
           state.tasks.forEach((t) => { if (t.project === project.id) { t.project = ''; t.rev = positiveInt(t.rev, 1) + 1; } });
+          state.scheduleEvents = state.scheduleEvents.filter((event) => event.project !== project.id);
           state.projects = state.projects.filter((p) => p.id !== project.id);
           return {
-            value: { orphaned: orphans.length, orphanedTaskIds: orphans },
+            value: { orphaned: orphans.length, orphanedTaskIds: orphans, deletedScheduleEvents: scheduleEvents.length, deletedScheduleEventIds: scheduleEvents },
             entity: { kind: 'project', id: snapshot.id },
             before: snapshot,
             after: null,
             changed: true,
             // The tasks it let go of changed too, so they are named in the event
             // rather than left as an unexplained side effect.
-            extra: orphans.length ? { orphanedTaskIds: orphans } : undefined,
+            extra: (orphans.length || scheduleEvents.length) ? { orphanedTaskIds: orphans, deletedScheduleEventIds: scheduleEvents } : undefined,
           };
         },
       };
@@ -1048,11 +1107,74 @@ const Store = (() => {
       };
     },
 
-    /**
-     * Named in the destination, not served by this slice. Present so that a client
-     * asking for them gets an answer in the same shape as every other refusal
-     * rather than "no such command", which would be a lie about the vocabulary.
-     */
+    /** Proxima-owned Schedule records. They never read from the task or vault data. */
+    'schedule-event.create'(payload, ctx) {
+      if (typeof payload.name !== 'string' || !payload.name.trim()) return refuse('NAME_REQUIRED', {});
+      if (!validInstant(payload.start)) return refuse('EVENT_TIME_INVALID', { field: 'start', value: payload.start });
+      if (!validInstant(payload.deadline)) return refuse('EVENT_TIME_INVALID', { field: 'deadline', value: payload.deadline });
+      if (new Date(payload.deadline).getTime() <= new Date(payload.start).getTime()) return refuse('EVENT_END_BEFORE_START', {});
+      if (payload.project && !findProject(payload.project)) return refuse('PROJECT_NOT_FOUND', { projectId: payload.project });
+      const recurrence = normaliseRecurrence(payload.recurrence);
+      if (!recurrence) return refuse('RECURRENCE_INVALID', {});
+      const item = {
+        id: id('evt'),
+        name: payload.name.trim().slice(0, 200),
+        note: typeof payload.note === 'string' ? payload.note.slice(0, 1000) : '',
+        project: payload.project || '',
+        start: new Date(payload.start).toISOString(),
+        deadline: new Date(payload.deadline).toISOString(),
+        recurrence: recurrence,
+        sourceKey: typeof payload.sourceKey === 'string' ? payload.sourceKey : '',
+        color: typeof payload.color === 'string' ? payload.color : '',
+        createdAt: new Date().toISOString(),
+        rev: 1,
+      };
+      return { ok: true, apply: () => {
+        state.scheduleEvents.push(item);
+        return { value: { ...item }, entity: { kind: 'schedule-event', id: item.id }, before: null, after: { ...item }, changed: true, created: true };
+      } };
+    },
+
+    'schedule-event.patch'(payload, ctx) {
+      const item = findScheduleEvent(payload.eventId);
+      if (!item) return refuse('ENTITY_NOT_FOUND', { kind: 'schedule event', id: payload.eventId });
+      const conflict = checkRev(ctx, 'schedule-event', payload.eventId);
+      if (conflict) return conflict;
+      const patch = payload.patch && typeof payload.patch === 'object' ? payload.patch : null;
+      if (!patch || !Object.keys(patch).length) return refuse('PAYLOAD_INVALID', { type: 'schedule-event.patch', missing: ['patch'] });
+      if ('id' in patch || 'createdAt' in patch) return refuse('FIELD_NOT_PATCHABLE', { field: 'id/createdAt', use: 'nothing — provenance is immutable' });
+      if ('name' in patch && (typeof patch.name !== 'string' || !patch.name.trim())) return refuse('NAME_REQUIRED', {});
+      if ('project' in patch && patch.project && !findProject(patch.project)) return refuse('PROJECT_NOT_FOUND', { projectId: patch.project });
+      if ('recurrence' in patch && !normaliseRecurrence(patch.recurrence)) return refuse('RECURRENCE_INVALID', {});
+      const next = {};
+      if ('name' in patch) next.name = patch.name.trim().slice(0, 200);
+      if ('note' in patch) next.note = typeof patch.note === 'string' ? patch.note.slice(0, 1000) : '';
+      if ('project' in patch) next.project = patch.project || '';
+      if ('start' in patch) { if (!validInstant(patch.start)) return refuse('EVENT_TIME_INVALID', { field: 'start', value: patch.start }); next.start = new Date(patch.start).toISOString(); }
+      if ('deadline' in patch) { if (!validInstant(patch.deadline)) return refuse('EVENT_TIME_INVALID', { field: 'deadline', value: patch.deadline }); next.deadline = new Date(patch.deadline).toISOString(); }
+      if ('recurrence' in patch) next.recurrence = normaliseRecurrence(patch.recurrence);
+      const afterStart = new Date(next.start || item.start).getTime();
+      const afterEnd = new Date(next.deadline || item.deadline).getTime();
+      if (!(afterEnd > afterStart)) return refuse('EVENT_END_BEFORE_START', {});
+      const changed = Object.keys(next).filter((key) => JSON.stringify(item[key]) !== JSON.stringify(next[key]));
+      if (!changed.length) return { ok: true, apply: () => ({ value: { ...item }, entity: { kind: 'schedule-event', id: item.id }, before: null, after: null, changed: false }) };
+      const before = {}; const after = {};
+      changed.forEach((key) => { before[key] = item[key]; after[key] = next[key]; });
+      return { ok: true, apply: () => { Object.assign(item, next); return { value: { ...item }, entity: { kind: 'schedule-event', id: item.id }, before, after, changed: true }; } };
+    },
+
+    'schedule-event.delete'(payload, ctx) {
+      const item = findScheduleEvent(payload.eventId);
+      if (!item) return refuse('ENTITY_NOT_FOUND', { kind: 'schedule event', id: payload.eventId });
+      const conflict = checkRev(ctx, 'schedule-event', payload.eventId);
+      if (conflict) return conflict;
+      return { ok: true, apply: () => {
+        const index = state.scheduleEvents.indexOf(item);
+        state.scheduleEvents.splice(index, 1);
+        return { value: { id: item.id }, entity: { kind: 'schedule-event', id: item.id }, before: { ...item }, after: null, changed: true };
+      } };
+    },
+
     'proposal.accept'(payload, ctx) {
       return refuse('COMMAND_NOT_IMPLEMENTED', { type: 'proposal.accept', slice: 'slice 2' });
     },
@@ -1157,6 +1279,9 @@ const Store = (() => {
           if (project) project.rev = positiveInt(project.rev, 1) + 1;
         } else if (entity.kind === 'run' && state.run) {
           state.run.rev = positiveInt(state.run.rev, 1) + 1;
+        } else if (entity.kind === 'schedule-event') {
+          const scheduleEvent = findScheduleEvent(entity.id);
+          if (scheduleEvent) scheduleEvent.rev = positiveInt(scheduleEvent.rev, 1) + 1;
         }
       }
       const rev = revisionOf(entity.kind, entity.id);
@@ -1226,6 +1351,8 @@ const Store = (() => {
     tasks: () => state.tasks.slice(),
 
     task: (taskId) => state.tasks.find((t) => t.id === taskId) ?? null,
+
+    scheduleEvents: () => state.scheduleEvents.map((event) => ({ ...event, recurrence: event.recurrence ? { ...event.recurrence } : null })),
 
     /**
      * The locked run, or null. A run carries the plan it was locked with:

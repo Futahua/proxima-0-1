@@ -147,20 +147,38 @@
 
     <p class="tk-empty" id="hubEmpty" hidden>No projects yet. Create one and its tasks will gather here.</p>
 
+    <div class="hub-tabs" role="tablist" aria-label="Project type">
+      <button class="hub-tab active" data-project-kind="task" role="tab" aria-selected="true">📁 Task Projects <span id="taskProjectCount">0</span></button>
+      <button class="hub-tab" data-project-kind="schedule" role="tab" aria-selected="false">▦ Schedules <span id="scheduleProjectCount">0</span></button>
+    </div>
     <div class="hub-grid" id="hubGrid" hidden></div>
   </section>
 
-  <!-- A destination, not a surface. The original's Schedule runs calendar events
-       rather than tasks; there is no event model and no event store here, so this
-       route says exactly that instead of showing an empty imitation of one. -->
-  <section class="stub" id="schedule" hidden>
-    <p class="eyebrow">SURFACE</p>
-    <h1>Schedule</h1>
-    <p class="sub">Not built yet. The original&rsquo;s third surface schedules calendar events, not tasks:
-      it has its own project type, its own store and its own views. None of that
-      exists here yet, so this page is a destination rather than an imitation
-      &mdash; there is nothing on it to try.</p>
-    <p class="sub"><a href="#/">Go to Daily</a> for the board and Timekeeping, which are real.</p>
+  <section id="schedule" hidden>
+    <div class="schedule-head">
+      <div>
+        <p class="eyebrow">SURFACE</p>
+        <h1>Schedule</h1>
+        <p class="sub" id="scheduleRange"></p>
+      </div>
+      <button class="primary" id="scheduleNew">+ Event</button>
+    </div>
+    <div class="schedule-toolbar" aria-label="Schedule controls">
+      <div class="schedule-modes" role="group" aria-label="View">
+        <button data-schedule-mode="day">Day</button>
+        <button data-schedule-mode="four-day">4 Day</button>
+        <button data-schedule-mode="week">Week</button>
+        <button data-schedule-mode="month">Month</button>
+        <button data-schedule-mode="year">Year</button>
+        <button data-schedule-mode="agenda">Agenda</button>
+      </div>
+      <div class="schedule-nav">
+        <button id="schedulePrev" aria-label="Previous period">‹</button>
+        <button id="scheduleToday">Today</button>
+        <button id="scheduleNext" aria-label="Next period">›</button>
+      </div>
+    </div>
+    <div class="schedule-body" id="scheduleBody"></div>
   </section>
 
   <!-- A route that resolves to nothing says so, rather than falling back to a
@@ -211,11 +229,52 @@
     <h3>New project</h3>
     <label>Name <input name="name" maxlength="120" autocomplete="off" placeholder="e.g. Dyson Sphere Alpha"></label>
     <label>Description <textarea name="description" rows="2" maxlength="500" placeholder="What this project is for (optional)"></textarea></label>
+    <label>Type
+      <select name="projectType">
+        <option value="task">Task project</option>
+        <option value="schedule">Schedule</option>
+      </select>
+    </label>
     <p class="field-error" id="projectError" hidden role="alert"></p>
     <menu>
       <span class="spacer"></span>
       <button value="cancel" type="submit" formnovalidate class="ghost">Cancel</button>
       <button value="save" class="primary">Create</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="eventDialog">
+  <form method="dialog" id="eventForm">
+    <h3 id="eventDialogTitle">New event</h3>
+    <label>Name <input name="name" required maxlength="200" autocomplete="off" placeholder="What is happening?"></label>
+    <label>Note <textarea name="note" rows="2" maxlength="1000"></textarea></label>
+    <label>Project
+      <select name="project"><option value="">Uncategorised</option></select>
+    </label>
+    <div class="event-time-pair">
+      <label>Starts <input name="start" type="datetime-local" required></label>
+      <label>Ends <input name="deadline" type="datetime-local" required></label>
+    </div>
+    <label>Repeats
+      <select name="frequency">
+        <option value="none">Does not repeat</option>
+        <option value="daily">Daily</option>
+        <option value="weekly">Weekly</option>
+      </select>
+    </label>
+    <label class="repeat-count">Occurrences <input name="count" type="number" min="0" max="365" step="1" value="0">
+      <small>0 means continue until changed.</small>
+    </label>
+    <label>Repeat until <input name="until" type="date">
+      <small>Leave blank for an open-ended series.</small>
+    </label>
+    <p class="field-error" id="eventError" hidden role="alert"></p>
+    <menu>
+      <button value="delete" id="deleteEventBtn" class="danger" type="submit" formnovalidate>Delete</button>
+      <span class="spacer"></span>
+      <button value="cancel" type="submit" formnovalidate class="ghost">Cancel</button>
+      <button value="save" class="primary">Save</button>
     </menu>
   </form>
 </dialog>
@@ -232,6 +291,7 @@
   </form>
 </dialog>
 
+<script src="schedule-fixture.js"></script>
 <script src="store.js"></script>
 <script src="app.js"></script>
 </body>
