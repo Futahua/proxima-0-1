@@ -2749,7 +2749,7 @@
       const baseOccurrenceEnd = new Date(start.getTime() + duration);
       const effectiveStart = exception?.start ? new Date(exception.start) : start;
       const end = exception?.deadline ? new Date(exception.deadline) : baseOccurrenceEnd;
-      if (recurrence.until && start > new Date(recurrence.until + 'T23:59:59')) break;
+      if (recurrence.until && start > new Date(recurrence.until + 'T23:59:59.999Z')) break;
       if (end > range.start && effectiveStart < range.end) result.push({ item, start: effectiveStart, end, baseStart: new Date(start), baseEnd: baseOccurrenceEnd, occurrence: index, occurrenceKey: occurrenceKey, exception: exception });
       if (recurrence.frequency === 'none' || (recurrence.count && index + 1 >= recurrence.count)) break;
       start = nextStart(start); if (!start) break; index++;
