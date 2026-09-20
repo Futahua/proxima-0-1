@@ -1117,7 +1117,7 @@
     eventForm.elements.until.value = item.recurrence?.until || '';
     Array.from(eventForm.elements.weekdays.options).forEach((option) => { option.selected = Boolean(item.recurrence?.weekdays?.includes(Number(option.value))); });
     const occurrenceOnly = eventForm.elements.scope.value === 'occurrence';
-    ['project', 'frequency', 'count', 'until'].forEach((name) => { eventForm.elements[name].disabled = occurrenceOnly; });
+    ['project', 'frequency', 'interval', 'unit', 'count', 'until', 'weekdays'].forEach((name) => { eventForm.elements[name].disabled = occurrenceOnly; });
   });
 
   eventForm.addEventListener('submit', async (event) => {
@@ -1150,7 +1150,7 @@
     createEventCommandId = null; eventDialog.close(); renderSchedule();
   });
 
-  eventDialog.addEventListener('close', () => { eventForm.reset(); setEventError(''); editingEventId = null; editingOccurrenceKey = ''; editingOccurrence = null; ['project', 'frequency', 'count', 'until'].forEach((name) => { if (eventForm.elements[name]) eventForm.elements[name].disabled = false; }); createEventCommandId = null; });
+  eventDialog.addEventListener('close', () => { eventForm.reset(); setEventError(''); editingEventId = null; editingOccurrenceKey = ''; editingOccurrence = null; ['project', 'frequency', 'interval', 'unit', 'count', 'until', 'weekdays'].forEach((name) => { if (eventForm.elements[name]) eventForm.elements[name].disabled = false; }); createEventCommandId = null; });
 
   $('#scheduleNew').addEventListener('click', () => openScheduleEvent(null, scheduleCursor));
   $('#schedulePrev').addEventListener('click', () => {
@@ -2701,7 +2701,8 @@
     const baseEnd = new Date(item.deadline);
     const recurrence = item.recurrence || { frequency: 'none', interval: 1, count: 0 };
     const selectedWeekdays = Array.isArray(recurrence.weekdays) ? recurrence.weekdays : [];
-    const stepDays = recurrence.frequency === 'weekly' && !selectedWeekdays.length ? 7 * recurrence.interval : recurrence.frequency === 'daily' ? recurrence.interval : recurrence.frequency === 'custom' && recurrence.unit === 'weeks' ? 7 * recurrence.interval : recurrence.frequency === 'custom' && recurrence.unit === 'days' ? recurrence.interval : 0;
+    const weeklyRule = recurrence.frequency === 'weekly' || (recurrence.frequency === 'custom' && recurrence.unit === 'weeks');
+    const stepDays = weeklyRule && !selectedWeekdays.length ? 7 * recurrence.interval : recurrence.frequency === 'daily' ? recurrence.interval : recurrence.frequency === 'custom' && recurrence.unit === 'days' ? recurrence.interval : 0;
     let index = 0;
     let start = new Date(baseStart);
     const duration = baseEnd.getTime() - baseStart.getTime();
@@ -2710,9 +2711,11 @@
     const baseWeek = new Date(baseStart); baseWeek.setDate(baseWeek.getDate() - baseWeek.getDay()); baseWeek.setHours(0, 0, 0, 0);
     const nextStart = (current) => {
       if (recurrence.frequency === 'monthly' || (recurrence.frequency === 'custom' && recurrence.unit === 'months')) {
-        const next = new Date(current); next.setMonth(next.getMonth() + recurrence.interval); return next;
+        const dayOfMonth = baseStart.getDate(); let monthIndex = current.getMonth() + recurrence.interval; let guard = 0;
+        while (guard < 1200) { const year = current.getFullYear() + Math.floor(monthIndex / 12); const month = ((monthIndex % 12) + 12) % 12; const daysInMonth = new Date(year, month + 1, 0).getDate(); if (dayOfMonth <= daysInMonth) return new Date(year, month, dayOfMonth, baseStart.getHours(), baseStart.getMinutes(), baseStart.getSeconds(), baseStart.getMilliseconds()); monthIndex += recurrence.interval; guard += 1; }
+        return null;
       }
-      if (recurrence.frequency === 'weekly' && selectedWeekdays.length) {
+      if (weeklyRule && selectedWeekdays.length) {
         for (let offset = 1; offset <= 7 * (recurrence.interval + 1); offset += 1) {
           const candidate = new Date(current); candidate.setDate(candidate.getDate() + offset);
           const week = new Date(candidate); week.setDate(week.getDate() - week.getDay()); week.setHours(0, 0, 0, 0);
@@ -2723,6 +2726,7 @@
       if (!stepDays) return null;
       const next = new Date(current); next.setDate(next.getDate() + stepDays); return next;
     };
+    if (weeklyRule && selectedWeekdays.length && !selectedWeekdays.includes(start.getDay())) start = nextStart(start);
     while (index < maxOccurrences) {
       const occurrenceKey = start.toISOString();
       const exception = Array.isArray(item.exceptions) ? item.exceptions.find((entry) => entry.key === occurrenceKey) : null;
@@ -2961,7 +2965,7 @@
     eventForm.elements.color.value = details?.color || item?.color || '#9fc9e4';
     eventForm.elements.start.value = toLocalInput(start); eventForm.elements.deadline.value = toLocalInput(end);
     eventForm.elements.frequency.value = item && item.recurrence ? item.recurrence.frequency : 'none'; eventForm.elements.interval.value = item && item.recurrence ? (item.recurrence.interval || 1) : 1; eventForm.elements.unit.value = item && item.recurrence ? (item.recurrence.unit || 'days') : 'days'; eventForm.elements.count.value = item && item.recurrence ? item.recurrence.count : 0; eventForm.elements.until.value = item && item.recurrence ? (item.recurrence.until || '') : ''; Array.from(eventForm.elements.weekdays.options).forEach((option) => { option.selected = Boolean(item?.recurrence?.weekdays?.includes(Number(option.value))); });
-    if (eventForm.elements.scope) { eventForm.elements.scope.value = 'occurrence'; const hasScope = Boolean(item && occurrence && item.recurrence && item.recurrence.frequency !== 'none'); $('#eventScopeWrap').hidden = !hasScope; ['project', 'frequency', 'count', 'until'].forEach((name) => { if (eventForm.elements[name]) eventForm.elements[name].disabled = hasScope; }); }
+    if (eventForm.elements.scope) { eventForm.elements.scope.value = 'occurrence'; const hasScope = Boolean(item && occurrence && item.recurrence && item.recurrence.frequency !== 'none'); $('#eventScopeWrap').hidden = !hasScope; ['project', 'frequency', 'interval', 'unit', 'count', 'until', 'weekdays'].forEach((name) => { if (eventForm.elements[name]) eventForm.elements[name].disabled = hasScope; }); }
     eventDialog.showModal(); eventForm.elements.name.focus();
   }
 
