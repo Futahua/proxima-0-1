@@ -66,32 +66,9 @@
     </div>
   </section>
 
-  <section class="project-canvas" id="projectCanvas" hidden>
-    <div class="canvas-head">
-      <div>
-        <p class="eyebrow">PROJECT CANVAS · PROXIMA NATIVE</p>
-        <h1 id="canvasProjectName">Project canvas</h1>
-        <p class="sub" id="canvasProjectDescription">A private canvas for this project.</p>
-      </div>
-      <div class="canvas-head-actions">
-        <span class="canvas-count" id="canvasCount"></span>
-        <span class="canvas-selection" id="canvasSelection">Drag cards to arrange</span>
-        <button class="primary" id="canvasNewTask">+ New task</button>
-      </div>
-    </div>
-    <div class="canvas-toolbar" aria-label="Project canvas controls">
-      <span class="canvas-breadcrumb">This is Minh <span>›</span> <strong id="canvasBreadcrumb">Project</strong></span>
-      <span class="spacer"></span>
-      <button class="tk-btn" id="canvasAddGroup">+ Group</button>
-      <button class="tk-btn" id="canvasZoomOut" title="Zoom out">−</button>
-      <span class="canvas-zoom" id="canvasZoom">100%</span>
-      <button class="tk-btn" id="canvasZoomIn" title="Zoom in">+</button>
-      <button class="tk-btn" id="canvasReset">Reset view</button>
-    </div>
-    <div class="canvas-viewport" id="canvasViewport" aria-label="Project canvas. Shift-drag to select, drag empty space to pan.">
-      <div class="canvas-world" id="canvasWorld"></div>
-      <div class="canvas-marquee" id="canvasMarquee" hidden></div>
-      <p class="canvas-empty" id="canvasEmpty" hidden>No tasks in this project yet. Use New task to add the first card.</p>
+  <section class="project-canvas" id="projectCanvas" hidden aria-label="Project As you Go workspace">
+    <div id="projectWorkspaceSurface" class="project-workspace-surface">
+      <p class="project-workspace-message">Choose a project to open its As you Go folder.</p>
     </div>
   </section>
 

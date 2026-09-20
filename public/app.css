@@ -221,34 +221,10 @@ main { padding: 16px; max-width: 1200px; }
    As you Go. The world is larger than the viewport; cards remain readable while
    the camera pans and zooms. */
 .project-canvas { min-height: calc(100vh - 96px); }
-.canvas-head { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 12px; }
-.canvas-head h1 { margin: 2px 0 4px; font-size: 22px; }
-.canvas-head-actions { margin-left: auto; display: flex; align-items: center; gap: 12px; color: var(--dim); font-size: 12px; }
-.canvas-selection { color: var(--accent); }
-.canvas-toolbar { display: flex; align-items: center; gap: 7px; min-height: 42px; padding: 7px 10px; background: var(--panel); border: 1px solid var(--line); border-bottom: 0; border-radius: var(--radius) var(--radius) 0 0; }
-.canvas-breadcrumb { color: var(--dim); font-size: 12px; }
-.canvas-breadcrumb span { margin: 0 6px; color: var(--line); }
-.canvas-breadcrumb strong { color: var(--ink); font-weight: 600; }
-.canvas-zoom { width: 44px; text-align: center; color: var(--dim); font-size: 12px; }
-.canvas-viewport { position: relative; height: min(70vh, 720px); min-height: 480px; overflow: hidden; background: #171b23; border: 1px solid var(--line); border-radius: 0 0 var(--radius) var(--radius); cursor: grab; isolation: isolate; }
-.canvas-viewport:active { cursor: grabbing; }
-.canvas-viewport::before { content: ''; position: absolute; inset: 0; background-image: linear-gradient(rgba(115, 130, 155, .08) 1px, transparent 1px), linear-gradient(90deg, rgba(115, 130, 155, .08) 1px, transparent 1px); background-size: 28px 28px; pointer-events: none; }
-.canvas-world { position: absolute; inset: 0; transform-origin: 0 0; min-width: 1px; min-height: 1px; }
-.canvas-node { position: absolute; z-index: 1; width: 220px; min-height: 116px; padding: 12px 14px; background: #252b36; border: 1px solid #4b576a; border-left: 3px solid #64748a; border-radius: 8px; box-shadow: 0 10px 22px rgba(0,0,0,.24); cursor: grab; user-select: none; transition: border-color .12s, box-shadow .12s, opacity .12s; }
-.canvas-node:hover { border-color: #8595ad; box-shadow: 0 12px 28px rgba(0,0,0,.36); }
-.canvas-node:active, .canvas-node.dragging { cursor: grabbing; opacity: .82; }
-.canvas-node.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(184, 208, 74, .22), 0 12px 28px rgba(0,0,0,.36); }
-.canvas-node-backlog { border-left-color: #6f88a5; }
-.canvas-node-running { border-left-color: var(--running); }
-.canvas-node-finished { border-left-color: var(--finished); }
-.canvas-node-status { display: inline-block; color: var(--dim); font-size: 10px; letter-spacing: .09em; text-transform: uppercase; }
-.canvas-node h3 { margin: 5px 0 6px; font-size: 15px; line-height: 1.25; }
-.canvas-node p { margin: 0; color: var(--dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.canvas-node footer { margin-top: 12px; color: #707b8e; font-size: 11px; }
-.canvas-group { position: absolute; z-index: 0; min-width: 280px; min-height: 130px; padding: 12px; border: 1px dashed #65758d; border-radius: 10px; background: rgba(49, 59, 75, .24); pointer-events: none; }
-.canvas-group span { color: #94a3b9; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
-.canvas-marquee { position: absolute; z-index: 20; border: 1px solid var(--accent); background: rgba(184, 208, 74, .12); pointer-events: none; }
-.canvas-empty { position: absolute; inset: 40% 20px auto; text-align: center; color: var(--dim); pointer-events: none; }
+.project-workspace-surface { min-height: calc(100vh - 112px); position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: #151922; }
+.project-workspace-frame { display: block; width: 100%; height: calc(100vh - 114px); min-height: 620px; border: 0; background: #151922; }
+.project-workspace-message { margin: 48px auto; max-width: 560px; padding: 24px; color: var(--dim); text-align: center; }
+.project-workspace-message-error { color: #f0a8a8; }
 
 .tk-toggles { display: flex; gap: 8px; flex-wrap: wrap; }
 .tk-toggle::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 7px;

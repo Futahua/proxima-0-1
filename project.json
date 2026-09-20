@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "backpackId": "bp-759cd960-26ee-4560-90b0-1ef6678802c4",
   "entry": "public/index.html",
+  "workspaceHost": "bp-4c43caab-6fc6-44e9-ab87-25b291d1cc0d",
   "folderPolicy": {
     "deletion": "protected-root",
     "relocation": "allowed"

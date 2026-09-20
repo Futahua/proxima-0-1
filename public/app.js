@@ -941,7 +941,6 @@
   // The project canvas is a separate controller, but opening a node must land in
   // the same canonical task dialog as the board. This is a callback boundary, not
   // a second task editor.
-  window.__proximaOpenTask = openTask;
 
   /**
    * The dialog's one error line. It carries the cockpit's own prevalidation AND
@@ -2595,7 +2594,7 @@
     const r = route();
     if (r.name === 'project') {
       const project = Store.project(r.id);
-      return project && project.projectType === 'task' ? 'project' : 'missing';
+      return project ? 'project' : 'missing';
     }
     return r.name;
   }
@@ -2603,7 +2602,7 @@
   /** The two surfaces that mount the board and Timekeeping. */
   function boardMounted() {
     const name = currentSurface();
-    return name === 'daily' || name === 'project';
+    return name === 'daily';
   }
 
   const lensPick = $('#lensPick');
@@ -2692,7 +2691,6 @@
    */
   function renderProject(project) {
     if (!project) return;
-    $('#canvasBreadcrumb').textContent = project.name;
     ProjectCanvas.mount(project);
   }
 
