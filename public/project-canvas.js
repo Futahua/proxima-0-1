@@ -25,6 +25,10 @@ function messageTarget() {
   return window.location.origin || '*';
 }
 
+function projectOrigin(url) {
+  return url.origin === 'null' ? `${url.protocol}//${url.host}` : url.origin;
+}
+
 function parentRequest(type, detail = {}) {
   const requestId = crypto.randomUUID();
   window.parent.postMessage({ type, requestId, ...detail }, messageTarget());
@@ -123,7 +127,7 @@ async function mount(project) {
       return;
     }
     const url = new URL(scope.url);
-    childOrigin = url.origin;
+    childOrigin = projectOrigin(url);
     url.searchParams.set('as-you-go-scope-root', scope.rootGroupId);
     url.searchParams.set('papers-embedded-surface', 'proxima');
     child = document.createElement('iframe');
