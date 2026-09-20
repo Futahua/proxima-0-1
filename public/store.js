@@ -419,6 +419,9 @@ const Store = (() => {
         until: isRealDay(raw.recurrence.until) ? raw.recurrence.until : '',
       }
       : { frequency: 'none', interval: 1, count: 0, until: '' };
+    const exceptions = Array.isArray(raw.exceptions)
+      ? raw.exceptions.map(normaliseScheduleException).filter(Boolean)
+      : [];
     return {
       ...raw,
       id: raw.id,
@@ -428,10 +431,27 @@ const Store = (() => {
       start: start.toISOString(),
       deadline: deadline.toISOString(),
       recurrence: recurrence,
+      exceptions: exceptions,
       sourceKey: typeof raw.sourceKey === 'string' ? raw.sourceKey : '',
       color: typeof raw.color === 'string' ? raw.color : '',
       createdAt: validInstant(raw.createdAt) ? raw.createdAt : new Date().toISOString(),
       rev: positiveInt(raw.rev, 1),
+    };
+  }
+
+  function normaliseScheduleException(raw) {
+    if (!raw || typeof raw !== 'object' || typeof raw.key !== 'string' || !raw.key) return null;
+    if (raw.cancelled) return { key: raw.key, cancelled: true };
+    if (!validInstant(raw.start) || !validInstant(raw.deadline) || new Date(raw.deadline) <= new Date(raw.start)) return null;
+    return {
+      key: raw.key,
+      start: new Date(raw.start).toISOString(),
+      deadline: new Date(raw.deadline).toISOString(),
+      name: typeof raw.name === 'string' ? raw.name.slice(0, 200) : '',
+      note: typeof raw.note === 'string' ? raw.note.slice(0, 1000) : '',
+      color: typeof raw.color === 'string' ? raw.color : '',
+      cancelled: false,
+      detached: true,
     };
   }
 
@@ -594,6 +614,8 @@ const Store = (() => {
     EVENT_TIME_INVALID: (d) => '“' + d.value + '” is not a valid event time.',
     EVENT_END_BEFORE_START: (d) => 'The event ends before it starts. Nothing was written.',
     RECURRENCE_INVALID: () => 'That recurrence is not supported. Choose none, daily, or weekly.',
+    PROJECT_TYPE_INVALID: () => 'Schedule events can only belong to Schedule projects.',
+    OCCURRENCE_INVALID: () => 'That scheduled occurrence is no longer available.',
     FIELD_NOT_PATCHABLE: (d) => 'task.patch cannot change ' + d.field + ' — use ' + d.use + '.',
     MOVE_ANCHOR_NOT_IN_COLUMN: (d) => 'The task to insert before is not in that column any more.',
     RUN_HAS_NO_MEMBERS: () => 'Nothing to lock — no tasks are in the running column.',
@@ -645,6 +667,7 @@ const Store = (() => {
   const findTask = (taskId) => state.tasks.find((t) => t.id === taskId) || null;
   const findProject = (projectId) => state.projects.find((p) => p.id === projectId) || null;
   const findScheduleEvent = (eventId) => state.scheduleEvents.find((e) => e.id === eventId) || null;
+  const findScheduleException = (event, key) => (event && Array.isArray(event.exceptions) ? event.exceptions.find((exception) => exception.key === key) : null) || null;
 
   /** The revision a command's `ifRev` is checked against. */
   function revisionOf(kind, targetId) {
@@ -1114,6 +1137,7 @@ const Store = (() => {
       if (!validInstant(payload.deadline)) return refuse('EVENT_TIME_INVALID', { field: 'deadline', value: payload.deadline });
       if (new Date(payload.deadline).getTime() <= new Date(payload.start).getTime()) return refuse('EVENT_END_BEFORE_START', {});
       if (payload.project && !findProject(payload.project)) return refuse('PROJECT_NOT_FOUND', { projectId: payload.project });
+      if (payload.project && findProject(payload.project).projectType !== 'schedule') return refuse('PROJECT_TYPE_INVALID', {});
       const recurrence = normaliseRecurrence(payload.recurrence);
       if (!recurrence) return refuse('RECURRENCE_INVALID', {});
       const item = {
@@ -1124,6 +1148,7 @@ const Store = (() => {
         start: new Date(payload.start).toISOString(),
         deadline: new Date(payload.deadline).toISOString(),
         recurrence: recurrence,
+        exceptions: [],
         sourceKey: typeof payload.sourceKey === 'string' ? payload.sourceKey : '',
         color: typeof payload.color === 'string' ? payload.color : '',
         createdAt: new Date().toISOString(),
@@ -1145,6 +1170,7 @@ const Store = (() => {
       if ('id' in patch || 'createdAt' in patch) return refuse('FIELD_NOT_PATCHABLE', { field: 'id/createdAt', use: 'nothing — provenance is immutable' });
       if ('name' in patch && (typeof patch.name !== 'string' || !patch.name.trim())) return refuse('NAME_REQUIRED', {});
       if ('project' in patch && patch.project && !findProject(patch.project)) return refuse('PROJECT_NOT_FOUND', { projectId: patch.project });
+      if ('project' in patch && patch.project && findProject(patch.project).projectType !== 'schedule') return refuse('PROJECT_TYPE_INVALID', {});
       if ('recurrence' in patch && !normaliseRecurrence(patch.recurrence)) return refuse('RECURRENCE_INVALID', {});
       const next = {};
       if ('name' in patch) next.name = patch.name.trim().slice(0, 200);
@@ -1153,6 +1179,7 @@ const Store = (() => {
       if ('start' in patch) { if (!validInstant(patch.start)) return refuse('EVENT_TIME_INVALID', { field: 'start', value: patch.start }); next.start = new Date(patch.start).toISOString(); }
       if ('deadline' in patch) { if (!validInstant(patch.deadline)) return refuse('EVENT_TIME_INVALID', { field: 'deadline', value: patch.deadline }); next.deadline = new Date(patch.deadline).toISOString(); }
       if ('recurrence' in patch) next.recurrence = normaliseRecurrence(patch.recurrence);
+      if ('color' in patch) next.color = typeof patch.color === 'string' ? patch.color.slice(0, 32) : '';
       const afterStart = new Date(next.start || item.start).getTime();
       const afterEnd = new Date(next.deadline || item.deadline).getTime();
       if (!(afterEnd > afterStart)) return refuse('EVENT_END_BEFORE_START', {});
@@ -1161,6 +1188,55 @@ const Store = (() => {
       const before = {}; const after = {};
       changed.forEach((key) => { before[key] = item[key]; after[key] = next[key]; });
       return { ok: true, apply: () => { Object.assign(item, next); return { value: { ...item }, entity: { kind: 'schedule-event', id: item.id }, before, after, changed: true }; } };
+    },
+
+    'schedule-event.occurrence.patch'(payload, ctx) {
+      const item = findScheduleEvent(payload.eventId);
+      if (!item) return refuse('ENTITY_NOT_FOUND', { kind: 'schedule event', id: payload.eventId });
+      const conflict = checkRev(ctx, 'schedule-event', payload.eventId);
+      if (conflict) return conflict;
+      if (typeof payload.occurrenceKey !== 'string' || !payload.occurrenceKey) return refuse('OCCURRENCE_INVALID', {});
+      const patch = payload.patch && typeof payload.patch === 'object' ? payload.patch : null;
+      if (!patch) return refuse('PAYLOAD_INVALID', { type: 'schedule-event.occurrence.patch', missing: ['patch'] });
+      const existing = findScheduleException(item, payload.occurrenceKey);
+      const base = existing && !existing.cancelled ? existing : { start: payload.occurrenceStart, deadline: payload.occurrenceDeadline, name: item.name, note: item.note, color: item.color };
+      if (!validInstant(base.start) || !validInstant(base.deadline)) return refuse('OCCURRENCE_INVALID', {});
+      const next = {
+        key: payload.occurrenceKey,
+        start: 'start' in patch ? patch.start : base.start,
+        deadline: 'deadline' in patch ? patch.deadline : base.deadline,
+        name: 'name' in patch ? String(patch.name || '').trim().slice(0, 200) : (base.name || item.name),
+        note: 'note' in patch ? String(patch.note || '').slice(0, 1000) : (base.note || item.note),
+        color: 'color' in patch ? String(patch.color || '').slice(0, 32) : (base.color || item.color),
+        cancelled: false,
+        detached: true,
+      };
+      if (!next.name) return refuse('NAME_REQUIRED', {});
+      if (!validInstant(next.start) || !validInstant(next.deadline)) return refuse('EVENT_TIME_INVALID', { field: 'occurrence', value: next.start });
+      if (new Date(next.deadline).getTime() <= new Date(next.start).getTime()) return refuse('EVENT_END_BEFORE_START', {});
+      const before = existing ? { ...existing } : null;
+      return { ok: true, apply: () => {
+        const exceptions = Array.isArray(item.exceptions) ? item.exceptions : (item.exceptions = []);
+        const index = exceptions.findIndex((exception) => exception.key === next.key);
+        exceptions.splice(index < 0 ? exceptions.length : index, index < 0 ? 0 : 1, next);
+        return { value: { ...item, exceptions: exceptions.map((exception) => ({ ...exception })) }, entity: { kind: 'schedule-event', id: item.id }, before: before, after: { ...next }, changed: true };
+      } };
+    },
+
+    'schedule-event.occurrence.delete'(payload, ctx) {
+      const item = findScheduleEvent(payload.eventId);
+      if (!item) return refuse('ENTITY_NOT_FOUND', { kind: 'schedule event', id: payload.eventId });
+      const conflict = checkRev(ctx, 'schedule-event', payload.eventId);
+      if (conflict) return conflict;
+      if (typeof payload.occurrenceKey !== 'string' || !payload.occurrenceKey) return refuse('OCCURRENCE_INVALID', {});
+      const before = findScheduleException(item, payload.occurrenceKey);
+      return { ok: true, apply: () => {
+        const exceptions = Array.isArray(item.exceptions) ? item.exceptions : (item.exceptions = []);
+        const index = exceptions.findIndex((exception) => exception.key === payload.occurrenceKey);
+        const cancelled = { key: payload.occurrenceKey, cancelled: true };
+        if (index < 0) exceptions.push(cancelled); else exceptions.splice(index, 1, cancelled);
+        return { value: { id: item.id, occurrenceKey: payload.occurrenceKey }, entity: { kind: 'schedule-event', id: item.id }, before: before, after: cancelled, changed: true };
+      } };
     },
 
     'schedule-event.delete'(payload, ctx) {
@@ -1352,7 +1428,7 @@ const Store = (() => {
 
     task: (taskId) => state.tasks.find((t) => t.id === taskId) ?? null,
 
-    scheduleEvents: () => state.scheduleEvents.map((event) => ({ ...event, recurrence: event.recurrence ? { ...event.recurrence } : null })),
+    scheduleEvents: () => state.scheduleEvents.map((event) => ({ ...event, recurrence: event.recurrence ? { ...event.recurrence } : null, exceptions: Array.isArray(event.exceptions) ? event.exceptions.map((exception) => ({ ...exception })) : [] })),
 
     /**
      * The locked run, or null. A run carries the plan it was locked with:

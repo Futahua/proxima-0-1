@@ -249,6 +249,7 @@
     <h3 id="eventDialogTitle">New event</h3>
     <label>Name <input name="name" required maxlength="200" autocomplete="off" placeholder="What is happening?"></label>
     <label>Note <textarea name="note" rows="2" maxlength="1000"></textarea></label>
+    <label>Color <input name="color" type="color" value="#9fc9e4"></label>
     <label>Project
       <select name="project"><option value="">Uncategorised</option></select>
     </label>
@@ -268,6 +269,12 @@
     </label>
     <label>Repeat until <input name="until" type="date">
       <small>Leave blank for an open-ended series.</small>
+    </label>
+    <label id="eventScopeWrap" hidden>Apply changes to
+      <select name="scope">
+        <option value="occurrence">This occurrence only</option>
+        <option value="series">Entire series</option>
+      </select>
     </label>
     <p class="field-error" id="eventError" hidden role="alert"></p>
     <menu>

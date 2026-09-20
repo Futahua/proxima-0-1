@@ -40,6 +40,7 @@
   let scheduleMode = 'month';
   let scheduleCursor = new Date();
   let editingEventId = null;
+  let editingOccurrenceKey = '';
   let createEventCommandId = null;
   let hubKind = 'task';
 
@@ -1104,7 +1105,10 @@
     if (action === 'delete') {
       event.preventDefault();
       if (!editingEventId) return;
-      const result = await send('schedule-event.delete', { eventId: editingEventId });
+      const scope = eventForm.elements.scope ? eventForm.elements.scope.value : 'series';
+      const result = editingOccurrenceKey && scope === 'occurrence'
+        ? await send('schedule-event.occurrence.delete', { eventId: editingEventId, occurrenceKey: editingOccurrenceKey })
+        : await send('schedule-event.delete', { eventId: editingEventId });
       if (!result.ok) { setEventError(result.message); return; }
       eventDialog.close(); renderSchedule();
       return;
@@ -1114,15 +1118,18 @@
     if (!eventForm.elements.name.value.trim()) { setEventError('An event needs a name.'); return; }
     if (!start || !deadline || deadline <= start) { setEventError('Choose a valid time range, with the end after the start.'); return; }
     const recurrence = { frequency: eventForm.elements.frequency.value, interval: 1, count: Number(eventForm.elements.count.value) || 0, until: eventForm.elements.until.value || '' };
-    const fields = { name: eventForm.elements.name.value, note: eventForm.elements.note.value, project: eventForm.elements.project.value, start: start.toISOString(), deadline: deadline.toISOString(), recurrence: recurrence };
-    const result = editingEventId
-      ? await send('schedule-event.patch', { eventId: editingEventId, patch: fields })
+    const fields = { name: eventForm.elements.name.value, note: eventForm.elements.note.value, project: eventForm.elements.project.value, start: start.toISOString(), deadline: deadline.toISOString(), color: eventForm.elements.color.value, recurrence: recurrence };
+    const scope = eventForm.elements.scope ? eventForm.elements.scope.value : 'series';
+    const result = editingEventId && editingOccurrenceKey && scope === 'occurrence'
+      ? await send('schedule-event.occurrence.patch', { eventId: editingEventId, occurrenceKey: editingOccurrenceKey, occurrenceStart: start.toISOString(), occurrenceDeadline: deadline.toISOString(), patch: { name: fields.name, note: fields.note, color: fields.color, start: fields.start, deadline: fields.deadline } })
+      : editingEventId
+        ? await send('schedule-event.patch', { eventId: editingEventId, patch: fields })
       : await send('schedule-event.create', fields, { commandId: createEventCommandId });
     if (!result.ok) { setEventError(result.message); return; }
     createEventCommandId = null; eventDialog.close(); renderSchedule();
   });
 
-  eventDialog.addEventListener('close', () => { eventForm.reset(); setEventError(''); editingEventId = null; createEventCommandId = null; });
+  eventDialog.addEventListener('close', () => { eventForm.reset(); setEventError(''); editingEventId = null; editingOccurrenceKey = ''; createEventCommandId = null; });
 
   $('#scheduleNew').addEventListener('click', () => openScheduleEvent(null, scheduleCursor));
   $('#schedulePrev').addEventListener('click', () => {
@@ -2675,13 +2682,25 @@
     const stepDays = recurrence.frequency === 'weekly' ? 7 * recurrence.interval : recurrence.frequency === 'daily' ? recurrence.interval : 0;
     let index = 0;
     let start = new Date(baseStart);
-    while (index < 366) {
-      const end = new Date(start.getTime() + (baseEnd.getTime() - baseStart.getTime()));
+    const duration = baseEnd.getTime() - baseStart.getTime();
+    const distanceDays = Math.max(0, Math.ceil((range.end.getTime() - baseStart.getTime()) / DAY_MS));
+    const maxOccurrences = Math.min(10000, Math.max(32, Math.ceil(distanceDays / Math.max(1, stepDays || 1)) + 8));
+    while (index < maxOccurrences) {
+      const occurrenceKey = start.toISOString();
+      const exception = Array.isArray(item.exceptions) ? item.exceptions.find((entry) => entry.key === occurrenceKey) : null;
+      if (exception?.cancelled) {
+        if (!stepDays || (recurrence.count && index + 1 >= recurrence.count)) break;
+        start = new Date(start); start.setDate(start.getDate() + stepDays); index++;
+        continue;
+      }
+      const baseOccurrenceEnd = new Date(start.getTime() + duration);
+      const effectiveStart = exception?.start ? new Date(exception.start) : start;
+      const end = exception?.deadline ? new Date(exception.deadline) : baseOccurrenceEnd;
       if (recurrence.until && start > new Date(recurrence.until + 'T23:59:59')) break;
-      if (end > range.start && start < range.end) result.push({ item, start, end, occurrence: index });
+      if (end > range.start && effectiveStart < range.end) result.push({ item, start: effectiveStart, end, baseStart: new Date(start), baseEnd: baseOccurrenceEnd, occurrence: index, occurrenceKey: occurrenceKey, exception: exception });
       if (!stepDays || (recurrence.count && index + 1 >= recurrence.count)) break;
       start = new Date(start); start.setDate(start.getDate() + stepDays); index++;
-      if (start >= range.end && index > 0) break;
+      if (start >= range.end && index > 0 && !item.exceptions?.some((entry) => entry.key === start.toISOString())) break;
     }
     return result;
   }
@@ -2693,13 +2712,29 @@
       .flatMap((item) => scheduleOccurrences(item, range));
   }
 
-  async function moveScheduleEvent(eventId, targetStart) {
+  async function patchScheduleOccurrence(occurrence, patch) {
+    const item = Store.scheduleEvents().find((event) => event.id === occurrence.item.id);
+    if (!item) return;
+    const recurring = item.recurrence && item.recurrence.frequency !== 'none';
+    const result = recurring && occurrence.occurrenceKey
+      ? await send('schedule-event.occurrence.patch', {
+        eventId: item.id,
+        occurrenceKey: occurrence.occurrenceKey,
+        occurrenceStart: (occurrence.baseStart || occurrence.start).toISOString(),
+        occurrenceDeadline: (occurrence.baseEnd || occurrence.end).toISOString(),
+        patch: patch,
+      }, { ifRev: item.rev })
+      : await send('schedule-event.patch', { eventId: item.id, patch: patch }, { ifRev: item.rev });
+    if (result.ok) renderSchedule(); else reportRefusal(result, $('#scheduleBody'));
+  }
+
+  async function moveScheduleEvent(eventId, targetStart, occurrence) {
     const item = Store.scheduleEvents().find((event) => event.id === eventId);
     if (!item) return;
-    const oldStart = new Date(item.start); const oldEnd = new Date(item.deadline);
+    const oldStart = occurrence?.start ? new Date(occurrence.start) : new Date(item.start);
+    const oldEnd = occurrence?.end ? new Date(occurrence.end) : new Date(item.deadline);
     const nextStart = new Date(targetStart); const nextEnd = new Date(nextStart.getTime() + oldEnd.getTime() - oldStart.getTime());
-    const result = await send('schedule-event.patch', { eventId: eventId, patch: { start: nextStart.toISOString(), deadline: nextEnd.toISOString() } }, { ifRev: item.rev });
-    if (result.ok) renderSchedule(); else reportRefusal(result, $('#scheduleBody'));
+    await patchScheduleOccurrence(occurrence || { item: item }, { start: nextStart.toISOString(), deadline: nextEnd.toISOString() });
   }
 
   function scheduleTimeLabel(date) {
@@ -2711,39 +2746,74 @@
     button.type = 'button';
     button.className = 'schedule-event' + (occurrence.occurrence ? ' is-repeat' : '');
     button.dataset.eventId = occurrence.item.id;
+    button.dataset.occurrenceKey = occurrence.occurrenceKey || '';
     button.draggable = true;
-    button.title = occurrence.item.note || occurrence.item.name;
+    const details = occurrence.exception || occurrence.item;
+    button.style.setProperty('--schedule-color', details.color || occurrence.item.color || '#334052');
+    button.title = details.note || occurrence.item.note || occurrence.item.name;
     const title = document.createElement('span');
     title.className = 'schedule-event-name';
-    title.textContent = occurrence.item.name;
+    title.textContent = details.name || occurrence.item.name;
     button.append(title);
+    if (!compact && (details.note || occurrence.item.note)) {
+      const note = document.createElement('span');
+      note.className = 'schedule-event-note';
+      note.textContent = details.note || occurrence.item.note;
+      button.append(note);
+    }
     if (!compact) {
       const time = document.createElement('span');
       time.className = 'schedule-event-time';
       time.textContent = scheduleTimeLabel(occurrence.start) + '–' + scheduleTimeLabel(occurrence.end);
       button.append(time);
-      const resize = document.createElement('span');
-      resize.className = 'schedule-resize'; resize.title = 'Drag to change the end time';
-      resize.addEventListener('pointerdown', (event) => {
-        event.preventDefault(); event.stopPropagation(); resize.setPointerCapture(event.pointerId);
-        const column = button.parentElement; const rect = column.getBoundingClientRect(); const dayParts = column.dataset.day.split('-').map(Number);
-        const start = occurrence.start; const originalHeight = Math.max(30, (occurrence.end.getTime() - occurrence.start.getTime()) / 60000);
-        const updatePreview = (move) => { const minutesIntoDay = Math.max(start.getHours() * 60 + start.getMinutes() + 30, Math.min(1439, Math.round(((move.clientY - rect.top) / 60) * 60 / 15) * 15)); button.style.height = Math.max(24, (minutesIntoDay - (start.getHours() * 60 + start.getMinutes())) / 60) + 'px'; };
-        const move = (moveEvent) => updatePreview(moveEvent);
-        const finish = async (up) => { resize.removeEventListener('pointermove', move); resize.removeEventListener('pointerup', finish); resize.releasePointerCapture(event.pointerId); document.body.classList.remove('schedule-resizing'); const minutesIntoDay = Math.max(start.getHours() * 60 + start.getMinutes() + 30, Math.min(1439, Math.round(((up.clientY - rect.top) / 60) * 60 / 15) * 15)); const nextEnd = new Date(dayParts[0], dayParts[1] - 1, dayParts[2], Math.floor(minutesIntoDay / 60), minutesIntoDay % 60); const item = Store.scheduleEvents().find((candidate) => candidate.id === occurrence.item.id); if (!item) return; const duration = nextEnd.getTime() - start.getTime(); const baseStart = new Date(item.start); const baseEnd = new Date(item.deadline); const baseDuration = Math.max(30 * 60000, duration); const result = await send('schedule-event.patch', { eventId: item.id, patch: { deadline: new Date(baseStart.getTime() + baseDuration).toISOString() } }, { ifRev: item.rev }); if (result.ok) renderSchedule(); else reportRefusal(result, button); };
-        document.body.classList.add('schedule-resizing'); resize.addEventListener('pointermove', move); resize.addEventListener('pointerup', finish);
-      });
-      button.append(resize);
+      const resizeHandle = (edge) => {
+        const resize = document.createElement('span');
+        resize.className = 'schedule-resize schedule-resize-' + edge;
+        resize.title = edge === 'start' ? 'Drag to change the start time' : 'Drag to change the end time';
+        resize.addEventListener('pointerdown', (event) => {
+          event.preventDefault(); event.stopPropagation(); resize.setPointerCapture(event.pointerId);
+          const column = button.parentElement; const rect = column.getBoundingClientRect(); const dayParts = column.dataset.day.split('-').map(Number);
+          const originalStart = new Date(occurrence.start); const originalEnd = new Date(occurrence.end);
+          const startMinutes = originalStart.getHours() * 60 + originalStart.getMinutes();
+          const endMinutes = originalEnd.getHours() * 60 + originalEnd.getMinutes();
+          const getMinutes = (move) => Math.max(0, Math.min(1439, Math.round((move.clientY - rect.top) / 15) * 15));
+          const preview = (move) => {
+            const minute = getMinutes(move);
+            if (edge === 'start') {
+              const next = Math.min(endMinutes - 30, minute);
+              button.style.top = next + 'px'; button.style.height = Math.max(30, endMinutes - next) + 'px';
+            } else {
+              const next = Math.max(startMinutes + 30, minute);
+              button.style.height = Math.max(30, next - startMinutes) + 'px';
+            }
+          };
+          const move = (moveEvent) => preview(moveEvent);
+          const finish = async (up) => {
+            resize.removeEventListener('pointermove', move); resize.removeEventListener('pointerup', finish); resize.releasePointerCapture(event.pointerId); document.body.classList.remove('schedule-resizing');
+            const minute = getMinutes(up); const nextStart = edge === 'start' ? new Date(dayParts[0], dayParts[1] - 1, dayParts[2], Math.floor(Math.min(endMinutes - 30, minute) / 60), Math.min(endMinutes - 30, minute) % 60) : originalStart; const nextEnd = edge === 'end' ? new Date(dayParts[0], dayParts[1] - 1, dayParts[2], Math.floor(Math.max(startMinutes + 30, minute) / 60), Math.max(startMinutes + 30, minute) % 60) : originalEnd;
+            await patchScheduleOccurrence(occurrence, { start: nextStart.toISOString(), deadline: nextEnd.toISOString() });
+          };
+          document.body.classList.add('schedule-resizing'); resize.addEventListener('pointermove', move); resize.addEventListener('pointerup', finish);
+        });
+        return resize;
+      };
+      button.append(resizeHandle('start'), resizeHandle('end'));
     }
-    button.addEventListener('click', () => openScheduleEvent(occurrence.item.id, occurrence.start));
+    button.addEventListener('click', () => openScheduleEvent(occurrence.item.id, occurrence.start, occurrence));
     button.addEventListener('dragstart', (event) => {
-      event.dataTransfer.setData('text/plain', occurrence.item.id);
+      event.dataTransfer.setData('text/plain', JSON.stringify({ id: occurrence.item.id, key: occurrence.occurrenceKey || '', start: occurrence.start.toISOString(), deadline: occurrence.end.toISOString(), baseStart: (occurrence.baseStart || occurrence.start).toISOString(), baseEnd: (occurrence.baseEnd || occurrence.end).toISOString() }));
       event.dataTransfer.effectAllowed = 'move';
     });
     return button;
   }
 
   function scheduleDayKey(date) { return dayString(date); }
+
+  function scheduleDropPayload(event) {
+    const raw = event.dataTransfer.getData('text/plain');
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch { return { id: raw }; }
+  }
 
   function renderScheduleMonth(range) {
     const body = $('#scheduleBody');
@@ -2761,8 +2831,10 @@
       const add = document.createElement('button'); add.type = 'button'; add.className = 'schedule-cell-add'; add.textContent = '+'; add.title = 'Add event';
       add.addEventListener('click', () => openScheduleEvent(null, cellDay)); head.append(add); cell.append(head);
       cell.addEventListener('dragover', (event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; });
-      cell.addEventListener('drop', (event) => { event.preventDefault(); const id = event.dataTransfer.getData('text/plain'); if (id) moveScheduleEvent(id, cellDay); });
-      events.filter((entry) => scheduleDayKey(entry.start) === scheduleDayKey(cellDay)).slice(0, 6).forEach((entry) => cell.append(scheduleEventButton(entry, true)));
+      cell.addEventListener('drop', (event) => { event.preventDefault(); const payload = scheduleDropPayload(event); if (payload?.id) { const occurrence = payload.key ? { item: Store.scheduleEvents().find((item) => item.id === payload.id), occurrenceKey: payload.key, start: new Date(payload.start), end: new Date(payload.deadline), baseStart: new Date(payload.baseStart || payload.start), baseEnd: new Date(payload.baseEnd || payload.deadline), occurrence: 1 } : null; if (occurrence?.item) moveScheduleEvent(payload.id, cellDay, occurrence); else moveScheduleEvent(payload.id, cellDay); } });
+      const dayEntries = events.filter((entry) => scheduleDayKey(entry.start) === scheduleDayKey(cellDay));
+      dayEntries.slice(0, 6).forEach((entry) => cell.append(scheduleEventButton(entry, true)));
+      if (dayEntries.length > 6) { const more = document.createElement('button'); more.type = 'button'; more.className = 'schedule-more'; more.textContent = '+' + (dayEntries.length - 6) + ' more'; more.addEventListener('click', () => { scheduleMode = 'day'; scheduleCursor = cellDay; renderSchedule(); }); cell.append(more); }
       grid.append(cell);
     }
     body.append(grid);
@@ -2786,11 +2858,11 @@
       const col = document.createElement('div'); col.className = 'schedule-day-column'; col.dataset.day = scheduleDayKey(day);
       for (let hour = 0; hour < 24; hour += 1) { const slot = document.createElement('button'); slot.type = 'button'; slot.className = 'schedule-slot'; slot.dataset.start = toLocalInput(new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour)); slot.addEventListener('click', () => openScheduleEvent(null, new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour))); col.append(slot); }
       col.addEventListener('dragover', (event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; });
-      col.addEventListener('drop', (event) => { event.preventDefault(); const id = event.dataTransfer.getData('text/plain'); if (!id) return; const rect = col.getBoundingClientRect(); const minutesIntoDay = Math.max(0, Math.min(1439, Math.round(((event.clientY - rect.top) / 60) * 60 / 15) * 15)); moveScheduleEvent(id, new Date(day.getFullYear(), day.getMonth(), day.getDate(), Math.floor(minutesIntoDay / 60), minutesIntoDay % 60)); });
+      col.addEventListener('drop', (event) => { event.preventDefault(); const payload = scheduleDropPayload(event); if (!payload?.id) return; const rect = col.getBoundingClientRect(); const minutesIntoDay = Math.max(0, Math.min(1439, Math.round((event.clientY - rect.top) / 15) * 15)); const occurrence = payload.key ? { item: Store.scheduleEvents().find((item) => item.id === payload.id), occurrenceKey: payload.key, start: new Date(payload.start), end: new Date(payload.deadline), baseStart: new Date(payload.baseStart || payload.start), baseEnd: new Date(payload.baseEnd || payload.deadline), occurrence: 1 } : null; moveScheduleEvent(payload.id, new Date(day.getFullYear(), day.getMonth(), day.getDate(), Math.floor(minutesIntoDay / 60), minutesIntoDay % 60), occurrence?.item ? occurrence : null); });
       scheduleEventsIn(range).filter((entry) => scheduleDayKey(entry.start) === scheduleDayKey(day)).forEach((entry) => {
         const event = scheduleEventButton(entry, false); event.classList.add('schedule-timed-event');
         const startMinutes = entry.start.getHours() * 60 + entry.start.getMinutes(); const duration = Math.max(30, (entry.end.getTime() - entry.start.getTime()) / 60000);
-        event.style.top = (startMinutes / 60) + 'px'; event.style.height = Math.max(24, duration / 60) + 'px'; col.append(event);
+        event.style.top = startMinutes + 'px'; event.style.height = Math.max(30, duration) + 'px'; col.append(event);
       });
       columnsEl.append(col);
     });
@@ -2800,11 +2872,19 @@
   function renderScheduleYear(range) {
     const body = $('#scheduleBody'); const grid = document.createElement('div'); grid.className = 'schedule-year-grid';
     for (let month = 0; month < 12; month += 1) {
-      const box = document.createElement('button'); box.type = 'button'; box.className = 'schedule-year-month';
-      const title = document.createElement('strong'); title.textContent = new Date(range.start.getFullYear(), month, 1).toLocaleDateString(undefined, { month: 'long' }); box.append(title);
-      const count = scheduleEventsIn({ start: new Date(range.start.getFullYear(), month, 1), end: new Date(range.start.getFullYear(), month + 1, 1) }).length;
-      const meta = document.createElement('span'); meta.textContent = count + (count === 1 ? ' event' : ' events'); box.append(meta);
-      box.addEventListener('click', () => { scheduleMode = 'month'; scheduleCursor = new Date(range.start.getFullYear(), month, 1); renderSchedule(); }); grid.append(box);
+      const monthStart = new Date(range.start.getFullYear(), month, 1); const monthEnd = new Date(range.start.getFullYear(), month + 1, 1);
+      const box = document.createElement('div'); box.className = 'schedule-year-month';
+      const title = document.createElement('strong'); title.className = 'schedule-year-month-title'; title.textContent = monthStart.toLocaleDateString(undefined, { month: 'long' }); box.append(title);
+      const mini = document.createElement('div'); mini.className = 'schedule-mini-calendar';
+      ['S', 'M', 'T', 'W', 'T', 'F', 'S'].forEach((dayName) => { const label = document.createElement('span'); label.className = 'schedule-mini-weekday'; label.textContent = dayName; mini.append(label); });
+      const firstOffset = monthStart.getDay(); for (let i = 0; i < firstOffset; i += 1) mini.append(document.createElement('span'));
+      const monthEvents = scheduleEventsIn({ start: monthStart, end: monthEnd });
+      for (let day = 1; day <= new Date(range.start.getFullYear(), month + 1, 0).getDate(); day += 1) {
+        const date = new Date(range.start.getFullYear(), month, day); const key = scheduleDayKey(date); const count = monthEvents.filter((entry) => scheduleDayKey(entry.start) === key).length;
+        const cell = document.createElement('button'); cell.type = 'button'; cell.className = 'schedule-mini-day' + (count ? ' has-events' : '') + (key === todayDay() ? ' is-today' : ''); cell.textContent = String(day); cell.title = count ? count + (count === 1 ? ' event' : ' events') : 'No events';
+        cell.addEventListener('click', () => { scheduleMode = 'day'; scheduleCursor = date; renderSchedule(); }); mini.append(cell);
+      }
+      box.append(mini); grid.append(box);
     }
     body.append(grid);
   }
@@ -2813,35 +2893,40 @@
     const body = $('#scheduleBody'); const list = document.createElement('div'); list.className = 'schedule-agenda';
     const entries = scheduleEventsIn(range).sort((a, b) => a.start - b.start);
     if (!entries.length) { const empty = document.createElement('p'); empty.className = 'schedule-empty'; empty.textContent = 'No scheduled events yet. Create one to start your calendar.'; list.append(empty); }
-    entries.forEach((entry) => { const row = document.createElement('button'); row.type = 'button'; row.className = 'schedule-agenda-row'; row.addEventListener('click', () => openScheduleEvent(entry.item.id, entry.start)); const when = document.createElement('time'); when.textContent = entry.start.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); const name = document.createElement('strong'); name.textContent = entry.item.name; const end = document.createElement('span'); end.textContent = 'until ' + scheduleTimeLabel(entry.end); row.append(when, name, end); list.append(row); });
+    entries.forEach((entry) => { const row = document.createElement('button'); row.type = 'button'; row.className = 'schedule-agenda-row'; row.style.setProperty('--schedule-color', entry.exception?.color || entry.item.color || '#334052'); row.addEventListener('click', () => openScheduleEvent(entry.item.id, entry.start, entry)); const when = document.createElement('time'); when.textContent = entry.start.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); const name = document.createElement('strong'); name.textContent = entry.exception?.name || entry.item.name; const end = document.createElement('span'); end.textContent = 'until ' + scheduleTimeLabel(entry.end); row.append(when, name, end); if (entry.exception?.note || entry.item.note) { const note = document.createElement('small'); note.textContent = entry.exception?.note || entry.item.note; row.append(note); } list.append(row); });
     body.append(list);
   }
 
   function refreshEventProjectOptions(current) {
     const select = eventForm.elements.project; const value = current === undefined ? select.value : current; select.replaceChildren(new Option('Uncategorised', ''));
-    Store.projects().forEach((project) => select.append(new Option(project.archivedAt ? project.name + ' (archived)' : project.name, project.id)));
+    Store.projects().filter((project) => project.projectType === 'schedule').forEach((project) => select.append(new Option(project.archivedAt ? project.name + ' (archived)' : project.name, project.id)));
     select.value = value || '';
   }
 
   function setEventError(text) { const error = $('#eventError'); error.textContent = text || ''; error.hidden = !text; }
 
-  function openScheduleEvent(eventId, suggestedStart) {
-    editingEventId = eventId; createEventCommandId = eventId ? null : Store.newCommandId();
+  function openScheduleEvent(eventId, suggestedStart, occurrence) {
+    editingEventId = eventId; editingOccurrenceKey = occurrence?.occurrenceKey || ''; createEventCommandId = eventId ? null : Store.newCommandId();
     const item = eventId ? Store.scheduleEvents().find((event) => event.id === eventId) : null;
-    const start = item ? new Date(item.start) : (suggestedStart instanceof Date ? new Date(suggestedStart) : new Date());
+    const details = occurrence?.exception || item;
+    const start = occurrence ? new Date(occurrence.start) : item ? new Date(item.start) : (suggestedStart instanceof Date ? new Date(suggestedStart) : new Date());
     if (!item) { start.setMinutes(Math.ceil(start.getMinutes() / 30) * 30, 0, 0); }
-    const end = item ? new Date(item.deadline) : new Date(start.getTime() + 60 * 60000);
+    const end = occurrence ? new Date(occurrence.end) : item ? new Date(item.deadline) : new Date(start.getTime() + 60 * 60000);
     $('#eventDialogTitle').textContent = item ? 'Edit event' : 'New event'; $('#deleteEventBtn').style.display = item ? '' : 'none';
     refreshEventProjectOptions(item ? item.project : ''); setEventError('');
-    eventForm.elements.name.value = item ? item.name : ''; eventForm.elements.note.value = item ? item.note : '';
+    eventForm.elements.name.value = details ? (details.name || item.name) : ''; eventForm.elements.note.value = details ? (details.note || item.note) : '';
+    eventForm.elements.color.value = details?.color || item?.color || '#9fc9e4';
     eventForm.elements.start.value = toLocalInput(start); eventForm.elements.deadline.value = toLocalInput(end);
     eventForm.elements.frequency.value = item && item.recurrence ? item.recurrence.frequency : 'none'; eventForm.elements.count.value = item && item.recurrence ? item.recurrence.count : 0; eventForm.elements.until.value = item && item.recurrence ? (item.recurrence.until || '') : '';
+    if (eventForm.elements.scope) { eventForm.elements.scope.value = 'occurrence'; $('#eventScopeWrap').hidden = !(item && occurrence && item.recurrence && item.recurrence.frequency !== 'none'); }
     eventDialog.showModal(); eventForm.elements.name.focus();
   }
 
   async function seedRequestedSchedule() {
     const fixture = window.PROXIMA_SCHEDULE_FIXTURE;
     if (!fixture || !fixture.project || !Array.isArray(fixture.events)) return;
+    const seedMarker = 'proxima.schedule.seed.lich-hoc-hk1-2026';
+    try { if (localStorage.getItem(seedMarker) === 'done') return; } catch { /* best effort: the store remains authoritative */ }
     let project = Store.projects().find((candidate) => candidate.sourceKey === fixture.project.sourceKey || (candidate.projectType === 'schedule' && candidate.name === fixture.project.name));
     if (!project) {
       const created = await send('project.create', { name: fixture.project.name, description: fixture.project.description, projectType: 'schedule', sourceKey: fixture.project.sourceKey });
@@ -2863,6 +2948,7 @@
       });
       if (!created.ok) { reportRefusal(created, null); return; }
     }
+    try { localStorage.setItem(seedMarker, 'done'); } catch { /* a failed marker only affects startup idempotency */ }
     renderRoute();
   }
 
