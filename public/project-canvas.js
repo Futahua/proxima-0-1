@@ -11,6 +11,7 @@ const HOST_RESULT = 'papers:host:result';
 const PROJECT_PUSH_PREFIX = 'papers:project:';
 
 let child = null;
+let childOrigin = null;
 let mountedProject = null;
 let loadGeneration = 0;
 const parentRequests = new Map();
@@ -48,7 +49,7 @@ function finishParentRequest(message) {
 
 function forwardToChild(message) {
   if (!child?.contentWindow) return;
-  child.contentWindow.postMessage(message, '*');
+  child.contentWindow.postMessage(message, childOrigin || '*');
 }
 
 window.addEventListener('message', (event) => {
@@ -56,12 +57,12 @@ window.addEventListener('message', (event) => {
   if (!message || typeof message !== 'object' || typeof message.type !== 'string') return;
 
   if (child?.contentWindow && event.source === child.contentWindow) {
-    // The child is not a Papers-owned top-level renderer, so its request must
-    // travel through this Proxima frame. Preserve the request id so the child
-    // bridge can receive the exact host result it is waiting for.
+    if (childOrigin && event.origin !== childOrigin) return;
+    // Papers' preload observes this child-origin message directly. The
+    // Proxima shell records only the response route; it never forwards the
+    // child request through the top-level Proxima authority.
     if (message.type.startsWith(PROJECT_PUSH_PREFIX) && typeof message.requestId === 'string') {
-      childRequests.set(message.requestId, child);
-      window.parent.postMessage(message, messageTarget());
+      childRequests.set(message.requestId, { frame: child, origin: childOrigin });
     }
     return;
   }
@@ -74,7 +75,7 @@ window.addEventListener('message', (event) => {
     const target = childRequests.get(message.requestId);
     if (target) {
       childRequests.delete(message.requestId);
-      target.contentWindow?.postMessage(message, '*');
+      target.frame?.contentWindow?.postMessage(message, target.origin || '*');
     }
     return;
   }
@@ -93,8 +94,10 @@ function showMessage(text, tone = 'info') {
 
 function unmount() {
   loadGeneration += 1;
+  window.postMessage({ type: 'papers:project:workspace-scope-revoke' }, messageTarget());
   if (child) child.remove();
   child = null;
+  childOrigin = null;
   mountedProject = null;
   for (const pending of parentRequests.values()) {
     clearTimeout(pending.timer);
@@ -120,6 +123,7 @@ async function mount(project) {
       return;
     }
     const url = new URL(scope.url);
+    childOrigin = url.origin;
     url.searchParams.set('as-you-go-scope-root', scope.rootGroupId);
     url.searchParams.set('papers-embedded-surface', 'proxima');
     child = document.createElement('iframe');
