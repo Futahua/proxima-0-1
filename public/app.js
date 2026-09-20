@@ -2985,7 +2985,26 @@
     const fixture = window.PROXIMA_SCHEDULE_FIXTURE;
     if (!fixture || !fixture.project || !Array.isArray(fixture.events)) return;
     const seedMarker = 'proxima.schedule.seed.lich-hoc-hk1-2026';
-    try { if (localStorage.getItem(seedMarker) === 'done') return; } catch { /* best effort: the store remains authoritative */ }
+    const additions = Array.isArray(fixture.additions) ? fixture.additions : [];
+    const additionsMarker = 'proxima.schedule.seed.lich-hoc-hk1-2026.additions.v1';
+    let seedDone = false;
+    try { seedDone = localStorage.getItem(seedMarker) === 'done'; } catch { /* best effort: the store remains authoritative */ }
+    if (seedDone) {
+      let additionsDone = false;
+      try { additionsDone = localStorage.getItem(additionsMarker) === 'done'; } catch { /* best effort */ }
+      if (!additions.length || additionsDone) return;
+      const project = Store.projects().find((candidate) => candidate.sourceKey === fixture.project.sourceKey && candidate.projectType === 'schedule');
+      if (!project) return;
+      const existing = new Set(Store.scheduleEvents().filter((event) => event.project === project.id).map((event) => event.sourceKey).filter(Boolean));
+      for (const source of additions) {
+        if (existing.has(source.sourceKey)) continue;
+        const created = await send('schedule-event.create', { name: source.name, note: source.note, project: project.id, start: source.start, deadline: source.deadline, color: source.color, sourceKey: source.sourceKey, recurrence: { frequency: 'weekly', interval: 1, until: source.until, count: 0 } });
+        if (!created.ok) { reportRefusal(created, null); return; }
+      }
+      try { localStorage.setItem(additionsMarker, 'done'); } catch { /* best effort */ }
+      renderRoute();
+      return;
+    }
     let project = Store.projects().find((candidate) => candidate.sourceKey === fixture.project.sourceKey || (candidate.projectType === 'schedule' && candidate.name === fixture.project.name));
     if (!project) {
       const created = await send('project.create', { name: fixture.project.name, description: fixture.project.description, projectType: 'schedule', sourceKey: fixture.project.sourceKey });
@@ -2993,7 +3012,7 @@
       project = created.value;
     }
     const existing = new Set(Store.scheduleEvents().filter((event) => event.project === project.id).map((event) => event.sourceKey).filter(Boolean));
-    for (const source of fixture.events) {
+    for (const source of [...fixture.events, ...additions]) {
       if (existing.has(source.sourceKey)) continue;
       const created = await send('schedule-event.create', {
         name: source.name,
@@ -3007,7 +3026,7 @@
       });
       if (!created.ok) { reportRefusal(created, null); return; }
     }
-    try { localStorage.setItem(seedMarker, 'done'); } catch { /* a failed marker only affects startup idempotency */ }
+    try { localStorage.setItem(seedMarker, 'done'); if (additions.length) localStorage.setItem(additionsMarker, 'done'); } catch { /* a failed marker only affects startup idempotency */ }
     renderRoute();
   }
 

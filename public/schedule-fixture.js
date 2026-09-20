@@ -30,4 +30,8 @@ window.PROXIMA_SCHEDULE_FIXTURE = {
     { sourceKey: 'event-1784869502021-gnctm', name: 'Xã hội học', start: '2026-10-26T07:40:00.000Z', deadline: '2026-10-26T10:05:00.000Z', until: '2026-12-20', note: 'Thứ 2; tiết 10-12; phòng M11.06; lớp CT4103_24ĐH 2; giảng viên Nguyễn Hồng Giang', color: '#a29bfe' },
     { sourceKey: 'event-1784869502036-jxpzs', name: 'Xã hội học', start: '2026-12-10T07:40:00.000Z', deadline: '2026-12-10T10:05:00.000Z', until: '2026-12-20', note: 'Thứ 5; tiết 10-12; phòng M11.06; lớp CT4103_24ĐH 2; giảng viên Nguyễn Hồng Giang', color: '#a29bfe' },
   ],
+  additions: [
+    { sourceKey: 'event-th4431-bs-20260921-2', name: 'Tin học ứng dụng ngành Kiến trúc 2', start: '2026-09-21T06:45:00.000Z', deadline: '2026-09-21T10:05:00.000Z', until: '2026-11-01', note: 'Thứ 2; tiết 13-16; phòng M-M5.03; lớp TH4431_BS; 2 tín chỉ; giảng viên Ngô Thanh Thảo', color: '#00a8ff' },
+    { sourceKey: 'event-th4431-bs-20260924-5', name: 'Tin học ứng dụng ngành Kiến trúc 2', start: '2026-09-24T06:45:00.000Z', deadline: '2026-09-24T10:05:00.000Z', until: '2026-11-01', note: 'Thứ 5; tiết 13-16; phòng M-M5.03; lớp TH4431_BS; 2 tín chỉ; giảng viên Ngô Thanh Thảo', color: '#00a8ff' },
+  ],
 };
