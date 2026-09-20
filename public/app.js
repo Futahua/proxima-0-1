@@ -2811,7 +2811,7 @@
     button.title = details.note || occurrence.item.note || occurrence.item.name;
     const title = document.createElement('span');
     title.className = 'schedule-event-name';
-    title.textContent = details.name || occurrence.item.name;
+    title.textContent = String(details.name || occurrence.item.name || 'Untitled event').trim() || 'Untitled event';
     button.append(title);
     if (!compact && (details.note || occurrence.item.note)) {
       const note = document.createElement('span');
@@ -2920,6 +2920,7 @@
       scheduleEventsIn(range).filter((entry) => scheduleDayKey(entry.start) === scheduleDayKey(day)).forEach((entry) => {
         const event = scheduleEventButton(entry, false); event.classList.add('schedule-timed-event');
         const startMinutes = entry.start.getHours() * 60 + entry.start.getMinutes(); const duration = Math.max(30, (entry.end.getTime() - entry.start.getTime()) / 60000);
+        if (duration < 60) event.classList.add('is-short');
         event.style.top = startMinutes + 'px'; event.style.height = Math.max(30, duration) + 'px'; col.append(event);
       });
       columnsEl.append(col);

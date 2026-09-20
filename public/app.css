@@ -488,6 +488,10 @@ dialog menu { display: flex; gap: 8px; padding: 0; margin: 18px 0 0; }
 .schedule-resize-end { bottom: 0; }
 .schedule-timed-event { position: absolute; }
 .schedule-timed-event .schedule-event-name, .schedule-timed-event .schedule-event-time { pointer-events: none; }
+.schedule-timed-event.is-short { padding: 2px 5px; gap: 0; }
+.schedule-timed-event.is-short .schedule-event-name { flex: 0 0 12px; font-size: 10px; line-height: 12px; }
+.schedule-timed-event.is-short .schedule-event-time { flex: 0 0 11px; font-size: 9px; line-height: 11px; }
+.schedule-timed-event.is-short .schedule-event-note { display: none; }
 .schedule-resizing, .schedule-resizing * { cursor: ns-resize !important; user-select: none; }
 .schedule-timed { min-width: 720px; }
 .schedule-timed-header { display: grid; grid-template-columns: 48px repeat(7, minmax(110px, 1fr)); position: sticky; top: 0; z-index: 3; background: #202631; border-bottom: 1px solid var(--line); }
