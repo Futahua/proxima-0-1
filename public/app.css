@@ -240,9 +240,9 @@ main { padding: 16px; max-width: 1200px; }
 #projectBoard { margin: 8px 0 12px; }
 #projectBoard .cards[data-drop="running"] > .card { min-height: 0; }
 #projectTaskAdd { display: flex; gap: 8px; margin-top: 8px; }
-#projectTaskName { flex: 1; }
-#projectTaskAdd { display: flex; gap: 8px; margin-top: 8px; }
-#projectTaskName { flex: 1; }
+#projectTaskName { flex: 1; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+#projectTaskAdd button { border: 1px solid var(--line); background: var(--panel-2); color: var(--dim); padding: 6px 12px; border-radius: 5px; cursor: pointer; }
+#projectTaskAdd button:hover { color: var(--ink); border-color: #5a6578; }
 
 .tk-toggles { display: flex; gap: 8px; flex-wrap: wrap; }
 .tk-toggle::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 7px;
