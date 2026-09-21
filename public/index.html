@@ -72,18 +72,18 @@
         <h2 id="projectTasksTitle">Tasks</h2>
         <span class="n" id="projectTasksCount">0</span>
       </div>
-      <div class="project-board">
-        <div class="project-col" data-status="backlog">
-          <h4 class="project-col-title">Backlog (<span data-count="backlog">0</span>)</h4>
-          <div class="project-cards" data-drop="backlog"></div>
+      <div class="columns" id="projectBoard">
+        <div class="col" data-status="backlog">
+          <div class="colhead"><span>BACKLOG</span><span class="n" data-count="backlog">0</span></div>
+          <div class="cards" data-drop="backlog"></div>
         </div>
-        <div class="project-col" data-status="running">
-          <h4 class="project-col-title">Running (<span data-count="running">0</span>)</h4>
-          <div class="project-cards" data-drop="running"></div>
+        <div class="col" data-status="running">
+          <div class="colhead"><span class="running">RUNNING</span><span class="n" data-count="running">0</span></div>
+          <div class="cards" data-drop="running"></div>
         </div>
-        <div class="project-col" data-status="finished">
-          <h4 class="project-col-title">Finished (<span data-count="finished">0</span>)</h4>
-          <div class="project-cards" data-drop="finished"></div>
+        <div class="col" data-status="finished">
+          <div class="colhead"><span class="finished">FINISHED</span><span class="n" data-count="finished">0</span></div>
+          <div class="cards" data-drop="finished"></div>
         </div>
       </div>
       <form id="projectTaskAdd">

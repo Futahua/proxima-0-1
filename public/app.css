@@ -233,19 +233,14 @@ main { padding: 16px; max-width: 1200px; }
 .project-tasks-head { display: flex; align-items: baseline; gap: 8px; }
 .project-tasks-head h2 { margin: 0; font-size: 14px; }
 .project-tasks-head .n { color: var(--dim); font-size: 12px; }
-.project-board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 8px 0; }
-.project-col-title { margin: 0 0 6px; font-size: 12px; letter-spacing: .04em; }
-.project-col[data-status="backlog"] .project-col-title { color: #636e72; }
-.project-col[data-status="running"] .project-col-title { color: #00b894; }
-.project-col[data-status="finished"] .project-col-title { color: #fdcb6e; }
-.project-cards { display: flex; flex-direction: column; gap: 6px; min-height: 48px; padding: 6px; border: 1px dashed var(--line); border-radius: 8px; }
-.project-card { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--background-primary); cursor: grab; }
-.project-card.dragging { opacity: .5; }
-.project-card-name { font-size: 13px; }
-.project-col[data-status="finished"] .project-card-name { text-decoration: line-through; color: var(--dim); }
-.project-del { margin-top: 6px; font-size: 11px; background: transparent; border: none; color: var(--dim); cursor: pointer; padding: 0; }
-.project-del:hover { color: #f0a8a8; }
-.project-cards .empty { color: var(--dim); font-size: 13px; }
+/* The project board reuses the Daily kanban system (.columns/.col/.cards/
+/.card) so the two boards cannot drift apart. Two project-only adjustments:
+   running cards stay compact (no timeline heights) and the board gets a
+   bottom margin before the workspace. */
+#projectBoard { margin: 8px 0 12px; }
+#projectBoard .cards[data-drop="running"] > .card { min-height: 0; }
+#projectTaskAdd { display: flex; gap: 8px; margin-top: 8px; }
+#projectTaskName { flex: 1; }
 #projectTaskAdd { display: flex; gap: 8px; margin-top: 8px; }
 #projectTaskName { flex: 1; }
 

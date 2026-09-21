@@ -2708,21 +2708,22 @@
    * stay on the Daily board.
    */
   let projectDragId = null;
+  const projectBoard = $('#projectBoard');
   function renderProjectTasks(project) {
     const title = $('#projectTasksTitle');
     const count = $('#projectTasksCount');
     const error = $('#projectTaskError');
-    if (!title || !count) return;
+    if (!title || !count || !projectBoard) return;
     title.textContent = project.name + ' tasks';
     const tasks = Store.tasks().filter((t) => t.project === project.id);
     count.textContent = String(tasks.length);
     for (const status of ['backlog', 'running', 'finished']) {
-      const host = document.querySelector('.project-cards[data-drop="' + status + '"]');
+      const host = projectBoard.querySelector('.cards[data-drop="' + status + '"]');
       if (!host) continue;
       const list = tasks
         .filter((t) => t.status === status)
         .sort((a, b) => a.order - b.order);
-      const counter = document.querySelector('[data-count="' + status + '"]');
+      const counter = projectBoard.querySelector('[data-count="' + status + '"]');
       if (counter) counter.textContent = String(list.length);
       host.replaceChildren();
       if (list.length === 0) {
@@ -2734,16 +2735,16 @@
       }
       for (const task of list) {
         const card = document.createElement('div');
-        card.className = 'project-card';
+        card.className = 'card' + (status === 'running' ? ' running' : status === 'finished' ? ' finished' : '');
         card.dataset.id = task.id;
         card.draggable = true;
-        const name = document.createElement('div');
-        name.className = 'project-card-name';
+        const name = document.createElement('h4');
         name.textContent = task.name;
         const del = document.createElement('button');
         del.type = 'button';
-        del.className = 'project-del';
-        del.textContent = 'Delete';
+        del.className = 'del';
+        del.textContent = '×';
+        del.title = 'Delete task';
         del.addEventListener('click', async (event) => {
           event.stopPropagation();
           const result = await send('task.delete', { taskId: task.id });
@@ -2772,7 +2773,7 @@
     }
   }
 
-  document.querySelectorAll('.project-cards[data-drop]').forEach((host) => {
+  document.querySelectorAll('#projectBoard .cards[data-drop]').forEach((host) => {
     host.addEventListener('dragover', (event) => event.preventDefault());
     host.addEventListener('drop', async (event) => {
       event.preventDefault();
