@@ -2702,62 +2702,100 @@
   }
 
   /**
-   * The project's own tasks, on the project's own route: the Daily lens can
-   * already filter this way, but a project should hold its tasks where it
-   * lives. Rows advance status on click; the add form creates into this
-   * project. Weight, deadlines and runs stay on the Daily board.
+   * The project's own tasks as a plain three-column kanban: Backlog,
+   * Running, Finished. Name on the card, drag to move, delete to remove —
+   * no alternate views, no extra properties. Weights, deadlines and runs
+   * stay on the Daily board.
    */
-  const STATUS_NEXT = { backlog: 'running', running: 'finished', finished: 'backlog' };
+  let projectDragId = null;
   function renderProjectTasks(project) {
     const title = $('#projectTasksTitle');
     const count = $('#projectTasksCount');
-    const list = $('#projectTasksList');
     const error = $('#projectTaskError');
-    if (!title || !count || !list) return;
+    if (!title || !count) return;
     title.textContent = project.name + ' tasks';
-    const tasks = Store.tasks()
-      .filter((t) => t.project === project.id)
-      .sort((a, b) => a.order - b.order);
+    const tasks = Store.tasks().filter((t) => t.project === project.id);
     count.textContent = String(tasks.length);
-    list.replaceChildren();
-    if (tasks.length === 0) {
-      const empty = document.createElement('li');
-      empty.className = 'empty';
-      empty.textContent = 'No tasks here yet.';
-      list.append(empty);
-    }
-    for (const task of tasks) {
-      const row = document.createElement('li');
-      row.className = 'project-task project-task-' + task.status;
-      const chip = document.createElement('button');
-      chip.type = 'button';
-      chip.className = 'project-task-chip';
-      chip.textContent = task.status;
-      chip.title = 'Advance status';
-      chip.addEventListener('click', async () => {
-        const result = await send('task.move', { taskId: task.id, toStatus: STATUS_NEXT[task.status] || 'backlog' });
-        if (!result.ok) {
-          error.textContent = result.message;
-          error.hidden = false;
-          return;
-        }
-        error.hidden = true;
-        renderProjectTasks(Store.project(project.id) || project);
-        void endRunIfEmpty();
-      });
-      const name = document.createElement('span');
-      name.className = 'project-task-name';
-      name.textContent = task.name;
-      row.append(chip, name);
-      if (task.deadline) {
-        const due = document.createElement('span');
-        due.className = 'project-task-due';
-        due.textContent = task.deadline;
-        row.append(due);
+    for (const status of ['backlog', 'running', 'finished']) {
+      const host = document.querySelector('.project-cards[data-drop="' + status + '"]');
+      if (!host) continue;
+      const list = tasks
+        .filter((t) => t.status === status)
+        .sort((a, b) => a.order - b.order);
+      const counter = document.querySelector('[data-count="' + status + '"]');
+      if (counter) counter.textContent = String(list.length);
+      host.replaceChildren();
+      if (list.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'empty';
+        empty.textContent = 'No tasks here.';
+        host.append(empty);
+        continue;
       }
-      list.append(row);
+      for (const task of list) {
+        const card = document.createElement('div');
+        card.className = 'project-card';
+        card.dataset.id = task.id;
+        card.draggable = true;
+        const name = document.createElement('div');
+        name.className = 'project-card-name';
+        name.textContent = task.name;
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'project-del';
+        del.textContent = 'Delete';
+        del.addEventListener('click', async (event) => {
+          event.stopPropagation();
+          const result = await send('task.delete', { taskId: task.id });
+          if (!result.ok) {
+            error.textContent = result.message;
+            error.hidden = false;
+            return;
+          }
+          error.hidden = true;
+          renderProjectTasks(Store.project(project.id) || project);
+          void endRunIfEmpty();
+        });
+        card.append(name, del);
+        card.addEventListener('dragstart', (event) => {
+          projectDragId = task.id;
+          card.classList.add('dragging');
+          event.dataTransfer.effectAllowed = 'move';
+          try { event.dataTransfer.setData('text/plain', task.id); } catch { /* drag still works */ }
+        });
+        card.addEventListener('dragend', () => {
+          projectDragId = null;
+          card.classList.remove('dragging');
+        });
+        host.append(card);
+      }
     }
   }
+
+  document.querySelectorAll('.project-cards[data-drop]').forEach((host) => {
+    host.addEventListener('dragover', (event) => event.preventDefault());
+    host.addEventListener('drop', async (event) => {
+      event.preventDefault();
+      if (!projectDragId) return;
+      const toStatus = host.dataset.drop;
+      const id = projectDragId;
+      projectDragId = null;
+      const result = await send('task.move', { taskId: id, toStatus: toStatus });
+      const error = $('#projectTaskError');
+      if (!result.ok) {
+        error.textContent = result.message;
+        error.hidden = false;
+        return;
+      }
+      error.hidden = true;
+      const r = route();
+      if (r.name === 'project') {
+        const project = Store.project(r.id);
+        if (project) renderProjectTasks(project);
+      }
+      void endRunIfEmpty();
+    });
+  });
 
   const projectTaskAdd = $('#projectTaskAdd');
   if (projectTaskAdd) projectTaskAdd.addEventListener('submit', async (event) => {
