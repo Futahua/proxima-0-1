@@ -615,6 +615,12 @@
     runInfo.textContent = runLine({ tasks, running, allocation, run });
 
     paint();
+    // A mutation made on the Daily board while a project route is showing
+    // (or vice versa) must not leave the project task list stale.
+    if (currentSurface() === 'project') {
+      const project = Store.project(route().id);
+      if (project) renderProjectTasks(project);
+    }
   }
 
   /**
@@ -2691,8 +2697,93 @@
    */
   function renderProject(project) {
     if (!project) return;
+    renderProjectTasks(project);
     ProjectCanvas.mount(project);
   }
+
+  /**
+   * The project's own tasks, on the project's own route: the Daily lens can
+   * already filter this way, but a project should hold its tasks where it
+   * lives. Rows advance status on click; the add form creates into this
+   * project. Weight, deadlines and runs stay on the Daily board.
+   */
+  const STATUS_NEXT = { backlog: 'running', running: 'finished', finished: 'backlog' };
+  function renderProjectTasks(project) {
+    const title = $('#projectTasksTitle');
+    const count = $('#projectTasksCount');
+    const list = $('#projectTasksList');
+    const error = $('#projectTaskError');
+    if (!title || !count || !list) return;
+    title.textContent = project.name + ' tasks';
+    const tasks = Store.tasks()
+      .filter((t) => t.project === project.id)
+      .sort((a, b) => a.order - b.order);
+    count.textContent = String(tasks.length);
+    list.replaceChildren();
+    if (tasks.length === 0) {
+      const empty = document.createElement('li');
+      empty.className = 'empty';
+      empty.textContent = 'No tasks here yet.';
+      list.append(empty);
+    }
+    for (const task of tasks) {
+      const row = document.createElement('li');
+      row.className = 'project-task project-task-' + task.status;
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'project-task-chip';
+      chip.textContent = task.status;
+      chip.title = 'Advance status';
+      chip.addEventListener('click', async () => {
+        const result = await send('task.move', { taskId: task.id, toStatus: STATUS_NEXT[task.status] || 'backlog' });
+        if (!result.ok) {
+          error.textContent = result.message;
+          error.hidden = false;
+          return;
+        }
+        error.hidden = true;
+        renderProjectTasks(Store.project(project.id) || project);
+        void endRunIfEmpty();
+      });
+      const name = document.createElement('span');
+      name.className = 'project-task-name';
+      name.textContent = task.name;
+      row.append(chip, name);
+      if (task.deadline) {
+        const due = document.createElement('span');
+        due.className = 'project-task-due';
+        due.textContent = task.deadline;
+        row.append(due);
+      }
+      list.append(row);
+    }
+  }
+
+  const projectTaskAdd = $('#projectTaskAdd');
+  if (projectTaskAdd) projectTaskAdd.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const input = $('#projectTaskName');
+    const error = $('#projectTaskError');
+    const r = route();
+    const project = r.name === 'project' ? Store.project(r.id) : null;
+    if (!project) return;
+    const name = input.value.trim();
+    if (!name) {
+      error.textContent = 'A task needs a name before it can be added.';
+      error.hidden = false;
+      input.focus();
+      return;
+    }
+    const result = await send('task.create', { name: name, project: project.id, status: 'backlog' });
+    if (!result.ok) {
+      error.textContent = result.message;
+      error.hidden = false;
+      return;
+    }
+    input.value = '';
+    error.hidden = true;
+    renderProjectTasks(Store.project(project.id) || project);
+  });
 
   function scheduleDay(date) {
     return new Date(date.getFullYear(), date.getMonth(), date.getDate());

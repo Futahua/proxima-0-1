@@ -67,6 +67,18 @@
   </section>
 
   <section class="project-canvas" id="projectCanvas" hidden aria-label="Project As you Go workspace">
+    <div class="project-tasks" id="projectTasks">
+      <div class="project-tasks-head">
+        <h2 id="projectTasksTitle">Tasks</h2>
+        <span class="n" id="projectTasksCount">0</span>
+      </div>
+      <ul id="projectTasksList"></ul>
+      <form id="projectTaskAdd">
+        <input id="projectTaskName" maxlength="120" autocomplete="off" placeholder="Add a task to this project">
+        <button type="submit">Add</button>
+      </form>
+      <p class="field-error" id="projectTaskError" hidden role="alert"></p>
+    </div>
     <div id="projectWorkspaceSurface" class="project-workspace-surface">
       <p class="project-workspace-message">Choose a project to open its As you Go folder.</p>
     </div>
