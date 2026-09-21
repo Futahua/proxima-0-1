@@ -3614,7 +3614,25 @@
   // The address decides what is mounted, here and on every later hash change.
   // Launching into `#/project/...` or `#/hub` is therefore the same code path as
   // walking there, and a refresh lands on the surface it names.
-  window.addEventListener('hashchange', applyRoute);
+  // Remember the last entered view like Papers remembers its workspace: on a
+  // fresh launch with no address, reopen where the reader left off. Best
+  // effort only — a dead or missing route falls through to Daily below.
+  const LAST_VIEW_KEY = 'proxima.last-view';
+  try {
+    if (!location.hash || location.hash === '#/') {
+      const last = localStorage.getItem(LAST_VIEW_KEY);
+      if (last && /^(#\/(hub|schedule(\/|$)|project\/.+))$/.test(last)) location.hash = last;
+    }
+  } catch { /* view memory is best effort and never blocks boot */ }
+  window.addEventListener('hashchange', () => {
+    try {
+      const r = parseRoute(location.hash);
+      if (r.name === 'project' || r.name === 'hub' || r.name === 'schedule' || r.name === 'daily') {
+        localStorage.setItem(LAST_VIEW_KEY, r.name === 'daily' ? '#/' : location.hash);
+      }
+    } catch { /* view memory is best effort and never blocks navigation */ }
+    applyRoute();
+  });
   applyRoute();
   // Seed only the explicitly requested schedule, once per Proxima store. The
   // fixture is bundled with this build; no vault reader or unrelated note scan
