@@ -13,6 +13,7 @@ const PROJECT_PUSH_PREFIX = 'papers:project:';
 let child = null;
 let previewChild = null;
 let previewShell = null;
+let previewResizer = null;
 let childOrigin = null;
 let mountedProject = null;
 let loadGeneration = 0;
@@ -144,6 +145,7 @@ function unmount() {
   child = null;
   previewChild = null;
   previewShell = null;
+  previewResizer = null;
   childOrigin = null;
   previewReady = false;
   lastPreviewSelection = { mode: 'empty', selectionCount: 0, items: [] };
@@ -196,7 +198,37 @@ async function mount(project) {
     previewShell = document.createElement('aside');
     previewShell.className = 'project-preview-sidecar';
     previewShell.setAttribute('aria-label', 'Project file preview');
-    previewShell.append(previewChild);
+    previewResizer = document.createElement('div');
+    previewResizer.className = 'project-preview-resizer';
+    previewResizer.setAttribute('role', 'separator');
+    previewResizer.setAttribute('aria-orientation', 'vertical');
+    previewResizer.setAttribute('aria-label', 'Resize project preview');
+    previewResizer.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      previewResizer?.setPointerCapture?.(event.pointerId);
+      previewShell?.classList.add('resizing');
+      event.preventDefault();
+    });
+    previewResizer.addEventListener('pointermove', (event) => {
+      if (!previewResizer?.hasPointerCapture?.(event.pointerId)) return;
+      const canvas = document.querySelector('#projectCanvas');
+      const bounds = canvas?.getBoundingClientRect();
+      if (!bounds) return;
+      const gap = 12;
+      const minPane = 240;
+      const width = Math.max(minPane, Math.min(bounds.width - minPane - gap, bounds.right - event.clientX));
+      canvas.style.setProperty('--project-preview-width', Math.round(width) + 'px');
+      schedulePreviewReposition();
+      event.preventDefault();
+    });
+    const finishResize = (event) => {
+      if (!previewResizer?.hasPointerCapture?.(event.pointerId)) return;
+      previewResizer.releasePointerCapture?.(event.pointerId);
+      previewShell?.classList.remove('resizing');
+    };
+    previewResizer.addEventListener('pointerup', finishResize);
+    previewResizer.addEventListener('pointercancel', finishResize);
+    previewShell.append(previewResizer, previewChild);
     shell()?.replaceChildren(child);
     document.querySelector('#projectCanvas')?.append(previewShell);
     schedulePreviewReposition();
