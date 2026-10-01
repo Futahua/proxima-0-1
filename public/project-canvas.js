@@ -11,9 +11,14 @@ const HOST_RESULT = 'papers:host:result';
 const PROJECT_PUSH_PREFIX = 'papers:project:';
 
 let child = null;
+let previewChild = null;
+let previewShell = null;
 let childOrigin = null;
 let mountedProject = null;
 let loadGeneration = 0;
+let lastPreviewSelection = { mode: 'empty', selectionCount: 0, items: [] };
+let previewReady = false;
+let previewRepositionFrame = 0;
 const parentRequests = new Map();
 const childRequests = new Map();
 
@@ -56,17 +61,51 @@ function forwardToChild(message) {
   child.contentWindow.postMessage(message, childOrigin || '*');
 }
 
+function forwardPreviewSelection() {
+  if (!previewReady || !previewChild?.contentWindow) return;
+  previewChild.contentWindow.postMessage({
+    type: 'papers:proxima-preview-selection',
+    selection: lastPreviewSelection,
+  }, childOrigin || '*');
+}
+
+function schedulePreviewReposition() {
+  if (previewRepositionFrame) return;
+  previewRepositionFrame = requestAnimationFrame(() => {
+    previewRepositionFrame = 0;
+    previewChild?.contentWindow?.postMessage({ type: 'papers:proxima-preview-reposition' }, childOrigin || '*');
+  });
+}
+
 window.addEventListener('message', (event) => {
   const message = event.data;
   if (!message || typeof message !== 'object' || typeof message.type !== 'string') return;
 
   if (child?.contentWindow && event.source === child.contentWindow) {
     if (childOrigin && event.origin !== childOrigin) return;
+    if (message.type === 'papers:proxima-preview-selection') {
+      lastPreviewSelection = message.selection ?? { mode: 'empty', selectionCount: 0, items: [] };
+      forwardPreviewSelection();
+      return;
+    }
     // Papers' preload observes this child-origin message directly. The
     // Proxima shell records only the response route; it never forwards the
     // child request through the top-level Proxima authority.
     if (message.type.startsWith(PROJECT_PUSH_PREFIX) && typeof message.requestId === 'string') {
       childRequests.set(message.requestId, { frame: child, origin: childOrigin });
+    }
+    return;
+  }
+  if (previewChild?.contentWindow && event.source === previewChild.contentWindow) {
+    if (childOrigin && event.origin !== childOrigin) return;
+    if (message.type === 'papers:proxima-preview-ready') {
+      previewReady = true;
+      forwardPreviewSelection();
+      schedulePreviewReposition();
+      return;
+    }
+    if (message.type.startsWith(PROJECT_PUSH_PREFIX) && typeof message.requestId === 'string') {
+      childRequests.set(message.requestId, { frame: previewChild, origin: childOrigin });
     }
     return;
   }
@@ -100,8 +139,16 @@ function unmount() {
   loadGeneration += 1;
   window.postMessage({ type: 'papers:project:workspace-scope-revoke' }, messageTarget());
   if (child) child.remove();
+  if (previewChild) previewChild.remove();
+  if (previewShell) previewShell.remove();
   child = null;
+  previewChild = null;
+  previewShell = null;
   childOrigin = null;
+  previewReady = false;
+  lastPreviewSelection = { mode: 'empty', selectionCount: 0, items: [] };
+  if (previewRepositionFrame) cancelAnimationFrame(previewRepositionFrame);
+  previewRepositionFrame = 0;
   mountedProject = null;
   for (const pending of parentRequests.values()) {
     clearTimeout(pending.timer);
@@ -135,11 +182,31 @@ async function mount(project) {
     child.title = `${project.name} — As you Go`;
     child.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
     child.src = url.toString();
+
+    const previewUrl = new URL(scope.url);
+    previewUrl.pathname = previewUrl.pathname.replace(/workspace-20260730b\.html$/i, 'proxima-preview.html');
+    previewUrl.search = '';
+    previewUrl.searchParams.set('papers-embedded-surface', 'proxima-preview');
+    previewChild = document.createElement('iframe');
+    previewChild.className = 'project-preview-frame';
+    previewChild.title = `${project.name} - Preview`;
+    previewChild.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
+    previewChild.src = previewUrl.toString();
+
+    previewShell = document.createElement('aside');
+    previewShell.className = 'project-preview-sidecar';
+    previewShell.setAttribute('aria-label', 'Project file preview');
+    previewShell.append(previewChild);
     shell()?.replaceChildren(child);
+    document.querySelector('#projectCanvas')?.append(previewShell);
+    schedulePreviewReposition();
   } catch (error) {
     if (generation !== loadGeneration) return;
     showMessage(error instanceof Error ? error.message : String(error), 'error');
   }
 }
+
+window.addEventListener('scroll', schedulePreviewReposition, { passive: true });
+window.addEventListener('resize', schedulePreviewReposition, { passive: true });
 
 window.ProjectCanvas = Object.freeze({ mount, unmount });
