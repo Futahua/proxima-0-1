@@ -221,11 +221,11 @@ main { padding: 16px; max-width: 1200px; }
    As you Go. The world is larger than the viewport; cards remain readable while
    the camera pans and zooms. */
 .project-canvas { min-height: calc(100vh - 96px); }
-.project-canvas:not([hidden]) { --project-preview-width: clamp(380px, 38vw, 560px); display: grid; grid-template-columns: minmax(0, 1fr) var(--project-preview-width); grid-template-rows: auto auto; gap: 12px; align-items: start; width: calc(100vw - 32px); }
+.project-canvas:not([hidden]) { --project-preview-width: clamp(380px, 38vw, 560px); display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; gap: 12px; align-items: start; width: calc(100vw - 32px); }
 .project-tasks { grid-column: 1; grid-row: 1; }
 .project-workspace-surface { grid-column: 1; grid-row: 2; min-height: calc(100vh - 112px); position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: #151922; }
 .project-workspace-frame { display: block; width: 100%; height: calc(100vh - 114px); min-height: 620px; border: 0; background: #151922; border-radius: var(--radius); }
-.project-preview-sidecar { grid-column: 2; grid-row: 1 / span 2; position: sticky; top: 8px; align-self: start; height: calc(100vh - 16px); min-height: 520px; overflow: hidden; border: 1px solid var(--line); background: #151922; border-radius: var(--radius); }
+.project-preview-sidecar { grid-column: 1; grid-row: 1 / span 2; justify-self: end; z-index: 20; width: var(--project-preview-width); position: sticky; top: 8px; align-self: start; height: calc(100vh - 16px); min-height: 520px; overflow: hidden; border: 1px solid var(--line); background: #151922; border-radius: var(--radius); box-shadow: -12px 0 30px rgba(0, 0, 0, .28); }
 .project-preview-resizer { position: absolute; z-index: 2; top: 0; bottom: 0; left: 0; width: 10px; cursor: ew-resize; touch-action: none; }
 .project-preview-resizer::after { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 2px; background: transparent; }
 .project-preview-resizer:hover::after, .project-preview-sidecar.resizing .project-preview-resizer::after { background: var(--line); }
@@ -238,8 +238,7 @@ main { padding: 16px; max-width: 1200px; }
   .project-tasks, .project-workspace-surface, .project-preview-sidecar { grid-column: 1; }
   .project-tasks { grid-row: 1; }
   .project-workspace-surface { grid-row: 2; }
-  .project-preview-sidecar { grid-row: 3; position: relative; top: auto; height: min(70vh, 620px); }
-  .project-preview-resizer { display: none; }
+  .project-preview-sidecar { grid-row: 1 / span 2; width: min(var(--project-preview-width), calc(100% - 24px)); }
 }
 
 /* The project's own tasks, above its workspace: the Daily lens can filter
