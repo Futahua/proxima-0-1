@@ -3775,3 +3775,6 @@
   // ticks leave a surface they are not mounted on alone.
   setInterval(tickTimekeeping, 1000);
 })();
+
+// Keep the Papers tab useful as a local 24-hour clock.
+(()=>{const tick=()=>{const now=new Date();document.title=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');};tick();const timer=setInterval(tick,1000);document.addEventListener('visibilitychange',tick);window.addEventListener('pagehide',()=>{clearInterval(timer);document.removeEventListener('visibilitychange',tick);},{once:true});})();
