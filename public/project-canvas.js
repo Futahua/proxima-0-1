@@ -284,6 +284,9 @@ async function mount(project) {
     childOrigin = projectOrigin(url);
     url.searchParams.set('as-you-go-scope-root', scope.rootGroupId);
     url.searchParams.set('papers-embedded-surface', 'proxima');
+    const parentKey=new URLSearchParams(window.location.search).get('papers-surface-key');
+    if(parentKey)url.searchParams.set('papers-surface-key',`${parentKey}:project:${project.id}`);
+    if(new URLSearchParams(window.location.search).get('papers-pane-legacy')==='1')url.searchParams.set('papers-pane-legacy','1');
     child = document.createElement('iframe');
     child.className = 'project-workspace-frame';
     child.title = `${project.name} — As you Go`;
