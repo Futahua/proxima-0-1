@@ -84,6 +84,7 @@ window.addEventListener('message', (event) => {
 
   if (child?.contentWindow && event.source === child.contentWindow) {
     if (childOrigin && event.origin !== childOrigin) return;
+    if(message.type==='papers:proxima-lens-request'){previewChild?.contentWindow?.postMessage(message,childOrigin||'*');return;}
     if (message.type === 'papers:proxima-preview-selection') {
       lastPreviewSelection = message.selection ?? { mode: 'empty', selectionCount: 0, items: [] };
       forwardPreviewSelection();
