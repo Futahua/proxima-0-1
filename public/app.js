@@ -2690,7 +2690,7 @@
   }
 
   /**
-   * A project's workspace: the same board and Timekeeping, scoped by the ROUTE.
+   * A project's task board, scoped by the route.
    * The lens dropdown is not touched — it is hidden here, and its value stays the
    * Daily board's own filter, which is why walking back to Daily is not a
    * surprise.
@@ -2698,7 +2698,6 @@
   function renderProject(project) {
     if (!project) return;
     renderProjectTasks(project);
-    ProjectCanvas.mount(project);
   }
 
   /**
@@ -3215,7 +3214,6 @@
    */
   function renderRoute() {
     const surface = currentSurface();
-    if (surface !== 'project') ProjectCanvas.unmount();
     if (surface === 'daily') renderDaily();
     else if (surface === 'project') renderProject(Store.project(route().id));
     else if (surface === 'hub') renderHub();
