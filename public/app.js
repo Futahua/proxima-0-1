@@ -1369,27 +1369,8 @@
   }
 
   function renderTimekeeping() {
-    const tasks = deadlineTasks();
-    // What this counts is exactly what the panels can show: open tasks carrying a
-    // deadline. Finished work is excluded (as the original excludes it), so the
-    // board above can legitimately show more tasks than this number — the label
-    // says which, rather than claiming to count the board.
-    $('#tkCount').textContent = tasks.length === 0
-      ? 'No open tasks with deadlines'
-      : tasks.length + (tasks.length === 1 ? ' task with a deadline' : ' tasks with deadlines');
-
-    // The message and the panels are mutually exclusive: one or the other, never
-    // both. `hidden` is set on both, every pass.
-    const anyDeadline = tasks.length > 0;
-    $('#tkEmpty').hidden = anyDeadline;
-    $('#tkPanels').hidden = !anyDeadline;
-
-    if (panels.calendar) renderCalendar(tasks);
-    if (panels.timeline) renderTimeline(tasks);
-    if (panels.countdown) renderCountdowns(tasks);
-
-    // Paint the live layer once so the panels never show a stale second.
-    tickTimekeeping();
+    $('#tkEmpty').hidden=true;$('#tkPanels').hidden=false;
+    ExactTimeline.mount($('#exactTimeline'),Store).refresh();
   }
 
   // ── Refusals ──────────────────────────────────────────────────────────────

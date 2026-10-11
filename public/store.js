@@ -184,6 +184,7 @@ const Store = (() => {
     // Proxima-owned calendar records. These are deliberately separate from the
     // append-only command event log below and are never imported from a vault.
     scheduleEvents: [],
+    timelineIntervals: [],
     // Append-only record of what changed, and the counter that numbers it.
     events: [],
     seq: 0,
@@ -331,6 +332,7 @@ const Store = (() => {
         tasks: tasks,
         run: parsed.run && typeof parsed.run === 'object' ? parsed.run : null,
         scheduleEvents: scheduleEvents,
+        timelineIntervals: Array.isArray(parsed.timelineIntervals)?parsed.timelineIntervals:[],
         events: events,
         seq: Number.isFinite(Number(parsed.seq)) ? Math.max(Number(parsed.seq), seqFromEvents) : seqFromEvents,
         commands: commands,
@@ -676,6 +678,7 @@ const Store = (() => {
 
   /** The revision a command's `ifRev` is checked against. */
   function revisionOf(kind, targetId) {
+    if (kind === 'timeline-interval') {const item=state.timelineIntervals.find(x=>x.id===targetId);return item?.rev??null;}
     if (kind === 'task') { const t = findTask(targetId); return t ? t.rev : null; }
     if (kind === 'project') { const p = findProject(targetId); return p ? p.rev : null; }
     if (kind === 'run') return state.run ? positiveInt(state.run.rev, 1) : null;
@@ -1136,6 +1139,30 @@ const Store = (() => {
     },
 
     /** Proxima-owned Schedule records. They never read from the task or vault data. */
+    'timeline-interval.create'(payload) {
+      if(typeof payload.name!=='string'||!payload.name.trim())return refuse('NAME_REQUIRED',{});
+      if(typeof payload.start!=='string'||typeof payload.end!=='string'||!/(Z|[+-]\d\d:\d\d)$/i.test(payload.start)||!/(Z|[+-]\d\d:\d\d)$/i.test(payload.end))return refuse('INTERVAL_TIME_INVALID',{});
+      const start=Date.parse(payload.start),end=Date.parse(payload.end);
+      if(!Number.isFinite(start)||!Number.isFinite(end)||end<=start)return refuse('INTERVAL_TIME_INVALID',{});
+      const item={id:id('interval'),name:payload.name.trim().slice(0,200),start:new Date(start).toISOString(),end:new Date(end).toISOString(),rev:1,createdAt:new Date().toISOString()};
+      return {ok:true,apply:()=>{state.timelineIntervals.push(item);return {value:{...item},entity:{kind:'timeline-interval',id:item.id},before:null,after:{...item},changed:true,created:true};}};
+    },
+    'timeline-interval.patch'(payload,ctx) {
+      const item=state.timelineIntervals.find(x=>x.id===payload.intervalId);if(!item)return refuse('INTERVAL_NOT_FOUND',{});
+      const conflict=checkRev(ctx,'timeline-interval',item.id);if(conflict)return conflict;
+      const patch=payload.patch||{};const next={...item,...Object.fromEntries(Object.entries(patch).filter(([key])=>["name","start","end"].includes(key)))};
+      if(typeof next.start!=="string"||typeof next.end!=="string"||!/(Z|[+-]\d\d:\d\d)$/i.test(next.start)||!/(Z|[+-]\d\d:\d\d)$/i.test(next.end))return refuse("INTERVAL_TIME_INVALID",{});
+      const start=Date.parse(next.start),end=Date.parse(next.end);
+      if(typeof next.name!=='string'||!next.name.trim()||!Number.isFinite(start)||!Number.isFinite(end)||end<=start)return refuse('INTERVAL_TIME_INVALID',{});
+      next.start=new Date(start).toISOString();next.end=new Date(end).toISOString();next.name=next.name.trim().slice(0,200);
+      return {ok:true,apply:()=>{const before={...item};Object.assign(item,next);return {value:{...item},entity:{kind:'timeline-interval',id:item.id},before,after:{...item},changed:true};}};
+    },
+    'timeline-interval.delete'(payload,ctx) {
+      const item=state.timelineIntervals.find(x=>x.id===payload.intervalId);if(!item)return refuse('INTERVAL_NOT_FOUND',{});
+      const conflict=checkRev(ctx,'timeline-interval',item.id);if(conflict)return conflict;
+      return {ok:true,apply:()=>{state.timelineIntervals=state.timelineIntervals.filter(x=>x.id!==item.id);return {value:{id:item.id},entity:{kind:'timeline-interval',id:item.id},before:{...item},after:null,changed:true};}};
+    },
+
     'schedule-event.create'(payload, ctx) {
       if (typeof payload.name !== 'string' || !payload.name.trim()) return refuse('NAME_REQUIRED', {});
       if (!validInstant(payload.start)) return refuse('EVENT_TIME_INVALID', { field: 'start', value: payload.start });
@@ -1360,6 +1387,7 @@ const Store = (() => {
           if (project) project.rev = positiveInt(project.rev, 1) + 1;
         } else if (entity.kind === 'run' && state.run) {
           state.run.rev = positiveInt(state.run.rev, 1) + 1;
+        } else if(entity.kind==='timeline-interval'){const item=state.timelineIntervals.find(x=>x.id===entity.id);if(item)item.rev+=1;
         } else if (entity.kind === 'schedule-event') {
           const scheduleEvent = findScheduleEvent(entity.id);
           if (scheduleEvent) scheduleEvent.rev = positiveInt(scheduleEvent.rev, 1) + 1;
@@ -1433,6 +1461,7 @@ const Store = (() => {
 
     task: (taskId) => state.tasks.find((t) => t.id === taskId) ?? null,
 
+    timelineIntervals:()=>state.timelineIntervals.map(x=>({...x})),
     scheduleEvents: () => state.scheduleEvents.map((event) => ({ ...event, recurrence: event.recurrence ? { ...event.recurrence } : null, exceptions: Array.isArray(event.exceptions) ? event.exceptions.map((exception) => ({ ...exception })) : [] })),
 
     /**

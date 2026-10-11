@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Proxima</title>
-<link rel="stylesheet" href="app.css?v=overview-gap-verified-20261011">
+<link rel="stylesheet" href="app.css?v=exact-time-v2">
 </head>
 <body>
 <!-- One quiet channel for every refused action. A refusal is a sentence the
@@ -128,6 +128,7 @@
 
     <div class="tk-panels" id="tkPanels" hidden>
       <section class="tk-panel" data-panel="calendar" hidden>
+
         <header class="tk-panel-head">
           <span class="tk-panel-title">Deadline Calendar — <span id="calMonthLabel"></span></span>
           <span class="tk-panel-actions">
@@ -143,6 +144,8 @@
       </section>
 
       <section class="tk-panel tk-panel-wide" data-panel="timeline" hidden>
+        <div id="exactTimeline" class="exact-timeline" tabindex="0" aria-label="Exact time timeline. Double-click to add an interval; Ctrl-scroll to zoom; scroll to move through time."></div>
+        <div hidden aria-hidden="true">
         <header class="tk-panel-head">
           <span class="tk-panel-title">Timeline</span>
           <span class="tk-panel-actions">
@@ -156,6 +159,7 @@
             <div class="tk-tl-dates" id="tlDates"></div>
             <div class="tk-tl-rows" id="tlRows"></div>
           </div>
+        </div>
         </div>
       </section>
 
@@ -325,9 +329,10 @@
 </dialog>
 
 <script src="schedule-fixture.js"></script>
-<script src="store.js"></script>
-<script src="schedule-zoom.js?v=overview-gap-verified-20261011"></script>
-<script src="life-clock.js?v=overview-gap-verified-20261011"></script>
-<script src="app.js?v=overview-gap-verified-20261011"></script>
+<script src="store.js?v=exact-time-v2"></script>
+<script src="schedule-zoom.js?v=exact-time-v2"></script>
+<script src="life-clock.js?v=exact-time-v2"></script>
+<script src="exact-timeline.js?v=exact-time-v2"></script>
+<script src="app.js?v=exact-time-v2"></script>
 </body>
 </html>
