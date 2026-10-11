@@ -204,9 +204,9 @@
   // is per-install for the same reason.
   const cockpitPrefs = Cockpit.prefs();
   const panels = {
-    calendar: cockpitPrefs.calendar,
-    timeline: cockpitPrefs.timeline,
-    countdown: cockpitPrefs.countdown,
+    calendar: false,
+    timeline: true,
+    countdown: false,
   };
 
   const calCursor = { y: new Date().getFullYear(), m: new Date().getMonth() };
@@ -701,7 +701,8 @@
 
     const kind = document.createElement('p');
     kind.className = 'kind';
-    kind.textContent = outsider ? 'RUNNING — NOT IN THE LOCKED PLAN' : task.status.toUpperCase();
+    kind.textContent = outsider ? 'NOT IN THE LOCKED PLAN' : '';
+    kind.hidden = !outsider;
     body.append(kind);
 
     const title = document.createElement('h4');
@@ -1180,16 +1181,57 @@
   eventDialog.addEventListener('close', () => { eventForm.reset(); setEventError(''); editingEventId = null; editingOccurrenceKey = ''; editingOccurrence = null; ['project', 'frequency', 'interval', 'unit', 'count', 'until', 'weekdays'].forEach((name) => { if (eventForm.elements[name]) eventForm.elements[name].disabled = false; }); createEventCommandId = null; });
 
   $('#scheduleNew').addEventListener('click', () => openScheduleEvent(null, scheduleCursor));
-  $('#schedulePrev').addEventListener('click', () => {
-    const amount = scheduleMode === 'day' ? 1 : scheduleMode === 'four-day' ? 4 : scheduleMode === 'week' ? 7 : scheduleMode === 'year' ? 12 : 1;
-    scheduleCursor = new Date(scheduleCursor); if (scheduleMode === 'month' || scheduleMode === 'year') scheduleCursor.setMonth(scheduleCursor.getMonth() - amount); else scheduleCursor.setDate(scheduleCursor.getDate() - amount); renderSchedule();
-  });
-  $('#scheduleNext').addEventListener('click', () => {
-    const amount = scheduleMode === 'day' ? 1 : scheduleMode === 'four-day' ? 4 : scheduleMode === 'week' ? 7 : scheduleMode === 'year' ? 12 : 1;
-    scheduleCursor = new Date(scheduleCursor); if (scheduleMode === 'month' || scheduleMode === 'year') scheduleCursor.setMonth(scheduleCursor.getMonth() + amount); else scheduleCursor.setDate(scheduleCursor.getDate() + amount); renderSchedule();
-  });
-  $('#scheduleToday').addEventListener('click', () => { scheduleCursor = new Date(); renderSchedule(); });
-  $$('#schedule [data-schedule-mode]').forEach((button) => button.addEventListener('click', () => { scheduleMode = button.dataset.scheduleMode; renderSchedule(); }));
+  const animateScheduleZoom = window.createScheduleZoom($('#scheduleBody'));
+  function animateSchedulePeriod(change, direction) {
+    const box = $('#scheduleBody').getBoundingClientRect();
+    animateScheduleZoom(()=>{change();renderSchedule();},{x:box.left+box.width/2,y:box.top+box.height/2,target:$('#scheduleBody')},direction,'slide');
+  }
+  function moveSchedulePeriod(direction) {
+    animateSchedulePeriod(()=>{
+      const amount=scheduleMode==='day'?1:scheduleMode==='four-day'?4:scheduleMode==='week'?7:scheduleMode==='year'?12:1;
+      scheduleCursor=new Date(scheduleCursor);
+      if(scheduleMode==='month'||scheduleMode==='year')scheduleCursor.setMonth(scheduleCursor.getMonth()+direction*amount);
+      else scheduleCursor.setDate(scheduleCursor.getDate()+direction*amount);
+    },direction);
+  }
+  $('#scheduleToday').addEventListener('click',()=>{const today=new Date();animateSchedulePeriod(()=>{scheduleCursor=today;},Math.sign(today-scheduleCursor));});
+  const scheduleZoomModes = ['day','four-day','week','month','year','agenda'];
+  let scheduleWheelDelta = 0, scheduleWheelAt = 0, scheduleModeChangedAt = -Infinity;
+  let schedulePeriodWheelAt=-Infinity;
+  $('#scheduleBody').addEventListener('wheel', event => {
+    if (!event.deltaY && !event.deltaX) return;
+    if (!event.ctrlKey) {
+      if (event.target.closest('.schedule-timed-header,.schedule-weekday')) {
+        event.preventDefault();event.stopPropagation();
+        if(performance.now()-schedulePeriodWheelAt>350){schedulePeriodWheelAt=performance.now();moveSchedulePeriod(Math.sign(event.deltaY || event.deltaX));}
+        return;
+      }
+      const bounds = event.currentTarget.getBoundingClientRect();
+      const across = (event.clientX - bounds.left) / bounds.width;
+      if (across <= .125 || across >= .875) {
+        event.preventDefault(); event.stopPropagation();
+        const amount = event.deltaY * (event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? window.innerHeight : 1);
+        window.scrollBy({top:amount, behavior:'instant'});
+      }
+      return;
+    }
+    event.preventDefault(); event.stopPropagation();
+    const now = performance.now();
+    if (now - scheduleWheelAt > 250 || Math.sign(scheduleWheelDelta) !== Math.sign(event.deltaY)) scheduleWheelDelta = 0;
+    scheduleWheelAt = now;
+    if (now - scheduleModeChangedAt < 75) return;
+    scheduleWheelDelta += event.deltaY * (event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? 100 : 1);
+    if (Math.abs(scheduleWheelDelta) < 30) return;
+    const next = Math.max(0, Math.min(scheduleZoomModes.length-1, scheduleZoomModes.indexOf(scheduleMode) + Math.sign(scheduleWheelDelta)));
+    scheduleWheelDelta = 0;
+    if (scheduleZoomModes[next] === scheduleMode) return;
+    const direction = next > scheduleZoomModes.indexOf(scheduleMode) ? 1 : -1;
+    scheduleModeChangedAt = now;
+    animateScheduleZoom(day=>{
+      if(day){const [y,m,d]=day.split('-').map(Number);scheduleCursor=new Date(y,m-1,d);}
+      scheduleMode=scheduleZoomModes[next];renderSchedule();
+    },{x:event.clientX,y:event.clientY,target:event.target},direction);
+  }, {passive:false});
 
   /**
    * One confirmation dialog for destructive actions. Cancelling does nothing at
@@ -2602,31 +2644,43 @@
       const project = Store.project(r.id);
       return project ? 'project' : 'missing';
     }
-    return r.name;
+    return ['daily','hub','schedule'].includes(r.name) ? 'schedule' : r.name;
   }
 
   /** The two surfaces that mount the board and Timekeeping. */
   function boardMounted() {
     const name = currentSurface();
-    return name === 'daily';
+    return name === 'schedule';
   }
 
+  let overviewMode=localStorage.getItem('proxima:overview-mode')||'calendar';
+  if(!['calendar','board','projects'].includes(overviewMode))overviewMode='calendar';
+  for(const [id,mode] of [['scheduleRange','calendar'],['overviewBoard','board'],['overviewProjects','projects']]){
+    document.getElementById(id).addEventListener('click',()=>{if(mode==='calendar'&&overviewMode!=='calendar')delete $('#scheduleBody').dataset.scrollKey;overviewMode=mode;localStorage.setItem('proxima:overview-mode',mode);applyRoute();});
+  }
   const lensPick = $('#lensPick');
   const navProject = $('#navProject');
 
   function setRouteVisibility(surface, project) {
-    const board = surface === 'daily';
-    ['#boardHead', '#runbar', '#columns', '#timekeeping']
-      .forEach((sel) => { $(sel).hidden = !board; });
+    const board = surface === 'schedule' && overviewMode==='board';
+    ['#boardHead', '#runbar', '#columns'].forEach(sel=>{$(sel).hidden=true;});
+    $('#timekeeping').hidden=!board;
     $('#projectCanvas').hidden = surface !== 'project';
-    $('#projectsHub').hidden = surface !== 'hub';
+    $('#projectsHub').hidden = surface !== 'schedule'||overviewMode!=='projects';
+    $('#schedule .schedule-frame').hidden=overviewMode!=='calendar';
+    $('#schedule').classList.toggle('overview-header-only',overviewMode!=='calendar');
+    if(overviewMode!=='calendar')$('#schedule').style.height='auto';
+    $('#scheduleNew').hidden=overviewMode!=='calendar';
+    for(const [id,mode] of [['scheduleRange','calendar'],['overviewBoard','board'],['overviewProjects','projects']]){document.getElementById(id).setAttribute('aria-pressed',String(overviewMode===mode));}
     $('#schedule').hidden = surface !== 'schedule';
     $('#routeMissing').hidden = surface !== 'missing';
 
     // The lens lives on the Daily board only. On the Hub it would do nothing, and
     // on a project route the address has already decided — a control that means
     // something different on every page is worse than no control.
-    lensPick.hidden = surface !== 'daily';
+    lensPick.hidden = surface !== 'schedule';
+    $('#navHome').hidden = surface !== 'project';
+    document.querySelector('.topbar').hidden = surface !== 'project';
 
     // The open project's own nav item exists only while its workspace does.
     navProject.hidden = surface !== 'project';
@@ -2673,6 +2727,7 @@
    * that project's workspace, titled with the project's name either way.
    */
   function renderBoardHead(project) {
+    $('#boardHeading').hidden = !project;
     const lens = project ? null : Store.projects().find((p) => p.id === lensProjectId());
     $('#scopeLabel').textContent = project
       ? (project.archivedAt ? 'PROJECT · ARCHIVED' : 'PROJECT')
@@ -2827,6 +2882,37 @@
     return new Date(date.getFullYear(), date.getMonth(), date.getDate());
   }
 
+  const scheduleHeightKey=scheduleViewKey+':height';
+  let scheduleUserHeight=null;
+  try { const saved=Number(localStorage.getItem(scheduleHeightKey));if(saved>=180)scheduleUserHeight=saved; } catch {}
+  const resizeEdge=$('#scheduleResize');
+  let scheduleResizeStart=null;
+  resizeEdge.addEventListener('pointerdown',event=>{
+    if(event.button!==0)return;
+    scheduleResizeStart={y:event.clientY,height:$('#schedule').getBoundingClientRect().height};
+    resizeEdge.setPointerCapture(event.pointerId);event.preventDefault();
+  });
+  resizeEdge.addEventListener('pointermove',event=>{
+    if(!scheduleResizeStart)return;
+    scheduleUserHeight=Math.max(180,scheduleResizeStart.height+event.clientY-scheduleResizeStart.y);fitScheduleViewport();
+  });
+  const finishScheduleResize=()=>{if(!scheduleResizeStart)return;scheduleResizeStart=null;try{localStorage.setItem(scheduleHeightKey,String(scheduleUserHeight));}catch{}};
+  resizeEdge.addEventListener('pointerup',finishScheduleResize);
+  resizeEdge.addEventListener('pointercancel',finishScheduleResize);
+  resizeEdge.addEventListener('keydown',event=>{
+    if(!['ArrowUp','ArrowDown'].includes(event.key))return;event.preventDefault();
+    scheduleUserHeight=Math.max(180,$('#schedule').getBoundingClientRect().height+(event.key==='ArrowDown'?20:-20));fitScheduleViewport();
+    try{localStorage.setItem(scheduleHeightKey,String(scheduleUserHeight));}catch{}
+  });
+  function fitScheduleViewport() {
+    const schedule = $('#schedule');
+    if (!schedule || schedule.hidden) return;
+    if(overviewMode!=='calendar'){schedule.style.height='auto';return;}
+    schedule.style.height = (scheduleUserHeight ?? Math.max(180, window.innerHeight - (schedule.getBoundingClientRect().top + window.scrollY) - 16)) + 'px';
+  }
+  window.addEventListener('resize', fitScheduleViewport);
+  new ResizeObserver(fitScheduleViewport).observe(document.querySelector('.topbar'));
+
   function rememberScheduleView() {
     try { localStorage.setItem(scheduleViewKey, JSON.stringify({ mode: scheduleMode })); } catch { /* view persistence is best effort and never blocks the schedule */ }
   }
@@ -2836,7 +2922,7 @@
     if (scheduleMode === 'day') return { start: cursor, end: new Date(cursor.getTime() + DAY_MS), label: cursor.toLocaleDateString(undefined, { dateStyle: 'full' }) };
     if (scheduleMode === 'four-day') return { start: cursor, end: new Date(cursor.getTime() + 4 * DAY_MS), label: cursor.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }) + ' – ' + new Date(cursor.getTime() + 3 * DAY_MS).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) };
     if (scheduleMode === 'week') {
-      const start = new Date(cursor); start.setDate(start.getDate() - start.getDay());
+      const start = new Date(cursor); start.setDate(start.getDate() - (start.getDay() + 6) % 7);
       const end = new Date(start.getTime() + 7 * DAY_MS);
       return { start, end, label: start.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' – ' + new Date(end.getTime() - DAY_MS).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) };
     }
@@ -2950,6 +3036,7 @@
     button.type = 'button';
     button.className = 'schedule-event' + (occurrence.occurrence ? ' is-repeat' : '');
     button.dataset.eventId = occurrence.item.id;
+    button.dataset.start = occurrence.start.toISOString();
     button.dataset.occurrenceKey = occurrence.occurrenceKey || '';
     button.draggable = true;
     const details = occurrence.exception || occurrence.item;
@@ -3022,12 +3109,12 @@
   function renderScheduleMonth(range) {
     const body = $('#scheduleBody');
     const grid = document.createElement('div'); grid.className = 'schedule-month-grid';
-    ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach((name) => { const head = document.createElement('div'); head.className = 'schedule-weekday'; head.textContent = name; grid.append(head); });
-    const first = new Date(range.start); first.setDate(first.getDate() - first.getDay());
-    const last = new Date(range.end); last.setDate(last.getDate() + (6 - last.getDay()));
+    ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].forEach((name) => { const head = document.createElement('div'); head.className = 'schedule-weekday'; head.textContent = name; grid.append(head); });
+    const first = new Date(range.start); first.setDate(first.getDate() - (first.getDay()+6)%7);
+    const last = new Date(range.end); last.setDate(last.getDate() + (6 - (last.getDay()+6)%7));
     const events = scheduleEventsIn({ start: first, end: new Date(last.getTime() + DAY_MS) });
     for (let day = new Date(first); day <= last; day.setDate(day.getDate() + 1)) {
-      const cellDay = new Date(day); const cell = document.createElement('div'); cell.className = 'schedule-month-cell';
+      const cellDay = new Date(day); const cell = document.createElement('div'); cell.className = 'schedule-month-cell'; cell.dataset.day = scheduleDayKey(cellDay);
       if (cellDay.getMonth() !== range.start.getMonth()) cell.classList.add('is-muted');
       if (scheduleDayKey(cellDay) === todayDay()) cell.classList.add('is-today');
       const head = document.createElement('div'); head.className = 'schedule-cell-head';
@@ -3051,11 +3138,11 @@
     const header = document.createElement('div'); header.className = 'schedule-timed-header';
     const corner = document.createElement('div'); corner.className = 'schedule-time-corner'; header.append(corner);
     header.style.gridTemplateColumns = '48px repeat(' + Math.max(1, Math.min(7, days.length)) + ', minmax(110px, 1fr))';
-    days.forEach((day) => { const h = document.createElement('div'); h.className = 'schedule-day-head' + (scheduleDayKey(day) === todayDay() ? ' is-today' : ''); h.textContent = day.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }); header.append(h); });
+    days.forEach((day) => { const h = document.createElement('div'); h.dataset.day = scheduleDayKey(day); h.className = 'schedule-day-head' + (scheduleDayKey(day) === todayDay() ? ' is-today' : ''); h.setAttribute('aria-label', day.toLocaleDateString('en-US', { dateStyle: 'full' })); const date = document.createElement('strong'); date.textContent = day.getDate(); const weekday = document.createElement('span'); weekday.textContent = ['S','M','T','W','T','F','S'][day.getDay()]; h.append(date, weekday); header.append(h); });
     wrap.append(header);
     const content = document.createElement('div'); content.className = 'schedule-timed-content';
     const labels = document.createElement('div'); labels.className = 'schedule-time-labels';
-    for (let hour = 0; hour < 24; hour += 1) { const label = document.createElement('div'); label.textContent = (hour === 0 ? '12' : hour > 12 ? hour - 12 : hour) + (hour < 12 ? 'a' : 'p'); labels.append(label); }
+    for (let hour = 0; hour < 24; hour += 1) { const label = document.createElement('div'); label.textContent = (hour % 12 || 12) + (hour < 12 ? ' AM' : ' PM'); labels.append(label); }
     content.append(labels);
     const columnsEl = document.createElement('div'); columnsEl.className = 'schedule-day-columns'; columnsEl.style.gridTemplateColumns = 'repeat(' + days.length + ', minmax(110px, 1fr))';
     days.forEach((day) => {
@@ -3069,10 +3156,29 @@
         if (duration < 60) event.classList.add('is-short');
         event.style.top = startMinutes + 'px'; event.style.height = Math.max(30, duration) + 'px'; col.append(event);
       });
+      {
+        const line = document.createElement('div'); line.className = 'schedule-now-line';
+        const label = document.createElement('span'); label.className = 'schedule-now-label'; line.append(label); col.append(line);
+      }
       columnsEl.append(col);
     });
     content.append(columnsEl); wrap.append(content); body.append(wrap);
+    updateScheduleNow();
   }
+
+  function updateScheduleNow() {
+    const now = new Date();
+    document.querySelectorAll('.schedule-now-line').forEach(line => {
+      const today = line.parentElement.dataset.day === scheduleDayKey(now);
+      line.hidden = !today;
+      if (!today) return;
+      line.style.top = (now.getHours()*60 + now.getMinutes() + now.getSeconds()/60) + 'px';
+      const time = now.toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit',hour12:true});
+      line.querySelector('.schedule-now-label').textContent = time;
+      line.setAttribute('aria-label', 'Current time ' + time);
+    });
+  }
+  setInterval(updateScheduleNow, 1000);
 
   function renderScheduleYear(range) {
     const body = $('#scheduleBody'); const grid = document.createElement('div'); grid.className = 'schedule-year-grid';
@@ -3193,15 +3299,30 @@
 
   function renderSchedule() {
     rememberScheduleView();
-    const range = schedulePeriod(); $('#scheduleRange').textContent = range.label;
+    if(overviewMode!=='calendar')return;
+    const range = schedulePeriod(); const body = $('#scheduleBody'); const zooming = body.dataset.zoomRendering === '1'; const scrollKey = location.hash + ':' + scheduleMode + ':' + range.start.toISOString(); const previousScroll = body.dataset.scrollKey === scrollKey ? body.scrollTop : null; body.dataset.scrollKey = scrollKey; $('#scheduleRange').textContent = scheduleMode === 'year' ? String(scheduleCursor.getFullYear()) : scheduleCursor.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
     const scheduleProject = route().id ? Store.project(route().id) : null;
-    $('#schedule').querySelector('h1').textContent = scheduleProject ? scheduleProject.name : 'Schedule';
+    $('#schedule').setAttribute('aria-label', scheduleProject ? scheduleProject.name + ' schedule' : 'Schedule');
     $$('#scheduleBody').forEach((node) => { node.replaceChildren(); });
-    $$('#schedule [data-schedule-mode]').forEach((button) => button.classList.toggle('active', button.dataset.scheduleMode === scheduleMode));
+    body.dataset.mode = scheduleMode;
+    body.setAttribute('aria-label', scheduleMode.replace('-', ' ') + ' calendar. Ctrl and scroll to change view.');
     if (scheduleMode === 'month') renderScheduleMonth(range);
     else if (scheduleMode === 'year') renderScheduleYear(range);
     else if (scheduleMode === 'agenda') renderScheduleAgenda(range);
     else renderScheduleTimed(range);
+    requestAnimationFrame(() => {
+      if (overviewMode!=='calendar'||body.dataset.scrollKey !== scrollKey) return;
+      fitScheduleViewport();
+      if (zooming) return;
+      if (previousScroll !== null) { body.scrollTop = previousScroll; return; }
+      if (['day','four-day','week'].includes(scheduleMode)) {
+        const entries = scheduleEventsIn(range).sort((a,b)=>a.start-b.start);
+        const todayEntries = entries.filter(entry=>scheduleDayKey(entry.start)===todayDay());
+        const visibleEntries = todayEntries.length ? todayEntries : entries;
+        const minutes = visibleEntries.length ? Math.min(...visibleEntries.map(entry=>entry.start.getHours()*60+entry.start.getMinutes())) : new Date().getHours()*60;
+        body.scrollTop = Math.max(0, minutes - 60);
+      } else body.scrollTop = 0;
+    });
   }
 
   /**
@@ -3217,7 +3338,7 @@
     if (surface === 'daily') renderDaily();
     else if (surface === 'project') renderProject(Store.project(route().id));
     else if (surface === 'hub') renderHub();
-    else if (surface === 'schedule') renderSchedule();
+    else if (surface === 'schedule') { renderSchedule(); renderDaily(); renderHub(); }
     // 'missing' draws nothing: the section is a statement, written once on entry.
   }
 
@@ -3245,13 +3366,13 @@
     if (surface === 'missing') describeMissingRoute();
     runningHeight = 0;
     renderRoute();
-    if (surface !== 'daily' && surface !== 'project') return;
+    if (surface !== 'schedule' && surface !== 'project') return;
     requestAnimationFrame(() => {
       // The route can change again inside a frame — a quick Back then Forward would
       // otherwise settle the numbers on a surface that is no longer mounted.
       if (!boardMounted()) return;
       runningHeight = 0;
-      if (surface === 'daily') paint();
+      if (surface === 'schedule') paint();
     });
   }
 

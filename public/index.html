@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Proxima</title>
-<link rel="stylesheet" href="app.css?v=task-board-20261010">
+<link rel="stylesheet" href="app.css?v=overview-gap-verified-20261011">
 </head>
 <body>
 <!-- One quiet channel for every refused action. A refusal is a sentence the
@@ -17,23 +17,38 @@
      is the state, a refresh lands on the same surface, and Back works. -->
 <header class="topbar">
   <nav class="surfaces" aria-label="Surfaces">
-    <a class="surf" href="#/" data-route="daily">Daily</a>
-    <a class="surf" href="#/hub" data-route="hub">This is Minh</a>
-    <a class="surf" href="#/schedule" data-route="schedule">Schedule</a>
+    <a class="surf" id="navHome" href="#/schedule" hidden aria-label="Back to overview">←</a>
     <a class="surf" id="navProject" href="#/project/" data-route="project" hidden></a>
   </nav>
   <span class="spacer"></span>
   <!-- The project lens, not page identity: it is the Daily board's own filter, so
        it is hidden everywhere the board is not the thing on screen. -->
-  <label class="projpick" id="lensPick">Project
-    <select id="projectFilter"><option value="">-- All Projects --</option></select>
-  </label>
-  <button id="newProjectBtn" class="ghost">+ Project</button>
 </header>
 
 <main>
+  <section id="schedule" hidden>
+    <div class="schedule-head">
+      <div class="schedule-heading">
+        <button type="button" id="scheduleRange" class="overview-mode month-mode" title="Calendar" aria-label="Calendar"></button>
+        <span id="lifeProgressClock" class="life-progress-clock"></span>
+      </div>
+      <div class="schedule-head-actions">
+<label class="projpick" id="lensPick">Project
+    <select id="projectFilter"><option value="">-- All Projects --</option></select>
+  </label>
+  <button id="newProjectBtn" class="ghost">+ Project</button>
+      <button class="primary" id="scheduleNew">+ Event</button>
+      </div>
+    </div>
+    <div class="schedule-frame">
+      <button id="scheduleToday" class="schedule-top-edge" aria-label="Go to today" title="Go to today"></button>
+      <div class="schedule-body" id="scheduleBody"></div>
+      <div id="scheduleResize" class="schedule-bottom-edge" role="separator" aria-label="Resize calendar" aria-orientation="horizontal" tabindex="0"></div>
+    </div>
+  </section>
+
   <section class="boardhead" id="boardHead">
-    <div>
+    <div id="boardHeading" hidden>
       <p class="eyebrow" id="scopeLabel">ALL PROJECTS</p>
       <h1 id="boardTitle">Elastic Boards</h1>
       <p class="sub" id="boardSub">Backlog, live execution and finished work.</p>
@@ -44,11 +59,11 @@
   </section>
 
   <section class="runbar" id="runbar">
-    <label>Execution target
-      <input type="datetime-local" id="target">
+    <label>
+      <input type="datetime-local" id="target" aria-label="Execution target">
     </label>
     <button id="lockBtn" class="lock">Lock</button>
-    <span id="runInfo" class="runinfo"></span>
+    <span id="runInfo" class="runinfo" hidden></span>
   </section>
 
   <section class="columns" id="columns">
@@ -182,32 +197,7 @@
     <div class="hub-grid" id="hubGrid" hidden></div>
   </section>
 
-  <section id="schedule" hidden>
-    <div class="schedule-head">
-      <div>
-        <p class="eyebrow">SURFACE</p>
-        <h1>Schedule</h1>
-        <p class="sub" id="scheduleRange"></p>
-      </div>
-      <button class="primary" id="scheduleNew">+ Event</button>
-    </div>
-    <div class="schedule-toolbar" aria-label="Schedule controls">
-      <div class="schedule-modes" role="group" aria-label="View">
-        <button data-schedule-mode="day">Day</button>
-        <button data-schedule-mode="four-day">4 Day</button>
-        <button data-schedule-mode="week">Week</button>
-        <button data-schedule-mode="month">Month</button>
-        <button data-schedule-mode="year">Year</button>
-        <button data-schedule-mode="agenda">Agenda</button>
-      </div>
-      <div class="schedule-nav">
-        <button id="schedulePrev" aria-label="Previous period">‹</button>
-        <button id="scheduleToday">Today</button>
-        <button id="scheduleNext" aria-label="Next period">›</button>
-      </div>
-    </div>
-    <div class="schedule-body" id="scheduleBody"></div>
-  </section>
+
 
   <!-- A route that resolves to nothing says so, rather than falling back to a
        surface the reader did not ask for. Reached by a hand-typed hash, or by a
@@ -336,6 +326,8 @@
 
 <script src="schedule-fixture.js"></script>
 <script src="store.js"></script>
-<script src="app.js?v=task-board-20261010"></script>
+<script src="schedule-zoom.js?v=overview-gap-verified-20261011"></script>
+<script src="life-clock.js?v=overview-gap-verified-20261011"></script>
+<script src="app.js?v=overview-gap-verified-20261011"></script>
 </body>
 </html>
