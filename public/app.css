@@ -1050,3 +1050,75 @@ body:has(#calendarTimelinePeek:not([hidden])) main {height:calc(100dvh - 54px);o
 .calendar-timeline-nav-tools {position:absolute;top:5px;right:8px;z-index:21;display:flex;gap:4px;}
 .calendar-timeline-nav-tools button {width:25px;height:23px;min-width:0;min-height:0;padding:0;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--ink);cursor:pointer;}
 .calendar-timeline-nav-tools button:hover,.calendar-timeline-nav-tools button:focus-visible {border-color:var(--accent);color:var(--accent);}
+
+.calendar-timeline-navigator,.calendar-timeline-nav-tools {display:none;}
+.is-calendar-peek .exact-tracks {pointer-events:auto;}
+.is-calendar-peek .exact-actions,.is-calendar-peek .exact-name-check,.is-calendar-peek .exact-unlink {display:none;}
+
+#calendarTimelinePeek #timekeeping {pointer-events:auto;}
+
+
+
+.is-calendar-peek .exact-return-now {display:none;}
+.calendar-timeline-divider,.calendar-timeline-divider:hover,.calendar-timeline-divider:focus-visible {background:transparent;border-color:transparent;box-shadow:none;outline:none;}
+.calendar-timeline-divider::before,.calendar-timeline-divider::after {display:none;}
+
+.exact-reorder-shift {transition:transform 180ms cubic-bezier(.22,.8,.25,1);}
+@media(prefers-reduced-motion:reduce){.exact-reorder-shift {transition:none;}}
+
+/* Interface dragging should never begin browser text selection. */
+html,body,body * {user-select:none;-webkit-user-select:none;}
+input,textarea,[contenteditable="true"],[contenteditable="true"] * {user-select:text;-webkit-user-select:text;}
+
+.exact-inline-name {background:transparent;border-color:transparent;box-shadow:none;}
+
+.exact-selectable.is-renaming .exact-interval-caption,.exact-outside-name.is-renaming {visibility:hidden!important;}
+
+.exact-queued-placeholder {border-color:#91b7d3;}
+.is-queue-resizing .exact-queued-placeholder,.is-queue-resizing .exact-queue-zone {transition:none;}
+
+.exact-queue-boundary {right:-12px;width:24px;top:-4px;height:50px;}
+
+.exact-inline-name.is-new-blob {border-width:1px;border-style:solid;box-shadow:0 0 0 1px #ffffff16;}
+
+.exact-actions {z-index:40;background:var(--bg,#20252d);box-shadow:-5px 0 5px var(--bg,#20252d);}
+
+.exact-picker-check {display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;cursor:pointer;}
+.exact-picker-check input {margin:0;width:1em;height:1em;accent-color:var(--accent);}
+
+.exact-queued-placeholder .exact-interval-caption {padding-left:34px;}
+
+.exact-day-boundary {top:24px;background:#64b8ff40;z-index:5;}
+
+.exact-boundary-fusion {position:absolute;top:24px;bottom:0;pointer-events:none;z-index:27;border-radius:50%;background:linear-gradient(to right,#80ccff00,#a5ddff70 30%,#c6edffb0 50%,#a5ddff70 70%,#80ccff00);filter:blur(2px);box-shadow:0 0 9px #78caff60;}
+
+.exact-boundary-fusion {box-shadow:0 0 6px #78caff30;}
+
+.exact-timeline.is-middle-panning,.is-middle-panning * {cursor:grabbing!important;}
+
+#schedule #lensPick,#schedule #newProjectBtn {display:none!important;}
+
+.exact-return-now {display:none;}
+.schedule-head.is-return-hover {cursor:pointer;background:linear-gradient(100deg,#b0707410,#b2966510,#779d7810,#6897a210,#8c7bae10);}
+
+.exact-selectable.has-clipped-end .exact-unlink {display:none;}
+
+
+.overview-shared-morph.date-strip-cell {background:transparent!important;border:0!important;box-shadow:none!important;}
+
+#scheduleToday {display:none!important;}
+
+.exact-extension-preview {position:absolute;inset:0;pointer-events:none;z-index:26;}
+.exact-extension-preview > div {position:absolute;height:42px;box-sizing:border-box;padding:12px;border:2px solid #8edaff;border-radius:3px;background:#8edaff24;color:var(--ink);white-space:nowrap;overflow:hidden;}
+
+.exact-extension-shift {transition:transform 180ms cubic-bezier(.22,.8,.25,1);}
+
+.exact-selectable.is-extension-source .exact-interval-caption,.exact-outside-name.is-extension-source {visibility:hidden!important;}
+
+.is-extension-source {transition:transform 180ms cubic-bezier(.22,.8,.25,1);}
+
+.exact-interval:not(.exact-follows-now) .exact-resize-end {border-right:0;}
+
+.is-calendar-peek .exact-unlink {display:block;}
+.is-calendar-peek .exact-name-check {display:inline-block;}
+.is-calendar-peek .has-clipped-end .exact-unlink {display:none;}
