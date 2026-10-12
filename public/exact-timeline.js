@@ -153,7 +153,7 @@
   function addSession(index,t){const row=ordered()[index];open(null,t,index,row.rowId||row.id);}
   function open(item,t,index=laneCount,rowId=null,followNow=false){
    if(inlineEditor){inlineEditor.focus();return;}error.textContent='';
-   const input=document.createElement('input');input.className='exact-inline-name';input.maxLength=200;input.placeholder='Name';input.value=item?.name||'';
+   const input=document.createElement('input');input.className='exact-inline-name';input.maxLength=200;input.placeholder='Name';input.value=item?.name||'';if(!item)input.style.backgroundColor=creationColor();
    if(!item&&!rowId){draftIndex=index;render();}
    const lane=item?layout.find(x=>x.item.id===item.id)?.lane??0:index;const x=item?geometry.position(Date.parse(item.start),start,scale):geometry.position(t,start,scale);
    input.style.left=Math.max(0,Math.min(element.clientWidth-180,x))+'px';input.style.top=(20+lane*60)+'px';tracks.append(input);inlineEditor=input;input.focus();input.select();let saving=false;
