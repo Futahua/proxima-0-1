@@ -2639,6 +2639,18 @@
   if(!['calendar','board','projects'].includes(overviewMode))overviewMode='calendar';
   const overviewOrder=['board','projects'];let lastMainOverview=overviewMode==='calendar'?'calendar':'board';
   const overviewButtons={calendar:'scheduleRange',board:'overviewBoard',projects:'overviewProjects'};
+  const timelineHost=$('#timekeeping'),timelineHome=document.createComment('Timeline full-view position'),timelinePeek=$('#calendarTimelinePeek');
+  timelineHost.before(timelineHome);
+  // Allow reading more rows in the peek without forwarding any input to
+  // timeline's create/edit/resize/zoom handlers.
+  timelinePeek.addEventListener('wheel',event=>{if(timelinePeek.hidden)return;event.preventDefault();const tracks=timelinePeek.querySelector('.exact-tracks');if(tracks)tracks.scrollTop+=event.deltaY;},{passive:false});
+  function placeTimelineForOverview(surface){
+    const peek=surface==='schedule'&&overviewMode==='calendar';
+    if(peek&&timelineHost.parentNode!==timelinePeek)timelinePeek.append(timelineHost);
+    else if(!peek&&timelineHost.parentNode===timelinePeek)timelineHome.after(timelineHost);
+    timelinePeek.hidden=!peek;timelineHost.classList.toggle('is-calendar-peek',peek);
+    timelineHost.inert=peek;
+  }
   const overviewHeading=document.querySelector('.schedule-heading');
   const overviewUnderline=document.createElement('span');overviewUnderline.className='overview-sliding-underline';overviewUnderline.setAttribute('aria-hidden','true');overviewHeading.append(overviewUnderline);
   let overviewAnimations=[],overviewGhost=null,overviewTransition=0,overviewShared=[];
@@ -2674,10 +2686,11 @@
   const navProject = $('#navProject');
 
   function setRouteVisibility(surface, project) {
+    placeTimelineForOverview(surface);
     $("#scheduleRange").textContent=scheduleMode==="year"?String(scheduleCursor.getFullYear()):scheduleCursor.toLocaleDateString("en-US",{month:"short",year:"numeric"});
     const board = surface === 'schedule' && overviewMode==='board';
     ['#boardHead', '#runbar', '#columns'].forEach(sel=>{$(sel).hidden=true;});
-    $('#timekeeping').hidden=!board;
+    $('#timekeeping').hidden=surface!=='schedule'||overviewMode==='projects';
     $('#projectCanvas').hidden = surface !== 'project';
     $('#projectsHub').hidden = surface !== 'schedule'||overviewMode!=='projects';
     $('#schedule .schedule-frame').hidden=overviewMode!=='calendar';
@@ -2923,7 +2936,7 @@
     const schedule = $('#schedule');
     if (!schedule || schedule.hidden) return;
     if(overviewMode!=='calendar'){schedule.style.height='auto';return;}
-    schedule.style.height = (scheduleUserHeight ?? Math.max(180, window.innerHeight - (schedule.getBoundingClientRect().top + window.scrollY) - 16)) + 'px';
+    schedule.style.height = (timelinePeek.hidden&&scheduleUserHeight!==null?scheduleUserHeight:Math.max(280,window.innerHeight-schedule.getBoundingClientRect().top-16))+'px';
   }
   window.addEventListener('resize', fitScheduleViewport);
   new ResizeObserver(fitScheduleViewport).observe(document.querySelector('.topbar'));

@@ -1030,3 +1030,16 @@ main {width:100%;min-width:0;}
 .exact-now,.exact-horizontal-now {background:color-mix(in srgb,var(--day-active-color,#ffef37) calc(var(--day-color-visibility,0) * 100%),#f87575);transition:background-color 120ms linear;}
 
 .exact-day-boundary {width:2px;}
+
+/* Calendar remains its own view; its lower peek uses the SAME timeline
+   DOM with editing disabled. Full timeline mode restores that DOM in place. */
+body:has(#calendarTimelinePeek:not([hidden])) {height:100dvh;overflow:hidden;}
+body:has(#calendarTimelinePeek:not([hidden])) main {height:calc(100dvh - 54px);overflow:hidden;box-sizing:border-box;}
+#schedule:has(#calendarTimelinePeek:not([hidden])) {height:100%;max-height:100%;min-height:0;margin-bottom:0;overflow:hidden;}
+#schedule:has(#calendarTimelinePeek:not([hidden])) .schedule-frame {flex:0 1 58%;min-height:0;overflow:hidden;}
+#schedule:has(#calendarTimelinePeek:not([hidden])) #scheduleResize {display:none;}
+#calendarTimelinePeek {flex:1 1 0;min-height:0;display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--line);border-radius:6px;margin-top:10px;position:relative;}
+#calendarTimelinePeek::after {content:'BLOB TIMELINE · READ ONLY';position:absolute;top:4px;right:8px;z-index:11;pointer-events:none;color:var(--dim);font-size:10px;letter-spacing:.07em;background:var(--bg);padding:2px 5px;border-radius:3px;}
+#calendarTimelinePeek #timekeeping {height:100%;min-height:0;overflow:hidden;margin:0;padding:0;pointer-events:none;}
+#calendarTimelinePeek #tkPanels,#calendarTimelinePeek .tk-panel[data-panel='timeline'] {height:100%;min-height:0;overflow:hidden;margin:0;padding:0;}
+#calendarTimelinePeek #exactTimeline {height:100%;min-height:0;overflow:hidden;}
