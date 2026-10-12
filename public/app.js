@@ -1370,7 +1370,7 @@
 
   function renderTimekeeping() {
     $('#tkEmpty').hidden=true;$('#tkPanels').hidden=false;
-    ExactTimeline.mount($('#exactTimeline'),Store).refresh();
+    ExactTimeline.mount($('#exactTimeline'),Store,{schedule:{version:()=>JSON.stringify([route().id,...Store.scheduleEvents().map(item=>[item.id,item.rev])]),events:range=>scheduleEventsIn(range),edit:entry=>openScheduleEvent(entry.item.id,entry.start,entry),create:time=>openScheduleEvent(null,time),patch:(entry,patch)=>patchScheduleOccurrence(entry,patch)}}).refresh();
   }
 
   // ── Refusals ──────────────────────────────────────────────────────────────
