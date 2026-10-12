@@ -5,15 +5,33 @@ import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 const domainCode=await readFile(new URL('./public/remote-domain.js',import.meta.url),'utf8');
 const storeCode=await readFile(new URL('./public/store.js',import.meta.url),'utf8');
+const followCode=await readFile(new URL('./public/remote-follow.js',import.meta.url),'utf8');
 const owner={ownerId:'desktop',backpackId:'proxima'},now=Date.parse('2026-10-12T12:00:00.000Z');
 function fixture(seed){
  const state={version:1,seq:9,projects:[{id:'p',name:'Project α',description:'Exact\nnotes',projectType:'task',createdAt:'2026-01-01T00:00:00.000Z',archivedAt:null,rev:2,windowHandles:[100],token:'private'}],tasks:[{id:'t',name:'Task',note:'Keep byte values',project:'p',status:'backlog',weight:2,start:'2026-10-12',deadline:'2026-10-14',createdAt:'2026-01-01T00:00:00.000Z',rev:3,ganttRow:20,order:7},{id:'other',name:'Other',project:'p',status:'backlog',weight:1,start:'2026-10-12',deadline:'',createdAt:'2026-01-01T00:00:00.000Z',rev:1}],scheduleEvents:[],timelineRows:[{id:'row',name:'Shared activity',color:'#a0a597',rowOrder:9,queue:{end:'2026-10-13T12:00:00.000Z',ids:['live','waiting']},queueReturn:{privateUndo:true}}],timelineIntervals:[{id:'live',rowId:'row',name:'Active',start:'2026-10-12T10:00:00.000Z',end:'2026-10-12T10:00:00.001Z',followNow:true,rev:1},{id:'waiting',rowId:'row',name:'Waiting',start:'2026-10-12T11:00:00.000Z',end:'2026-10-12T11:00:00.001Z',followNow:false,queueWeight:2,rev:1}],run:null,events:[{seq:9,privateBefore:'secret'}],commands:{private:'secret'},timelineHistory:{undo:['private']},views:{zoom:42},native:{HWND:200}};
  const memory=new Map([['proxima.store.v1',JSON.stringify(seed||state)]]),Clock=class extends Date{static now(){return now;}};
  const context=vm.createContext({Date:Clock,location:{search:'',protocol:'file:',hostname:'',port:''},localStorage:{getItem:key=>memory.get(key)??null,setItem:(key,value)=>memory.set(key,value)},URLSearchParams,structuredClone,crypto:webcrypto,console,setTimeout,clearTimeout});
- vm.runInContext(domainCode+'\n'+storeCode+'\nglobalThis.store=Store;',context);
+ vm.runInContext(domainCode+'\n'+followCode+'\n'+storeCode+'\nglobalThis.store=Store;',context);
  return {state,memory,context,store:context.store,domain:context.ProximaRemoteDomain};
 }
 const plain=value=>JSON.parse(JSON.stringify(value));
+async function followFixture(){const source=fixture(),projection=await source.store.remoteProjection(owner,[{kind:'tasks',id:'t'}]),copyId=webcrypto.randomUUID(),candidate=source.domain.prepareImport(projection,copyId),follow=source.context.ProximaRemoteFollow.create(candidate,projection,{ownerId:'receiver',backpackId:'local'},{resourceId:'grant'});return {source,projection,candidate,receipt:{id:copyId,value:{source:projection.source},follow},state:candidate.records};}
+test('follow updates only approved records and preserves local layout and unknown fields',async()=>{
+ const f=await followFixture();
+ const copyId=webcrypto.randomUUID();f.candidate=f.source.domain.prepareImport(f.projection,copyId);f.state=f.candidate.records;f.receipt.id=copyId;f.receipt.follow=f.source.context.ProximaRemoteFollow.create(f.candidate,f.projection,{ownerId:'receiver',backpackId:'local'},{resourceId:'grant'});
+ const next=structuredClone(f.projection);next.source.seq++;next.records.tasks[0].note='Source update';next.records.tasks.push({...next.records.tasks[0],id:'new',name:'Unselected'});
+ const plan=f.source.context.ProximaRemoteFollow.plan(f.state,f.receipt,next);assert.equal(plan.updates.length,1);assert.equal(plan.extras.length,0);assert.equal(plan.changes.length,0);
+ const local={...f.state.tasks[0],ganttRow:99,order:24,privateExtension:{keep:true}};const merged=f.source.domain.mergeOwned('tasks',local,plan.updates[0].value);assert.equal(merged.note,'Source update');assert.equal(merged.ganttRow,99);assert.equal(merged.order,24);assert.deepEqual(plain(merged.privateExtension),{keep:true});
+});
+test('follow retains local edits and deleted source records',async()=>{
+ const f=await followFixture(),copyId=webcrypto.randomUUID();f.candidate=f.source.domain.prepareImport(f.projection,copyId);f.state=f.candidate.records;f.receipt.id=copyId;f.receipt.follow=f.source.context.ProximaRemoteFollow.create(f.candidate,f.projection,{ownerId:'receiver',backpackId:'local'},{resourceId:'grant'});f.state.tasks[0].note='My work';
+ const next=structuredClone(f.projection);next.source.seq++;next.records.tasks[0].note='Different source work';const plan=f.source.context.ProximaRemoteFollow.plan(f.state,f.receipt,next);assert.equal(plan.updates.length,0);assert.equal(plan.changes[0].status,'modified');assert.equal(f.state.tasks[0].note,'My work');
+ next.records.tasks=[];const removed=f.source.context.ProximaRemoteFollow.plan(f.state,f.receipt,next);assert.equal(removed.changes[0].status,'deleted');assert.equal(f.state.tasks.length,1);
+});
+test('follow refuses loops and backward source history',async()=>{
+ const f=await followFixture();assert.throws(()=>f.source.context.ProximaRemoteFollow.create(f.candidate,f.projection,owner,{resourceId:'grant'}),/own data/);const next=structuredClone(f.projection);next.source.seq--;assert.throws(()=>f.source.context.ProximaRemoteFollow.plan(f.state,f.receipt,next),/backwards/);
+ next.source.seq=f.projection.source.seq;next.provenance={tasks:{t:[{ownerId:'receiver',backpackId:'local',kind:'tasks',id:'original'}]}};assert.throws(()=>f.source.context.ProximaRemoteFollow.create(f.candidate,next,{ownerId:'receiver',backpackId:'local'},{resourceId:'grant'}),/follow loop/);
+});
 test('selected task exports exact approved values and project dependency without copying its siblings or private fields',async()=>{
  const f=fixture(),before=f.memory.get('proxima.store.v1');const projection=await f.store.remoteProjection(owner,[{kind:'tasks',id:'t'}]);
  assert.deepEqual(plain(projection.records.tasks.map(item=>item.id)),['t']);assert.equal(projection.records.projects.length,1);assert.equal(projection.records.projects[0].description,'Exact\nnotes');assert.equal(projection.records.tasks[0].start,'2026-10-12');
