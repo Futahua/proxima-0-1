@@ -1266,6 +1266,7 @@
   // The lens scopes the Daily board. On a project route it is hidden and the
   // address decides, so this handler can only ever fire on Daily.
   projectFilter.addEventListener('change', renderRoute);
+  window.addEventListener('proxima:remote-imported',()=>{refreshProjectOptions();renderRoute();});
   // A new target is a new horizon: every proportional share changes with it.
   targetInput.addEventListener('change', render);
   // A resize only changes how tall the running column is, so restyle rather than
