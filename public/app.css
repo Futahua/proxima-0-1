@@ -1122,3 +1122,5 @@ input,textarea,[contenteditable="true"],[contenteditable="true"] * {user-select:
 .is-calendar-peek .exact-unlink {display:block;}
 .is-calendar-peek .exact-name-check {display:inline-block;}
 .is-calendar-peek .has-clipped-end .exact-unlink {display:none;}
+
+main {margin-inline:auto;}
