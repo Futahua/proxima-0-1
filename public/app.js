@@ -2636,13 +2636,48 @@
 
   let overviewMode=localStorage.getItem('proxima:overview-mode')||'calendar';
   if(!['calendar','board','projects'].includes(overviewMode))overviewMode='calendar';
-  for(const [id,mode] of [['scheduleRange','calendar'],['overviewBoard','board'],['overviewProjects','projects']]){
-    document.getElementById(id).addEventListener('click',()=>{if(mode==='calendar'&&overviewMode!=='calendar')delete $('#scheduleBody').dataset.scrollKey;overviewMode=mode;localStorage.setItem('proxima:overview-mode',mode);applyRoute();});
+  const overviewOrder=['calendar','board','projects'];
+  const overviewButtons={calendar:'scheduleRange',board:'overviewBoard',projects:'overviewProjects'};
+  const overviewHeading=document.querySelector('.schedule-heading');
+  const overviewUnderline=document.createElement('span');overviewUnderline.className='overview-sliding-underline';overviewUnderline.setAttribute('aria-hidden','true');overviewHeading.append(overviewUnderline);
+  let overviewAnimations=[],overviewGhost=null,overviewTransition=0;
+  function positionOverviewUnderline(){const button=document.getElementById(overviewButtons[overviewMode]);if(!button)return;const box=button.getBoundingClientRect(),host=overviewHeading.getBoundingClientRect();overviewUnderline.style.width=box.width+'px';overviewUnderline.style.transform='translateX('+(box.left-host.left)+'px)';}
+  new ResizeObserver(positionOverviewUnderline).observe(overviewHeading);
+  function changeOverview(mode){
+    if(mode===overviewMode)return;
+    const old=overviewMode,token=++overviewTransition;
+    for(const animation of overviewAnimations)animation.cancel();overviewAnimations=[];overviewGhost?.remove();overviewGhost=null;
+    const moving=old!=='projects'&&mode!=='projects'&&!matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const content=old==='calendar'?document.querySelector('.schedule-frame'):document.getElementById('timekeeping');
+    const direction=overviewOrder.indexOf(mode)>overviewOrder.indexOf(old)?1:-1;
+    if(moving&&content.getClientRects().length){const box=content.getBoundingClientRect(),clone=content.cloneNode(true);clone.removeAttribute('id');clone.querySelectorAll('[id]').forEach(x=>x.removeAttribute('id'));clone.setAttribute('aria-hidden','true');clone.classList.add('overview-page-ghost');Object.assign(clone.style,{position:'fixed',left:box.left+'px',top:box.top+'px',width:box.width+'px',height:box.height+'px',margin:'0',pointerEvents:'none',zIndex:'20',overflow:'hidden'});document.body.append(clone);overviewGhost=clone;}
+    if(mode==='calendar')delete $('#scheduleBody').dataset.scrollKey;
+    overviewMode=mode;localStorage.setItem('proxima:overview-mode',mode);applyRoute();positionOverviewUnderline();
+    if(!moving)return;
+    const incoming=mode==='calendar'?document.querySelector('.schedule-frame'):document.getElementById('timekeeping');const width=document.querySelector('main').clientWidth;
+    const options={duration:420,easing:'cubic-bezier(.22,.8,.25,1)',fill:'none'};
+    if(overviewGhost)overviewAnimations.push(overviewGhost.animate([{transform:'translateX(0)'},{transform:'translateX('+(-direction*width)+'px)'}],options));
+    overviewAnimations.push(incoming.animate([{transform:'translateX('+(direction*width)+'px)'},{transform:'translateX(0)'}],options));
+    Promise.all(overviewAnimations.map(a=>a.finished.catch(()=>{}))).then(()=>{if(token!==overviewTransition)return;overviewGhost?.remove();overviewGhost=null;overviewAnimations=[];});
   }
+  for(const [mode,id] of Object.entries(overviewButtons))document.getElementById(id).addEventListener('click',()=>changeOverview(mode));
+  let overviewWheelDelta=0,overviewWheelTime=0,overviewWheelSwitched=-Infinity;
+  overviewHeading.addEventListener('wheel',event=>{
+    const delta=event.deltaX||event.deltaY;if(!delta)return;
+    event.preventDefault();event.stopPropagation();
+    const now=performance.now();if(now-overviewWheelTime>180||Math.sign(delta)!==Math.sign(overviewWheelDelta))overviewWheelDelta=0;overviewWheelTime=now;
+    if(now-overviewWheelSwitched<320)return;
+    overviewWheelDelta+=delta*(event.deltaMode===1?16:event.deltaMode===2?200:1);
+    if(Math.abs(overviewWheelDelta)<35)return;
+    const index=Math.max(0,Math.min(overviewOrder.length-1,overviewOrder.indexOf(overviewMode)+Math.sign(overviewWheelDelta)));
+    overviewWheelDelta=0;if(overviewOrder[index]===overviewMode)return;overviewWheelSwitched=now;changeOverview(overviewOrder[index]);
+  },{passive:false});
+
   const lensPick = $('#lensPick');
   const navProject = $('#navProject');
 
   function setRouteVisibility(surface, project) {
+    $("#scheduleRange").textContent=scheduleMode==="year"?String(scheduleCursor.getFullYear()):scheduleCursor.toLocaleDateString("en-US",{month:"short",year:"numeric"});
     const board = surface === 'schedule' && overviewMode==='board';
     ['#boardHead', '#runbar', '#columns'].forEach(sel=>{$(sel).hidden=true;});
     $('#timekeeping').hidden=!board;
@@ -2654,6 +2689,7 @@
     $('#scheduleNew').hidden=overviewMode!=='calendar';
     for(const [id,mode] of [['scheduleRange','calendar'],['overviewBoard','board'],['overviewProjects','projects']]){document.getElementById(id).setAttribute('aria-pressed',String(overviewMode===mode));}
     $('#schedule').hidden = surface !== 'schedule';
+    requestAnimationFrame(positionOverviewUnderline);
     $('#routeMissing').hidden = surface !== 'missing';
 
     // The lens lives on the Daily board only. On the Hub it would do nothing, and
@@ -3119,7 +3155,7 @@
     const header = document.createElement('div'); header.className = 'schedule-timed-header';
     const corner = document.createElement('div'); corner.className = 'schedule-time-corner'; header.append(corner);
     header.style.gridTemplateColumns = '48px repeat(' + Math.max(1, Math.min(7, days.length)) + ', minmax(110px, 1fr))';
-    days.forEach((day) => { const h = document.createElement('div'); h.dataset.day = scheduleDayKey(day); h.className = 'schedule-day-head' + (scheduleDayKey(day) === todayDay() ? ' is-today' : ''); h.setAttribute('aria-label', day.toLocaleDateString('en-US', { dateStyle: 'full' })); const date = document.createElement('strong'); date.textContent = day.getDate(); const weekday = document.createElement('span'); weekday.textContent = ['S','M','T','W','T','F','S'][day.getDay()]; h.append(date, weekday); header.append(h); });
+    days.forEach((day) => { const h = DateStrip.create(day.getTime()); h.dataset.day = scheduleDayKey(day); h.classList.add('schedule-day-head'); header.append(h); });
     wrap.append(header);
     const content = document.createElement('div'); content.className = 'schedule-timed-content';
     const labels = document.createElement('div'); labels.className = 'schedule-time-labels';

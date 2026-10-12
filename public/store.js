@@ -8,7 +8,7 @@
  * who asked and what revision they expected. Reads stay synchronous against the
  * in-memory snapshot, because that is what a render pass needs.
  *
- * Today the bytes live in localStorage and a command is applied and persisted in
+ * Today the durable bytes live in IndexedDB and a command is applied and persisted in
  * one synchronous step. The command boundary is the point: in the next slice the
  * same envelope goes to a local service over HTTP, the same refusals come back as
  * structured codes, and the cockpit does not have to be rewritten to get there.
@@ -185,6 +185,7 @@ const Store = (() => {
     // append-only command event log below and are never imported from a vault.
     scheduleEvents: [],
     timelineIntervals: [],
+    timelineRows: [],
     // Append-only record of what changed, and the counter that numbers it.
     events: [],
     seq: 0,
@@ -212,6 +213,7 @@ const Store = (() => {
 
   /** What an older document kept under `views`, for Cockpit to adopt once. */
   const legacyViews = loaded.legacyViews;
+  ensureTimelineRows();
 
   /**
    * Read the store.
@@ -237,7 +239,7 @@ const Store = (() => {
    * two jobs are different and are kept apart on purpose.
    */
   function load() {
-    const raw = safeGet(KEY);
+    const raw = globalThis.ProximaPersistence ? ProximaPersistence.initialRaw : safeGet(KEY);
     if (raw === null || raw === '') return { state: structuredClone(EMPTY), status: { kind: 'empty' }, legacyViews: null };
 
     let parsed;
@@ -543,9 +545,10 @@ const Store = (() => {
     }
   }
 
-  function save() {
+  async function save() {
     try {
-      localStorage.setItem(KEY, JSON.stringify(state));
+      if(globalThis.ProximaPersistence) await ProximaPersistence.write(state);
+      else localStorage.setItem(KEY, JSON.stringify(state));
       return { ok: true };
     } catch (error) {
       return { ok: false, reason: String(error && error.name || 'write-failed') };
@@ -569,10 +572,10 @@ const Store = (() => {
   let failureHandler = null;
 
   /** Apply a change and persist it atomically. Returns null when it did not stick. */
-  function commit(mutate) {
+  async function commit(mutate) {
     const before = structuredClone(state);
     const result = mutate();
-    const outcome = save();
+    const outcome = await save();
     if (outcome.ok) { lastError = null; return result; }
     state = before;
     lastError = { reason: outcome.reason, at: new Date().toISOString() };
@@ -729,7 +732,19 @@ const Store = (() => {
    *   { ok: true, apply: () => ({ value, entity, before, after, changed, extra }) }
    *   { ok: false, ... refusal }
    */
+  function ensureTimelineRows(){state.timelineRows=Array.isArray(state.timelineRows)?state.timelineRows:[];state.timelineIntervals.forEach((item,index)=>{item.rowId=item.rowId||item.id;if(!state.timelineRows.some(row=>row.id===item.rowId))state.timelineRows.push({id:item.rowId,name:item.name||'Activity',color:item.color||'#a1cc43',rowOrder:Number.isFinite(item.rowOrder)?item.rowOrder:index});});}
+  function overlapsSession(candidate,exclude){return state.timelineIntervals.some(item=>item.id!==exclude&&item.rowId===candidate.rowId&&Date.parse(candidate.start)<(item.followNow?Infinity:Date.parse(item.end))&&Date.parse(item.start)<(candidate.followNow?Infinity:Date.parse(candidate.end)));}
+  function timelineSnapshot(){return {rows:structuredClone(state.timelineRows),sessions:structuredClone(state.timelineIntervals)};}
+  function syncTimelineRows(type,payload){ensureTimelineRows();if(type==='timeline-interval.patch'){const item=state.timelineIntervals.find(x=>x.id===payload.intervalId),row=item&&state.timelineRows.find(x=>x.id===item.rowId);if(row)for(const key of ['color'])if(payload.patch?.[key]!==undefined)row[key]=payload.patch[key];}if(type.includes('reorder')){const ids=payload.intervalIds||[payload.intervalId];for(const id of ids){const item=state.timelineIntervals.find(x=>x.id===id),row=item&&state.timelineRows.find(x=>x.id===item.rowId);if(row)row.rowOrder=item.rowOrder;}}for(const item of state.timelineIntervals){const row=state.timelineRows.find(x=>x.id===item.rowId);if(row){item.color=row.color;item.rowOrder=row.rowOrder;}}if(type.includes('delete'))state.timelineRows=state.timelineRows.filter(row=>state.timelineIntervals.some(x=>x.rowId===row.id));}
+  function intervalRowPosition(beforeId,exclude){const rows=state.timelineIntervals.map((item,index)=>({item,order:Number.isFinite(item.rowOrder)?item.rowOrder:index})).filter(x=>x.item.id!==exclude).sort((a,b)=>a.order-b.order);const index=beforeId?rows.findIndex(x=>x.item.id===beforeId):rows.length;if(index<0)return null;if(!rows.length)return 0;if(index===0)return rows[0].order-1;if(index===rows.length)return rows.at(-1).order+1;return (rows[index-1].order+rows[index].order)/2;}
+
+  function timelineHistory(){return state.timelineHistory||(state.timelineHistory={undo:[],redo:[]});}
+  function timelineRestore(direction){const history=timelineHistory(),entry=history[direction].at(-1);if(entry?.beforeState){const desired=direction==='undo'?entry.beforeState:entry.afterState,expected=direction==='undo'?entry.afterState:entry.beforeState;const comparable=value=>JSON.stringify(value,(key,val)=>key==='rev'?undefined:val);if(comparable(timelineSnapshot())!==comparable(expected))return refuse('HISTORY_CONFLICT',{});return {ok:true,apply:()=>{const old=new Map(state.timelineIntervals.map(x=>[x.id,x.rev]));state.timelineRows=structuredClone(desired.rows);state.timelineIntervals=structuredClone(desired.sessions).map(x=>({...x,rev:(old.get(x.id)||x.rev||1)+1}));history[direction].pop();history[direction==='undo'?'redo':'undo'].push(entry);return {changed:true,entity:{kind:'timeline-batch',id:'rows'},value:null,before:expected,after:desired};}};}if(!entry)return {ok:true,apply:()=>({changed:false,value:null})};if(entry.entries){const target=direction==='undo'?'before':'after',expectedKey=direction==='undo'?'after':'before';const comparable=x=>x?JSON.stringify(Object.fromEntries(Object.entries(x).filter(([key])=>key!=='rev').sort(([a],[b])=>a.localeCompare(b)))):'null';if(entry.entries.some(x=>{const current=state.timelineIntervals.find(item=>item.id===x.id);return comparable(current||null)!==comparable(x[expectedKey]);}))return refuse('HISTORY_CONFLICT',{});return {ok:true,apply:()=>{const before=[];for(const change of entry.entries){const item=state.timelineIntervals.find(x=>x.id===change.id);before.push(item?{...item}:null);const desired=change[target];if(!desired){state.timelineIntervals=state.timelineIntervals.filter(x=>x.id!==change.id);}else if(item){const rev=item.rev+1;Object.assign(item,desired,{rev});}else{state.timelineIntervals.push({...desired,rev:(desired.rev||1)+1});}}history[direction].pop();history[direction==='undo'?'redo':'undo'].push(entry);return {changed:true,entity:{kind:'timeline-batch',id:'rows'},before,after:entry.entries.map(x=>{const item=state.timelineIntervals.find(item=>item.id===x.id);return item?{...item}:null;}),value:{ids:entry.entries.map(x=>x.id)}};}};}const expected=direction==='undo'?entry.after:entry.before,desired=direction==='undo'?entry.before:entry.after,current=state.timelineIntervals.find(x=>x.id===entry.id)||null;const comparable=x=>x?JSON.stringify(Object.fromEntries(Object.entries(x).filter(([key])=>key!=='rev').sort(([a],[b])=>a.localeCompare(b)))):'null';if(comparable(expected)!==comparable(current))return refuse('HISTORY_CONFLICT',{});return {ok:true,apply:()=>{const before=current?{...current}:null;state.timelineIntervals=state.timelineIntervals.filter(x=>x.id!==entry.id);let restored=null;if(desired){restored={...desired,rev:current?current.rev:(desired.rev||1)+1};state.timelineIntervals.push(restored);}history[direction].pop();history[direction==='undo'?'redo':'undo'].push(entry);return {changed:true,created:!current&&!!desired,value:restored?{...restored}:{id:entry.id},entity:{kind:'timeline-interval',id:entry.id},before,after:restored?{...restored}:null};}};}
+
   const COMMANDS = {
+    'timeline.migrate':()=>({ok:true,apply:()=>({changed:true,entity:{kind:'timeline-schema',id:'rows'},value:{rows:state.timelineRows.length},before:null,after:timelineSnapshot()})}),
+    'timeline.undo':()=>timelineRestore('undo'),
+    'timeline.redo':()=>timelineRestore('redo'),
     /**
      * A new task. Placement is "last in its own column": every existing order is
      * lower than a fresh count, so the task lands at the end of whichever column it
@@ -1139,21 +1154,36 @@ const Store = (() => {
     },
 
     /** Proxima-owned Schedule records. They never read from the task or vault data. */
+    'timeline-interval.delete-batch'(payload){const ids=new Set(Array.isArray(payload.intervalIds)?payload.intervalIds:[]),items=state.timelineIntervals.filter(x=>ids.has(x.id));if(!items.length||items.length!==ids.size)return refuse('INTERVAL_NOT_FOUND',{});if(payload.revisions&&items.some(x=>payload.revisions[x.id]!==x.rev))return refuse('HISTORY_CONFLICT',{});return {ok:true,apply:()=>{const entries=items.map(item=>({id:item.id,before:{...item},after:null}));state.timelineIntervals=state.timelineIntervals.filter(x=>!ids.has(x.id));const history=timelineHistory();history.undo.push({entries});if(history.undo.length>200)history.undo.shift();history.redo=[];return {changed:true,entity:{kind:'timeline-batch',id:'rows'},before:entries.map(x=>x.before),after:null,value:{ids:[...ids]}};}};},
+    'timeline-interval.reorder-batch'(payload){const ids=Array.isArray(payload.intervalIds)?new Set(payload.intervalIds):new Set();const moving=state.timelineIntervals.map((item,index)=>({item,order:Number.isFinite(item.rowOrder)?item.rowOrder:index})).filter(x=>ids.has(x.item.id)).sort((a,b)=>a.order-b.order).map(x=>x.item);if(!moving.length||moving.length!==ids.size||ids.has(payload.beforeId))return refuse('PAYLOAD_INVALID',{});if(payload.beforeId&&!state.timelineIntervals.some(x=>x.id===payload.beforeId))return refuse('INTERVAL_NOT_FOUND',{});if(payload.revisions&&moving.some(x=>payload.revisions[x.id]!==x.rev))return refuse('HISTORY_CONFLICT',{});return {ok:true,apply:()=>{const entries=moving.map(item=>({id:item.id,before:{...item}}));for(const item of moving){item.rowOrder=intervalRowPosition(payload.beforeId,item.id);item.rev++;}entries.forEach(entry=>entry.after={...state.timelineIntervals.find(x=>x.id===entry.id)});const history=timelineHistory();history.undo.push({entries});if(history.undo.length>200)history.undo.shift();history.redo=[];return {changed:true,entity:{kind:'timeline-batch',id:'rows'},before:entries.map(x=>x.before),after:entries.map(x=>x.after),value:{ids:moving.map(x=>x.id)}};}};},
+    'timeline-interval.reorder'(payload,ctx){
+      const item=state.timelineIntervals.find(x=>x.id===payload.intervalId);if(!item)return refuse('INTERVAL_NOT_FOUND',{});const conflict=checkRev(ctx,'timeline-interval',item.id);if(conflict)return conflict;
+      const rowOrder=intervalRowPosition(payload.beforeId,item.id);if(rowOrder===null)return refuse('INTERVAL_NOT_FOUND',{});
+      return {ok:true,apply:()=>{const before={...item};item.rowOrder=rowOrder;return {value:{...item},entity:{kind:'timeline-interval',id:item.id},before,after:{...item},changed:true};}};
+    },
     'timeline-interval.create'(payload) {
       if(typeof payload.name!=='string'||!payload.name.trim())return refuse('NAME_REQUIRED',{});
       if(typeof payload.start!=='string'||typeof payload.end!=='string'||!/(Z|[+-]\d\d:\d\d)$/i.test(payload.start)||!/(Z|[+-]\d\d:\d\d)$/i.test(payload.end))return refuse('INTERVAL_TIME_INVALID',{});
       const start=Date.parse(payload.start),end=Date.parse(payload.end);
       if(!Number.isFinite(start)||!Number.isFinite(end)||end<=start)return refuse('INTERVAL_TIME_INVALID',{});
-      const item={id:id('interval'),name:payload.name.trim().slice(0,200),start:new Date(start).toISOString(),end:new Date(end).toISOString(),rev:1,createdAt:new Date().toISOString()};
-      return {ok:true,apply:()=>{state.timelineIntervals.push(item);return {value:{...item},entity:{kind:'timeline-interval',id:item.id},before:null,after:{...item},changed:true,created:true};}};
+      const rowOrder=intervalRowPosition(payload.beforeId);if(rowOrder===null)return refuse('INTERVAL_NOT_FOUND',{});
+      if(payload.rowId&&!state.timelineRows.some(x=>x.id===payload.rowId))return refuse('INTERVAL_NOT_FOUND',{});
+      const item={rowId:payload.rowId||null,rowOrder,followNow:payload.followNow===true,id:id('interval'),name:payload.name.trim().slice(0,200),start:new Date(start).toISOString(),end:new Date(end).toISOString(),rev:1,createdAt:new Date().toISOString()};
+      item.rowId=item.rowId||item.id;const previousLive=payload.rowId?state.timelineIntervals.find(x=>x.rowId===item.rowId&&x.followNow&&Date.parse(x.start)<start):null;const now=Date.now();if(previousLive&&start<=now){item.followNow=true;item.end=new Date(Math.max(start+1,now)).toISOString();if(previousLive.deadline)item.deadline=previousLive.deadline;}if(overlapsSession(item,previousLive?.id))return refuse('INTERVAL_OVERLAP',{});
+      return {ok:true,apply:()=>{if(previousLive){previousLive.followNow=false;previousLive.end=new Date(Math.max(Date.parse(previousLive.start)+1,Math.min(start,now))).toISOString();previousLive.rev++;}state.timelineIntervals.push(item);return {value:{...item},entity:{kind:'timeline-interval',id:item.id},before:null,after:{...item},changed:true,created:true};}};
     },
     'timeline-interval.patch'(payload,ctx) {
       const item=state.timelineIntervals.find(x=>x.id===payload.intervalId);if(!item)return refuse('INTERVAL_NOT_FOUND',{});
       const conflict=checkRev(ctx,'timeline-interval',item.id);if(conflict)return conflict;
-      const patch=payload.patch||{};const next={...item,...Object.fromEntries(Object.entries(patch).filter(([key])=>["name","start","end"].includes(key)))};
+      const patch=payload.patch||{};const next={...item,...Object.fromEntries(Object.entries(patch).filter(([key])=>["name","start","end","followNow","color","deadline"].includes(key)))};
       if(typeof next.start!=="string"||typeof next.end!=="string"||!/(Z|[+-]\d\d:\d\d)$/i.test(next.start)||!/(Z|[+-]\d\d:\d\d)$/i.test(next.end))return refuse("INTERVAL_TIME_INVALID",{});
       const start=Date.parse(next.start),end=Date.parse(next.end);
       if(typeof next.name!=='string'||!next.name.trim()||!Number.isFinite(start)||!Number.isFinite(end)||end<=start)return refuse('INTERVAL_TIME_INVALID',{});
+      if(typeof next.followNow!=='boolean'&&next.followNow!==undefined)return refuse('PAYLOAD_INVALID',{});
+      if(next.color!==undefined&&!/^#[0-9a-f]{6}$/i.test(next.color))return refuse('PAYLOAD_INVALID',{});
+      if(next.deadline!=null&&(typeof next.deadline!=='string'||!/(Z|[+-]\d\d:\d\d)$/i.test(next.deadline)||!Number.isFinite(Date.parse(next.deadline))||Date.parse(next.deadline)<=start))return refuse('INTERVAL_TIME_INVALID',{});
+      if(next.deadline!=null)next.deadline=new Date(Date.parse(next.deadline)).toISOString();
+      if(overlapsSession(next,item.id))return refuse('INTERVAL_OVERLAP',{});
       next.start=new Date(start).toISOString();next.end=new Date(end).toISOString();next.name=next.name.trim().slice(0,200);
       return {ok:true,apply:()=>{const before={...item};Object.assign(item,next);return {value:{...item},entity:{kind:'timeline-interval',id:item.id},before,after:{...item},changed:true};}};
     },
@@ -1316,12 +1346,12 @@ const Store = (() => {
   }
 
   /**
-   * Apply one command. Synchronous inside — localStorage is synchronous, and this
-   * slice is not allowed to change how the app feels — and asynchronous in shape,
-   * because the next slice's transport will be and every call site has to handle
-   * that now rather than later.
+   * Apply one command in a serialized transaction. Resolve only after durable
+   * persistence succeeds, or roll back and report the failure.
    */
-  async function command(envelope) {
+  let commandQueue=Promise.resolve();
+  function command(envelope){const execute=async()=>{if(globalThis.ProximaPersistence){const latest=await ProximaPersistence.read();if(latest){state=normalise(latest).state;ensureTimelineRows();}}return applyCommand(envelope);};const next=commandQueue.then(()=>globalThis.ProximaPersistence&&globalThis.navigator?.locks?navigator.locks.request('proxima-store-write',execute):execute());commandQueue=next.catch(()=>{});return next;}
+  async function applyCommand(envelope) {
     const env = envelope && typeof envelope === 'object' ? envelope : {};
     const type = String(env.type || '');
     const payload = env.payload && typeof env.payload === 'object' ? env.payload : {};
@@ -1365,8 +1395,10 @@ const Store = (() => {
     }
 
     let outcome = null;
-    const applied = commit(() => {
+    const applied = await commit(() => {
+      const timelineBefore=type.startsWith('timeline-interval.')?timelineSnapshot():null;
       const result = checked.apply();
+      if(timelineBefore)syncTimelineRows(type,payload);
       if (!result.changed) {
         // Accepted, and there was nothing to do: no event, no revision, no new
         // sequence number. The command is still remembered, so a replay of it is
@@ -1393,6 +1425,7 @@ const Store = (() => {
           if (scheduleEvent) scheduleEvent.rev = positiveInt(scheduleEvent.rev, 1) + 1;
         }
       }
+      if(entity.kind==='timeline-interval'&&type.startsWith('timeline-interval.')){const history=timelineHistory();history.undo.push({id:entity.id,before:result.before?structuredClone(result.before):null,after:structuredClone(state.timelineIntervals.find(x=>x.id===entity.id)||null)});if(history.undo.length>200)history.undo.shift();history.redo=[];}
       const rev = revisionOf(entity.kind, entity.id);
       // The value handed back is the record AS COMMITTED, revision included: a
       // caller that wants to send ifRev next needs the number the store now holds,
@@ -1400,6 +1433,7 @@ const Store = (() => {
       const value = result.value && typeof result.value === 'object' && 'rev' in result.value
         ? { ...result.value, rev: rev }
         : result.value;
+      if(timelineBefore&&result.changed){const history=timelineHistory();const entry=history.undo.at(-1);if(entry){entry.beforeState=timelineBefore;entry.afterState=timelineSnapshot();}}
       rememberEvent({
         seq: state.seq,
         at: new Date().toISOString(),
@@ -1461,7 +1495,8 @@ const Store = (() => {
 
     task: (taskId) => state.tasks.find((t) => t.id === taskId) ?? null,
 
-    timelineIntervals:()=>state.timelineIntervals.map(x=>({...x})),
+    timelineIntervals:()=>state.timelineIntervals.map(x=>{const row=state.timelineRows.find(row=>row.id===x.rowId);return {...x,...(row?{color:row.color,rowOrder:row.rowOrder}:{})};}),
+    timelineRows:()=>state.timelineRows.map(x=>({...x})),
     scheduleEvents: () => state.scheduleEvents.map((event) => ({ ...event, recurrence: event.recurrence ? { ...event.recurrence } : null, exceptions: Array.isArray(event.exceptions) ? event.exceptions.map((exception) => ({ ...exception })) : [] })),
 
     /**
