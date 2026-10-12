@@ -1,5 +1,9 @@
 # The data plane
 
+> Reference / evidence under [AGENTS.md](AGENTS.md), the sole governing document.
+> Dated instructions and implementation limits do not override current creator direction.
+> The current cleanup is docs/comments only; this file does not activate a code roadmap.
+
 What owns the data, what changes it, and where this is going. Written at the end
 of slice 1 so slice 2 starts from a document rather than from a conversation.
 

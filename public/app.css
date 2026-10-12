@@ -930,3 +930,103 @@ main {width:100%;min-width:0;}
 .exact-horizontal-schedule {overflow:hidden auto;}
 
 .exact-horizontal-schedule-title {display:none;}
+
+.schedule-heading #scheduleRange[hidden],.schedule-heading #overviewBoard[hidden] {display:none!important;}
+.exact-date-strip .date-strip-cell,.exact-month-label,.exact-current-year,.exact-year-divider,.schedule-day-head,.schedule-weekday,.schedule-year-month {cursor:pointer;}
+.overview-shared-morph {box-sizing:border-box;}
+
+/* Switch targets keep their text proportions while their boxes morph. */
+.overview-shared-morph.date-strip-cell {position:fixed;display:flex;flex-direction:column;justify-content:center;align-items:center;}
+.overview-shared-morph.date-strip-cell > * {flex:none;transform:none;white-space:nowrap;}
+.schedule-day-head,.schedule-weekday,.schedule-year-month {position:relative;}
+.schedule-day-head::after,.schedule-weekday::after,.schedule-year-month::after {content:"";position:absolute;inset:0;pointer-events:none;border-radius:inherit;opacity:0;transition:opacity 200ms ease;background:linear-gradient(100deg,rgb(176 112 116 / 48%),rgb(178 150 101 / 48%),rgb(119 157 120 / 48%),rgb(104 151 162 / 48%),rgb(140 123 174 / 48%));box-shadow:inset 0 0 0 1px #ffffff18;}
+.schedule-day-head:hover::after,.schedule-weekday:hover::after,.schedule-year-month:hover::after,.schedule-year-month:focus-visible::after {opacity:.24;}
+@media(prefers-reduced-motion:reduce){.schedule-day-head::after,.schedule-weekday::after,.schedule-year-month::after {transition:none;}}
+
+/* The entire timed date strip is one view-switch target. */
+.schedule-timed-header {position:sticky;top:0;z-index:6;cursor:pointer;}
+.schedule-timed-header .schedule-day-head::after {display:none;}
+.schedule-timed-header::after {content:"";position:absolute;inset:0;z-index:5;pointer-events:none;opacity:0;transition:opacity 200ms ease;background:linear-gradient(100deg,rgb(176 112 116 / 48%),rgb(178 150 101 / 48%),rgb(119 157 120 / 48%),rgb(104 151 162 / 48%),rgb(140 123 174 / 48%));box-shadow:inset 0 0 0 1px #ffffff18;}
+.schedule-timed-header:hover::after {opacity:.24;}
+@media(prefers-reduced-motion:reduce){.schedule-timed-header::after {transition:none;}}
+
+/* A soft clearing around hover titles keeps nearby content from crowding them. */
+.exact-hover-name {padding:3px 6px;background:color-mix(in srgb,var(--bg,#20252d) 50%,transparent);border-radius:3px;box-shadow:0 0 5px 4px color-mix(in srgb,var(--bg,#20252d) 50%,transparent),0 0 12px 7px color-mix(in srgb,var(--bg,#20252d) 50%,transparent);text-shadow:0 1px 2px #000;-webkit-text-stroke:.3px #ffffff50;}
+
+.exact-hover-name > span {display:block;}
+.exact-hover-name .exact-hover-time {font-size:11px;line-height:16px;color:var(--dim,#9aadc0);}
+
+/* Month weekdays form a single return-to-timeline strip. */
+.schedule-month-grid:has(> .schedule-weekday:hover) > .schedule-weekday::after {opacity:.24;}
+.schedule-month-grid > .schedule-weekday::after {background-size:700% 100%;}
+.schedule-month-grid > .schedule-weekday:nth-child(1)::after {background-position:0% 0;}
+.schedule-month-grid > .schedule-weekday:nth-child(2)::after {background-position:16.6667% 0;}
+.schedule-month-grid > .schedule-weekday:nth-child(3)::after {background-position:33.3333% 0;}
+.schedule-month-grid > .schedule-weekday:nth-child(4)::after {background-position:50% 0;}
+.schedule-month-grid > .schedule-weekday:nth-child(5)::after {background-position:66.6667% 0;}
+.schedule-month-grid > .schedule-weekday:nth-child(6)::after {background-position:83.3333% 0;}
+.schedule-month-grid > .schedule-weekday:nth-child(7)::after {background-position:100% 0;}
+
+.exact-name-check {position:absolute;z-index:35;width:14px;height:14px;margin:0;cursor:pointer;accent-color:var(--accent);}
+.exact-interval.is-checked .exact-interval-caption,.exact-queued-placeholder.is-checked .exact-interval-caption,.exact-outside-name.is-checked {text-decoration:line-through;}
+
+.exact-hover-name.is-checked {text-decoration:line-through;}
+
+/* Each name owns its checkbox; its reserved space prevents hover layout shifts. */
+.exact-name-check {position:static;display:inline-block;vertical-align:middle;width:1em;height:1em;margin:0 0 0 .45em;opacity:0;pointer-events:none;accent-color:var(--accent);font-size:inherit;}
+.exact-outside-name:hover .exact-name-check,.exact-interval:hover .exact-name-check,.exact-queued-placeholder:hover .exact-name-check,.exact-name-check:focus-visible {opacity:1;pointer-events:auto;}
+.exact-name-text {text-decoration:inherit;}
+.exact-interval-caption .exact-name-check {pointer-events:auto;}
+.exact-outside-name {cursor:pointer;}
+
+.exact-outside-name {display:flex;align-items:center;height:42px;box-sizing:border-box;}
+.exact-name-check {flex:0 0 1em;}
+
+.exact-unlink {position:absolute;left:calc(100% + .4em);top:50%;transform:translateY(-50%);font-size:1em;width:1.6em;height:1.6em;min-width:0;min-height:0;padding:0;border:0;background:transparent;color:var(--ink,#e4e7ec);cursor:pointer;z-index:12;line-height:1;}
+.exact-unlink:hover {background:#ffffff16;border-radius:3px;}
+.exact-interval:has(> .exact-unlink) {overflow:visible;}
+.exact-cursor-strip {position:absolute;top:101px;bottom:0;width:1px;background:#ffffff35;pointer-events:none;z-index:28;}
+.exact-cursor-time,.exact-current-time {position:absolute;top:79px;height:20px;padding:0 5px;line-height:20px;font-size:11px;font-variant-numeric:tabular-nums;background:var(--bg,#20252d);box-shadow:0 0 3px 2px var(--bg,#20252d);z-index:29;pointer-events:none;white-space:nowrap;}
+.exact-current-time {color:#f87575;}.exact-cursor-time {color:var(--ink,#e4e7ec);}
+
+.exact-unlink {color:#f87575;}
+.exact-unlink:hover,.exact-queue-delete button:hover {color:#ff9999;background:#e7505040;border-radius:999px;}
+
+.exact-day-boundary {position:absolute;top:101px;bottom:0;width:1px;background:#64b8ff22;pointer-events:none;z-index:2;}
+.exact-day-emoji {position:absolute;top:80px;transform:translateX(-50%);font-size:12px;line-height:18px;background:var(--bg);pointer-events:none;z-index:9;}
+.exact-selectable.is-color-editing {outline:2px solid #92dfff;outline-offset:2px;box-shadow:0 0 12px #73caff50;}
+.exact-selectable.is-color-editing::after {content:'';position:absolute;inset:0;border-radius:inherit;background:#9bdcff20;pointer-events:none;}
+
+.exact-gridline {display:none;}
+
+.exact-day-emoji {width:18px;height:18px;}
+.exact-day-emoji svg {display:block;width:100%;height:100%;}
+
+.schedule-month-cell {cursor:pointer;}
+.schedule-month-cell.is-week-target {background:color-mix(in srgb,#79caff 10%,#202631);box-shadow:inset 0 1px #79caff45,inset 0 -1px #79caff45;}
+
+.schedule-timed-header:has(.schedule-time-corner:hover)::after {opacity:0;}
+.schedule-time-corner {position:relative;}
+.schedule-time-corner:hover {background:linear-gradient(100deg,#b070741d,#b296651d,#779d781d,#6897a21d,#8c7bae1d);box-shadow:inset 0 0 0 1px #ffffff18;}
+
+.exact-resize-start {border-left:0;}
+
+.exact-date-strip.has-day-gradient {background-image:linear-gradient(to right,#777ac52b 0%,#c05b5438 25%,#eed63b36 50%,#8583d13b 75%,#777ac52b 100%);background-repeat:repeat-x;}
+.exact-date-strip.has-day-gradient .date-strip-cell {background:transparent;}
+.exact-date-strip.has-day-gradient .date-strip-cell > * {text-shadow:0 1px 3px #10151d,0 0 4px #10151d;}
+
+.exact-date-strip.has-day-gradient {background-image:linear-gradient(to right,#777ac52b 0%,#c05b5438 25%,#ffef3760 50%,#8583d13b 75%,#777ac52b 100%);}
+.exact-now,.exact-horizontal-now {background:var(--day-active-color,#ffef37);}
+.exact-unlink,.exact-current-time {color:var(--day-active-color,#ffef37);}
+.exact-date-strip .date-strip-cell {color:#e9d966;}
+.exact-date-strip .date-strip-cell.is-today {color:var(--day-active-color,#ffef37);}
+
+.exact-date-strip {isolation:isolate;}
+.exact-date-strip.has-day-gradient {background-image:none;}
+.exact-date-strip::before {content:'';position:absolute;inset:0;z-index:-1;pointer-events:none;background-image:linear-gradient(to right,#777ac52b 0%,#c05b5438 25%,#ffef3760 50%,#8583d13b 75%,#777ac52b 100%);background-size:inherit;background-position:inherit;background-repeat:repeat-x;opacity:var(--day-color-visibility,0);transition:opacity 120ms linear;}
+.exact-date-strip .date-strip-cell {color:var(--dim);}
+.exact-date-strip .date-strip-cell.is-today {color:color-mix(in srgb,var(--day-active-color,#ffef37) calc(var(--day-color-visibility,0) * 100%),var(--accent));transition:color 120ms linear;}
+.exact-unlink,.exact-current-time {color:color-mix(in srgb,var(--day-active-color,#ffef37) calc(var(--day-color-visibility,0) * 100%),#f87575);transition:color 120ms linear;}
+.exact-now,.exact-horizontal-now {background:color-mix(in srgb,var(--day-active-color,#ffef37) calc(var(--day-color-visibility,0) * 100%),#f87575);transition:background-color 120ms linear;}
+
+.exact-day-boundary {width:2px;}

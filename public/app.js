@@ -44,6 +44,7 @@
   try {
     const savedScheduleView = JSON.parse(localStorage.getItem(scheduleViewKey) || 'null');
     if (savedScheduleView && scheduleViewModes.has(savedScheduleView.mode)) scheduleMode = savedScheduleView.mode;
+    if(savedScheduleView?.cursor&&Number.isFinite(Date.parse(savedScheduleView.cursor)))scheduleCursor=new Date(savedScheduleView.cursor);
   } catch { /* a missing or unreadable view preference falls back to Month today */ }
   let editingEventId = null;
   let editingOccurrenceKey = '';
@@ -1370,7 +1371,7 @@
 
   function renderTimekeeping() {
     $('#tkEmpty').hidden=true;$('#tkPanels').hidden=false;
-    ExactTimeline.mount($('#exactTimeline'),Store,{schedule:{version:()=>JSON.stringify([route().id,...Store.scheduleEvents().map(item=>[item.id,item.rev])]),events:range=>scheduleEventsIn(range),edit:entry=>openScheduleEvent(entry.item.id,entry.start,entry),create:time=>openScheduleEvent(null,time),patch:(entry,patch)=>patchScheduleOccurrence(entry,patch)}}).refresh();
+    ExactTimeline.mount($('#exactTimeline'),Store,{layoutKey:'proxima.timeline.layout.v1',schedule:{navigate:(mode,time)=>openTimelineSchedule(mode,time),version:()=>JSON.stringify([route().id,...Store.scheduleEvents().map(item=>[item.id,item.rev])]),events:range=>scheduleEventsIn(range),edit:entry=>openScheduleEvent(entry.item.id,entry.start,entry),create:time=>openScheduleEvent(null,time),patch:(entry,patch)=>patchScheduleOccurrence(entry,patch)}}).refresh();
   }
 
   // ── Refusals ──────────────────────────────────────────────────────────────
@@ -2636,31 +2637,27 @@
 
   let overviewMode=localStorage.getItem('proxima:overview-mode')||'calendar';
   if(!['calendar','board','projects'].includes(overviewMode))overviewMode='calendar';
-  const overviewOrder=['calendar','board','projects'];
+  const overviewOrder=['board','projects'];let lastMainOverview=overviewMode==='calendar'?'calendar':'board';
   const overviewButtons={calendar:'scheduleRange',board:'overviewBoard',projects:'overviewProjects'};
   const overviewHeading=document.querySelector('.schedule-heading');
   const overviewUnderline=document.createElement('span');overviewUnderline.className='overview-sliding-underline';overviewUnderline.setAttribute('aria-hidden','true');overviewHeading.append(overviewUnderline);
-  let overviewAnimations=[],overviewGhost=null,overviewTransition=0;
+  let overviewAnimations=[],overviewGhost=null,overviewTransition=0,overviewShared=[];
   function positionOverviewUnderline(){const button=document.getElementById(overviewButtons[overviewMode]);if(!button)return;const box=button.getBoundingClientRect(),host=overviewHeading.getBoundingClientRect();overviewUnderline.style.width=box.width+'px';overviewUnderline.style.transform='translateX('+(box.left-host.left)+'px)';}
   new ResizeObserver(positionOverviewUnderline).observe(overviewHeading);
-  function changeOverview(mode){
-    if(mode===overviewMode)return;
-    const old=overviewMode,token=++overviewTransition;
-    for(const animation of overviewAnimations)animation.cancel();overviewAnimations=[];overviewGhost?.remove();overviewGhost=null;
-    const moving=old!=='projects'&&mode!=='projects'&&!matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const content=old==='calendar'?document.querySelector('.schedule-frame'):document.getElementById('timekeeping');
-    const direction=overviewOrder.indexOf(mode)>overviewOrder.indexOf(old)?1:-1;
-    if(moving&&content.getClientRects().length){const box=content.getBoundingClientRect(),clone=content.cloneNode(true);clone.removeAttribute('id');clone.querySelectorAll('[id]').forEach(x=>x.removeAttribute('id'));clone.setAttribute('aria-hidden','true');clone.classList.add('overview-page-ghost');Object.assign(clone.style,{position:'fixed',left:box.left+'px',top:box.top+'px',width:box.width+'px',height:box.height+'px',margin:'0',pointerEvents:'none',zIndex:'20',overflow:'hidden'});document.body.append(clone);overviewGhost=clone;}
-    if(mode==='calendar')delete $('#scheduleBody').dataset.scrollKey;
-    overviewMode=mode;localStorage.setItem('proxima:overview-mode',mode);applyRoute();positionOverviewUnderline();
-    if(!moving)return;
-    const incoming=mode==='calendar'?document.querySelector('.schedule-frame'):document.getElementById('timekeeping');const width=document.querySelector('main').clientWidth;
-    const options={duration:420,easing:'cubic-bezier(.22,.8,.25,1)',fill:'none'};
-    if(overviewGhost)overviewAnimations.push(overviewGhost.animate([{transform:'translateX(0)'},{transform:'translateX('+(-direction*width)+'px)'}],options));
-    overviewAnimations.push(incoming.animate([{transform:'translateX('+(direction*width)+'px)'},{transform:'translateX(0)'}],options));
-    Promise.all(overviewAnimations.map(a=>a.finished.catch(()=>{}))).then(()=>{if(token!==overviewTransition)return;overviewGhost?.remove();overviewGhost=null;overviewAnimations=[];});
+  function clearOverviewMotion(){for(const animation of overviewAnimations)animation.cancel();overviewAnimations=[];overviewGhost?.remove();overviewGhost=null;for(const item of overviewShared){item.clone.remove();item.target.style.visibility=item.visibility;}overviewShared=[];}
+  function overviewSharedElements(container){const result=new Map();if(!container)return result;for(const node of container.querySelectorAll('.exact-horizontal-event,.schedule-event,.date-strip-cell,.exact-tick,.schedule-time-labels > div')){const box=node.getBoundingClientRect();if(box.width<.5||box.height<.5||box.bottom<0||box.top>innerHeight||box.right<0||box.left>innerWidth)continue;const key=node.matches('.exact-tick,.schedule-time-labels > div')?'hour:'+node.dataset.hour:node.matches('.date-strip-cell')?'date:'+node.dataset.dateKey:'event:'+node.dataset.eventId+':'+(node.dataset.occurrenceKey||node.dataset.start||'');if(!key.endsWith('undefined')&&!result.has(key))result.set(key,{node,box});}return result;}
+  function changeOverview(mode,force=false){
+    if(mode===overviewMode&&!force)return;const old=overviewMode,token=++overviewTransition;clearOverviewMotion();const moving=old!=='projects'&&mode!=='projects'&&!matchMedia('(prefers-reduced-motion: reduce)').matches,content=old==='calendar'?document.querySelector('.schedule-frame'):document.getElementById('timekeeping'),shared=moving?overviewSharedElements(content):new Map();
+    if(moving){const source=old==='board'?document.querySelector('.exact-tracks'):content;if(source?.getClientRects().length){const box=source.getBoundingClientRect(),clone=source.cloneNode(true);clone.removeAttribute('id');clone.querySelectorAll('[id]').forEach(x=>x.removeAttribute('id'));if(old==='calendar')clone.querySelectorAll('.schedule-event,.date-strip-cell').forEach(x=>x.style.visibility='hidden');clone.setAttribute('aria-hidden','true');clone.classList.add('overview-page-ghost');Object.assign(clone.style,{position:'fixed',inset:'auto',left:box.left+'px',top:box.top+'px',width:box.width+'px',height:box.height+'px',margin:'0',pointerEvents:'none',zIndex:'20',overflow:'hidden'});document.body.append(clone);overviewGhost=clone;}}
+    if(mode==='calendar')delete $('#scheduleBody').dataset.scrollKey;overviewMode=mode;if(mode!=='projects')lastMainOverview=mode;localStorage.setItem('proxima:overview-mode',mode);applyRoute();positionOverviewUnderline();if(!moving)return;
+    const incoming=mode==='calendar'?document.querySelector('.schedule-frame'):document.getElementById('timekeeping'),options={duration:460,easing:'cubic-bezier(.22,.8,.25,1)',fill:'none'};
+    if(overviewGhost)overviewAnimations.push(overviewGhost.animate(old==='board'?[{transform:'translateY(0)',opacity:1},{transform:'translateY(65vh)',opacity:0}]:[{transform:'translateY(0)',opacity:1},{transform:'translateY(-30px)',opacity:0}],options));
+    const target=mode==='board'?incoming.querySelector('.exact-tracks'):incoming;overviewAnimations.push(target.animate(mode==='board'?[{transform:'translateY(65vh)',opacity:0},{transform:'translateY(0)',opacity:1}]:[{opacity:0},{opacity:1}],options));
+    requestAnimationFrame(()=>{if(token!==overviewTransition)return;const destinations=overviewSharedElements(incoming);for(const [key,source] of shared){const destination=destinations.get(key);if(!destination)continue;const clone=source.node.cloneNode(true),style=getComputedStyle(source.node);clone.style.font=style.font;clone.style.color=style.color;clone.style.textAlign=style.textAlign;clone.removeAttribute('id');clone.setAttribute('aria-hidden','true');clone.classList.add('overview-shared-morph');Object.assign(clone.style,{position:'fixed',left:source.box.left+'px',top:source.box.top+'px',width:source.box.width+'px',height:source.box.height+'px',margin:'0',transformOrigin:'0 0',pointerEvents:'none',zIndex:'30',overflow:'hidden'});document.body.append(clone);overviewShared.push({clone,target:destination.node,visibility:destination.node.style.visibility});destination.node.style.visibility='hidden';const box=destination.box;overviewAnimations.push(clone.animate([{left:source.box.left+'px',top:source.box.top+'px',width:source.box.width+'px',height:source.box.height+'px',opacity:1},{left:box.left+'px',top:box.top+'px',width:box.width+'px',height:box.height+'px',opacity:1}],options));}Promise.all(overviewAnimations.map(a=>a.finished.catch(()=>{}))).then(()=>{if(token===overviewTransition)clearOverviewMotion();});});
   }
-  for(const [mode,id] of Object.entries(overviewButtons))document.getElementById(id).addEventListener('click',()=>changeOverview(mode));
+  function openTimelineSchedule(mode,time){scheduleMode=mode;scheduleCursor=new Date(time);rememberScheduleView();changeOverview('calendar',overviewMode==='calendar');}
+  for(const [mode,id] of Object.entries(overviewButtons))document.getElementById(id).addEventListener('click',()=>{if(mode==='calendar'&&overviewMode==='calendar'&&scheduleMode==='month'){openTimelineSchedule('year',scheduleCursor.getTime());return;}changeOverview(mode==='projects'?'projects':overviewMode==='projects'?lastMainOverview:overviewMode==='calendar'?'board':'calendar');});
+  $('#scheduleBody').addEventListener('click',event=>{if(overviewMode==='calendar'&&event.target.closest('.schedule-time-corner')){event.preventDefault();event.stopPropagation();openTimelineSchedule('month',scheduleCursor.getTime());return;}if(overviewMode==='calendar'&&event.target.closest('.schedule-timed-header,.schedule-weekday')){event.preventDefault();event.stopPropagation();changeOverview('board');}},true);
   let overviewWheelDelta=0,overviewWheelTime=0,overviewWheelSwitched=-Infinity;
   overviewHeading.addEventListener('wheel',event=>{
     const delta=event.deltaX||event.deltaY;if(!delta)return;
@@ -2669,8 +2666,8 @@
     if(now-overviewWheelSwitched<320)return;
     overviewWheelDelta+=delta*(event.deltaMode===1?16:event.deltaMode===2?200:1);
     if(Math.abs(overviewWheelDelta)<35)return;
-    const index=Math.max(0,Math.min(overviewOrder.length-1,overviewOrder.indexOf(overviewMode)+Math.sign(overviewWheelDelta)));
-    overviewWheelDelta=0;if(overviewOrder[index]===overviewMode)return;overviewWheelSwitched=now;changeOverview(overviewOrder[index]);
+    const index=Math.max(0,Math.min(overviewOrder.length-1,overviewOrder.indexOf(overviewMode==='calendar'?'board':overviewMode)+Math.sign(overviewWheelDelta)));
+    overviewWheelDelta=0;const next=overviewOrder[index]==='board'?lastMainOverview:'projects';if(next===overviewMode)return;overviewWheelSwitched=now;changeOverview(next);
   },{passive:false});
 
   const lensPick = $('#lensPick');
@@ -2687,6 +2684,7 @@
     $('#schedule').classList.toggle('overview-header-only',overviewMode!=='calendar');
     if(overviewMode!=='calendar')$('#schedule').style.height='auto';
     $('#scheduleNew').hidden=overviewMode!=='calendar';
+    $('#scheduleRange').hidden=lastMainOverview!=='calendar';$('#overviewBoard').hidden=lastMainOverview!=='board';$('#scheduleRange').title='Switch to timeline';$('#overviewBoard').title='Switch to calendar';
     for(const [id,mode] of [['scheduleRange','calendar'],['overviewBoard','board'],['overviewProjects','projects']]){document.getElementById(id).setAttribute('aria-pressed',String(overviewMode===mode));}
     $('#schedule').hidden = surface !== 'schedule';
     requestAnimationFrame(positionOverviewUnderline);
@@ -2930,8 +2928,9 @@
   window.addEventListener('resize', fitScheduleViewport);
   new ResizeObserver(fitScheduleViewport).observe(document.querySelector('.topbar'));
 
+  $('#scheduleBody').addEventListener('scroll',()=>{const body=$('#scheduleBody');if(body.dataset.scrollKey)try{localStorage.setItem(scheduleViewKey+':scroll',JSON.stringify({key:body.dataset.scrollKey,top:body.scrollTop,left:body.scrollLeft}));}catch{}},{passive:true});
   function rememberScheduleView() {
-    try { localStorage.setItem(scheduleViewKey, JSON.stringify({ mode: scheduleMode })); } catch { /* view persistence is best effort and never blocks the schedule */ }
+    try { localStorage.setItem(scheduleViewKey, JSON.stringify({ mode: scheduleMode, cursor:scheduleCursor.toISOString() })); } catch { /* view persistence is best effort and never blocks the schedule */ }
   }
 
   function schedulePeriod() {
@@ -3131,7 +3130,8 @@
     const last = new Date(range.end); last.setDate(last.getDate() + (6 - (last.getDay()+6)%7));
     const events = scheduleEventsIn({ start: first, end: new Date(last.getTime() + DAY_MS) });
     for (let day = new Date(first); day <= last; day.setDate(day.getDate() + 1)) {
-      const cellDay = new Date(day); const cell = document.createElement('div'); cell.className = 'schedule-month-cell'; cell.dataset.day = scheduleDayKey(cellDay);
+      const cellDay = new Date(day); const cell = document.createElement('div'); cell.className = 'schedule-month-cell'; cell.dataset.day = scheduleDayKey(cellDay);cell.dataset.week=scheduleDayKey(new Date(cellDay.getFullYear(),cellDay.getMonth(),cellDay.getDate()-(cellDay.getDay()+6)%7));
+      cell.addEventListener('pointerenter',()=>{for(const sibling of grid.querySelectorAll('.schedule-month-cell'))sibling.classList.toggle('is-week-target',sibling.dataset.week===cell.dataset.week);});cell.addEventListener('pointerleave',()=>{for(const sibling of grid.querySelectorAll('.is-week-target'))sibling.classList.remove('is-week-target');});cell.addEventListener('click',event=>{if(event.target.closest('button,.schedule-event'))return;openTimelineSchedule('week',cellDay.getTime());});
       if (cellDay.getMonth() !== range.start.getMonth()) cell.classList.add('is-muted');
       if (scheduleDayKey(cellDay) === todayDay()) cell.classList.add('is-today');
       const head = document.createElement('div'); head.className = 'schedule-cell-head';
@@ -3159,7 +3159,7 @@
     wrap.append(header);
     const content = document.createElement('div'); content.className = 'schedule-timed-content';
     const labels = document.createElement('div'); labels.className = 'schedule-time-labels';
-    for (let hour = 0; hour < 24; hour += 1) { const label = document.createElement('div'); label.textContent = (hour % 12 || 12) + (hour < 12 ? ' AM' : ' PM'); labels.append(label); }
+    for (let hour = 0; hour < 24; hour += 1) { const label = document.createElement('div'); label.dataset.hour=String(hour); label.textContent = (hour % 12 || 12) + (hour < 12 ? ' AM' : ' PM'); labels.append(label); }
     content.append(labels);
     const columnsEl = document.createElement('div'); columnsEl.className = 'schedule-day-columns'; columnsEl.style.gridTemplateColumns = 'repeat(' + days.length + ', minmax(110px, 1fr))';
     days.forEach((day) => {
@@ -3210,9 +3210,9 @@
       for (let day = 1; day <= new Date(range.start.getFullYear(), month + 1, 0).getDate(); day += 1) {
         const date = new Date(range.start.getFullYear(), month, day); const key = scheduleDayKey(date); const count = monthEvents.filter((entry) => scheduleDayKey(entry.start) === key).length;
         const cell = document.createElement('button'); cell.type = 'button'; cell.className = 'schedule-mini-day' + (count ? ' has-events' : '') + (key === todayDay() ? ' is-today' : ''); cell.textContent = String(day); cell.title = count ? count + (count === 1 ? ' event' : ' events') : 'No events';
-        cell.addEventListener('click', () => { scheduleMode = 'day'; scheduleCursor = date; renderSchedule(); }); mini.append(cell);
+        mini.append(cell);
       }
-      box.append(mini); grid.append(box);
+      box.tabIndex=0;box.setAttribute('role','button');box.setAttribute('aria-label','Open '+monthStart.toLocaleDateString('en-GB',{month:'long',year:'numeric'}));box.addEventListener('click',()=>openTimelineSchedule('month',monthStart.getTime()));box.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();openTimelineSchedule('month',monthStart.getTime());}});box.append(mini); grid.append(box);
     }
     body.append(grid);
   }
@@ -3317,7 +3317,7 @@
   function renderSchedule() {
     rememberScheduleView();
     if(overviewMode!=='calendar')return;
-    const range = schedulePeriod(); const body = $('#scheduleBody'); const zooming = body.dataset.zoomRendering === '1'; const scrollKey = location.hash + ':' + scheduleMode + ':' + range.start.toISOString(); const previousScroll = body.dataset.scrollKey === scrollKey ? body.scrollTop : null; body.dataset.scrollKey = scrollKey; $('#scheduleRange').textContent = scheduleMode === 'year' ? String(scheduleCursor.getFullYear()) : scheduleCursor.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    const range = schedulePeriod(); const body = $('#scheduleBody'); const zooming = body.dataset.zoomRendering === '1'; const scrollKey = location.hash + ':' + scheduleMode + ':' + range.start.toISOString(); let savedScroll=null;try{savedScroll=JSON.parse(localStorage.getItem(scheduleViewKey+':scroll')||'null');}catch{}const previousScroll = body.dataset.scrollKey === scrollKey ? body.scrollTop : savedScroll?.key===scrollKey?savedScroll.top:null; body.dataset.scrollKey = scrollKey; $('#scheduleRange').textContent = scheduleMode === 'year' ? String(scheduleCursor.getFullYear()) : scheduleCursor.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
     const scheduleProject = route().id ? Store.project(route().id) : null;
     $('#schedule').setAttribute('aria-label', scheduleProject ? scheduleProject.name + ' schedule' : 'Schedule');
     $$('#scheduleBody').forEach((node) => { node.replaceChildren(); });
@@ -3331,7 +3331,7 @@
       if (overviewMode!=='calendar'||body.dataset.scrollKey !== scrollKey) return;
       fitScheduleViewport();
       if (zooming) return;
-      if (previousScroll !== null) { body.scrollTop = previousScroll; return; }
+      if (previousScroll !== null) { body.scrollTop = previousScroll; if(savedScroll?.key===scrollKey)body.scrollLeft=savedScroll.left||0; return; }
       if (['day','four-day','week'].includes(scheduleMode)) {
         const entries = scheduleEventsIn(range).sort((a,b)=>a.start-b.start);
         const todayEntries = entries.filter(entry=>scheduleDayKey(entry.start)===todayDay());

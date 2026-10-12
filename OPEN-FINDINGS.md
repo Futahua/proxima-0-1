@@ -1,5 +1,9 @@
 # Open findings
 
+> Reference / evidence under [AGENTS.md](AGENTS.md), the sole governing document.
+> Dated instructions and implementation limits do not override current creator direction.
+> The current cleanup is docs/comments only; this file does not activate a code roadmap.
+
 Everything a review has flagged and nobody has actioned, in one place.
 
 This file exists because of a specific failure. The first fidelity review named
@@ -159,4 +163,3 @@ set can be built through the dialogs, which is the only way it should be done.
 | Drop placeholder sized to the card's full height, tearing a 250-540px cavity into the destination list | Capped at 90px, as the original caps it |
 | No edge autoscroll, so a column taller than the viewport stopped coming to meet the hand | 8px per dragover within 60px of the top or bottom edge, applied before the insertion index is resolved |
 | **A refusal used to be a full-width red banner**, and the guard around a reversed task refused *every* drag of it — a gesture that could never succeed, explained only after it failed | The guard is gone: `(end + k) - (start + k) === end - start` exactly, so a drag cannot change validity either way, and a reversed bar keeps its invalid treatment wherever it lands. Every refusal now uses one quiet mechanism — a small chip near whatever was touched, gone after five seconds — with wording that names the task and says what to do. Reversed bars take a pointer cursor and a tooltip that says so before the gesture |
-
