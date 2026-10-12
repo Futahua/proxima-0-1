@@ -2640,16 +2640,74 @@
   const overviewOrder=['board','projects'];let lastMainOverview=overviewMode==='calendar'?'calendar':'board';
   const overviewButtons={calendar:'scheduleRange',board:'overviewBoard',projects:'overviewProjects'};
   const timelineHost=$('#timekeeping'),timelineHome=document.createComment('Timeline full-view position'),timelinePeek=$('#calendarTimelinePeek');
+  const peekDivider=$('#calendarTimelineDivider'),peekNavigator=$('#calendarTimelineNavigator');
   timelineHost.before(timelineHome);
-  // Allow reading more rows in the peek without forwarding any input to
-  // timeline's create/edit/resize/zoom handlers.
-  timelinePeek.addEventListener('wheel',event=>{if(timelinePeek.hidden)return;event.preventDefault();const tracks=timelinePeek.querySelector('.exact-tracks');if(tracks)tracks.scrollTop+=event.deltaY;},{passive:false});
+  const peekRatioKey='proxima.calendar.timeline-peek-ratio.v1';let peekRatio=.60;
+  try{const saved=Number(localStorage.getItem(peekRatioKey));if(saved>=.2&&saved<=.85)peekRatio=saved;}catch{}
+  function peekAvailableHeight(){const schedule=$('#schedule'),head=schedule.querySelector('.schedule-head');return Math.max(0,schedule.clientHeight-head.offsetHeight-(parseFloat(getComputedStyle(head).marginBottom)||0)-peekDivider.offsetHeight);}
+  function sizeCalendarPeek(){
+    if(timelinePeek.hidden)return;
+    const available=peekAvailableHeight();if(!available)return;
+    const minimum=Math.min(160,available*.35),height=Math.max(minimum,Math.min(available-minimum,Math.round(available*peekRatio)));
+    $('#schedule .schedule-frame').style.flex='0 0 '+height+'px';
+    peekDivider.setAttribute('aria-valuenow',String(Math.round(height/available*100)));
+    peekDivider.setAttribute('aria-valuetext',Math.round(height)+' pixels for Calendar');
+  }
+  function setCalendarPeekHeight(height){const available=peekAvailableHeight();if(!available)return;const minimum=Math.min(160,available*.35);peekRatio=Math.max(minimum/available,Math.min(1-minimum/available,height/available));sizeCalendarPeek();}
+  let peekDividerDrag=null;
+  peekDivider.addEventListener('pointerdown',event=>{if(event.button!==0||timelinePeek.hidden)return;peekDividerDrag={id:event.pointerId,y:event.clientY,height:$('#schedule .schedule-frame').getBoundingClientRect().height};try{peekDivider.setPointerCapture(event.pointerId);}catch{}event.preventDefault();});
+  peekDivider.addEventListener('pointermove',event=>{if(peekDividerDrag?.id===event.pointerId)setCalendarPeekHeight(peekDividerDrag.height+event.clientY-peekDividerDrag.y);});
+  const finishPeekResize=()=>{if(!peekDividerDrag)return;peekDividerDrag=null;try{localStorage.setItem(peekRatioKey,String(peekRatio));}catch{}};
+  peekDivider.addEventListener('pointerup',finishPeekResize);peekDivider.addEventListener('pointercancel',finishPeekResize);
+  peekDivider.addEventListener('keydown',event=>{if(!['ArrowUp','ArrowDown'].includes(event.key)||timelinePeek.hidden)return;event.preventDefault();setCalendarPeekHeight($('#schedule .schedule-frame').getBoundingClientRect().height+(event.key==='ArrowDown'?20:-20));try{localStorage.setItem(peekRatioKey,String(peekRatio));}catch{}});
+  function peekViewport(){const element=$('#exactTimeline'),start=Number(element.dataset.viewportStart),scale=Number(element.dataset.pixelsPerMillisecond);return Number.isFinite(start)&&Number.isFinite(scale)&&scale>0?{element,start,scale}:null;}
+  function setPeekViewport(start,scale){const current=peekViewport();if(current&&!timelinePeek.hidden)ExactTimeline.mount(current.element,Store).setViewport({start,scale});}
+  function zoomPeek(factor,clientX){const current=peekViewport();if(!current||timelinePeek.hidden)return;const box=current.element.getBoundingClientRect(),x=Math.max(0,Math.min(box.width,clientX-box.left));const next=ExactTimeline.geometry.zoom(current.start,current.scale,factor,x);setPeekViewport(next.start,next.scale);}
+  // A separate navigation layer cannot reach any timeline edit or date-navigation handler.
+  peekNavigator.addEventListener('wheel',event=>{
+    if(timelinePeek.hidden)return;event.preventDefault();event.stopPropagation();const current=peekViewport();if(!current)return;
+    const unit=event.deltaMode===1?16:event.deltaMode===2?peekNavigator.clientHeight:1;
+    if(event.ctrlKey||event.metaKey){zoomPeek(Math.exp(Math.max(-20,Math.min(20,-event.deltaY*unit*.002))),event.clientX);return;}
+    const sideways=event.shiftKey?event.deltaY:event.deltaX;
+    if(sideways)setPeekViewport(current.start+sideways*unit/current.scale,current.scale);
+    if(!event.shiftKey&&event.deltaY){const tracks=current.element.querySelector('.exact-tracks');if(tracks)tracks.scrollTop+=event.deltaY*unit;}
+  },{passive:false});
+  let peekDrag=null;
+  peekNavigator.addEventListener('pointerdown',event=>{if(event.button!==0||timelinePeek.hidden)return;const current=peekViewport();if(!current)return;peekDrag={id:event.pointerId,x:event.clientX,y:event.clientY,start:current.start,scale:current.scale,scroll:current.element.querySelector('.exact-tracks')?.scrollTop||0};try{peekNavigator.setPointerCapture(event.pointerId);}catch{}peekNavigator.focus({preventScroll:true});event.preventDefault();});
+  peekNavigator.addEventListener('pointermove',event=>{if(peekDrag?.id!==event.pointerId)return;setPeekViewport(peekDrag.start-(event.clientX-peekDrag.x)/peekDrag.scale,peekDrag.scale);const tracks=$('#exactTimeline .exact-tracks');if(tracks)tracks.scrollTop=peekDrag.scroll-(event.clientY-peekDrag.y);});
+  for(const type of ['pointerup','pointercancel'])peekNavigator.addEventListener(type,event=>{if(peekDrag?.id===event.pointerId)peekDrag=null;});
+  peekNavigator.addEventListener('keydown',event=>{
+    if(timelinePeek.hidden||event.key==='Tab')return;event.stopPropagation();const current=peekViewport();if(!current)return;
+    let handled=true;
+    if(event.key==='ArrowLeft'||event.key==='ArrowRight')setPeekViewport(current.start+(event.key==='ArrowRight'?100:-100)/current.scale,current.scale);
+    else if(event.key==='ArrowUp'||event.key==='ArrowDown'){const tracks=current.element.querySelector('.exact-tracks');if(tracks)tracks.scrollTop+=(event.key==='ArrowDown'?60:-60);}
+    else if(event.key==='+'||event.key==='=')zoomPeek(1.25,current.element.getBoundingClientRect().left+current.element.clientWidth/2);
+    else if(event.key==='-'||event.key==='_')zoomPeek(.8,current.element.getBoundingClientRect().left+current.element.clientWidth/2);
+    else handled=false;
+    if(handled)event.preventDefault();
+  });
+  peekNavigator.addEventListener('paste',event=>{event.preventDefault();event.stopPropagation();});
+  // The timeline's document-level shortcuts exist even when its page is
+  // displayed under Calendar. Do not let them edit timeline history in peek.
+  document.addEventListener('keydown',event=>{
+    if(timelinePeek.hidden||document.querySelector('dialog[open]')||event.target.closest?.('input,textarea,select,[contenteditable="true"]'))return;
+    if(['Delete','z','y'].includes(event.key)||['Z','Y'].includes(event.key)){
+      event.preventDefault();event.stopImmediatePropagation();
+    }
+  },true);
+  document.addEventListener('paste',event=>{
+    if(timelinePeek.hidden||document.querySelector('dialog[open]')||event.target.closest?.('input,textarea,[contenteditable="true"]'))return;
+    event.preventDefault();event.stopImmediatePropagation();
+  },true);
+  for(const [id,factor] of [['calendarTimelineZoomIn',1.25],['calendarTimelineZoomOut',.8]])$('#'+id).addEventListener('click',event=>{event.stopPropagation();const box=$('#exactTimeline').getBoundingClientRect();zoomPeek(factor,box.left+box.width/2);});
   function placeTimelineForOverview(surface){
     const peek=surface==='schedule'&&overviewMode==='calendar';
     if(peek&&timelineHost.parentNode!==timelinePeek)timelinePeek.append(timelineHost);
     else if(!peek&&timelineHost.parentNode===timelinePeek)timelineHome.after(timelineHost);
-    timelinePeek.hidden=!peek;timelineHost.classList.toggle('is-calendar-peek',peek);
+    timelinePeek.hidden=!peek;peekDivider.hidden=!peek;timelineHost.classList.toggle('is-calendar-peek',peek);
     timelineHost.inert=peek;
+    if(peek)requestAnimationFrame(sizeCalendarPeek);
+    else $('#schedule .schedule-frame').style.removeProperty('flex');
   }
   const overviewHeading=document.querySelector('.schedule-heading');
   const overviewUnderline=document.createElement('span');overviewUnderline.className='overview-sliding-underline';overviewUnderline.setAttribute('aria-hidden','true');overviewHeading.append(overviewUnderline);
@@ -2937,6 +2995,7 @@
     if (!schedule || schedule.hidden) return;
     if(overviewMode!=='calendar'){schedule.style.height='auto';return;}
     schedule.style.height = (timelinePeek.hidden&&scheduleUserHeight!==null?scheduleUserHeight:Math.max(280,window.innerHeight-schedule.getBoundingClientRect().top-16))+'px';
+    if(!timelinePeek.hidden)sizeCalendarPeek();
   }
   window.addEventListener('resize', fitScheduleViewport);
   new ResizeObserver(fitScheduleViewport).observe(document.querySelector('.topbar'));

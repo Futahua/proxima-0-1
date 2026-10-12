@@ -215,7 +215,7 @@
   new ResizeObserver(refresh).observe(element);
   const timer=setInterval(()=>{if(element.getClientRects().length){const now=tracks.querySelector('.exact-now');if(now)now.style.left=geometry.position(Date.now(),start,scale)+'px';if(!reordering&&!resizing){if(queues().length)refresh();else if(layout.some(x=>x.item.followNow))render();}}},1000);window.addEventListener('pagehide',()=>clearInterval(timer),{once:true});
   scheduleBand.addEventListener('scroll',scheduleLayoutSave);tracks.addEventListener('scroll',()=>{scheduleLayoutSave();render();showRowNav(null);hideRemaining();});
-  const api={refresh,configure(next){Object.assign(settings,next);},setViewport(view){if(Number.isFinite(view.start)&&Number.isFinite(view.scale)&&view.scale>0){start=view.start;scale=view.scale;initialized=true;render();}}};instances.set(element,api);refresh();if(savedLayout){tracks.scrollTop=Math.max(0,savedLayout.scrollTop||0);scheduleBand.scrollTop=Math.max(0,savedLayout.scheduleScrollTop||0);}scheduleToggle.setAttribute('aria-expanded',String(scheduleDay!==null));return api;
+  const api={refresh,configure(next){Object.assign(settings,next);},setViewport(view){if(Number.isFinite(view.start)&&Number.isFinite(view.scale)&&view.scale>0){start=view.start;scale=view.scale;initialized=true;render();scheduleLayoutSave();}}};instances.set(element,api);refresh();if(savedLayout){tracks.scrollTop=Math.max(0,savedLayout.scrollTop||0);scheduleBand.scrollTop=Math.max(0,savedLayout.scheduleScrollTop||0);}scheduleToggle.setAttribute('aria-expanded',String(scheduleDay!==null));return api;
  }
  root.ExactTimeline={geometry,mount};
 })(globalThis);

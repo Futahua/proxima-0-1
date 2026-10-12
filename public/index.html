@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Proxima</title>
-<link rel="stylesheet" href="app.css?v=timeline-calendar-peek-v99">
+<link rel="stylesheet" href="app.css?v=calendar-navigable-peek-v100">
 </head>
 <body>
 <!-- One quiet channel for every refused action. A refusal is a sentence the
@@ -45,7 +45,14 @@
       <div class="schedule-body" id="scheduleBody"></div>
       <div id="scheduleResize" class="schedule-bottom-edge" role="separator" aria-label="Resize calendar" aria-orientation="horizontal" tabindex="0"></div>
     </div>
-    <div id="calendarTimelinePeek" class="calendar-timeline-peek" aria-label="Read-only blob timeline preview" hidden></div>
+    <div id="calendarTimelineDivider" class="calendar-timeline-divider" role="separator" aria-label="Resize Calendar and Blob Timeline preview" aria-orientation="horizontal" aria-valuemin="20" aria-valuemax="85" tabindex="0" hidden></div>
+    <div id="calendarTimelinePeek" class="calendar-timeline-peek" aria-label="Navigation-only blob timeline preview" hidden>
+      <div id="calendarTimelineNavigator" class="calendar-timeline-navigator" tabindex="0" role="region" aria-label="Browse blob timeline: drag to pan, scroll to browse rows, Shift-scroll horizontally, Control-scroll to zoom. Editing is disabled."></div>
+      <div class="calendar-timeline-nav-tools" aria-label="Preview timeline zoom">
+        <button type="button" id="calendarTimelineZoomOut" aria-label="Zoom out in timeline preview" title="Zoom out">−</button>
+        <button type="button" id="calendarTimelineZoomIn" aria-label="Zoom in in timeline preview" title="Zoom in">+</button>
+      </div>
+    </div>
   </section>
 
   <section class="boardhead" id="boardHead">
