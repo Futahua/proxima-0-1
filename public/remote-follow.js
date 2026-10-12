@@ -6,7 +6,7 @@
  function sourceSemantic(kind,item){return domain().semantic(kind==='run'?'importedRuns':kind,kind==='run'&&item?{...item,id:item.lockedAt}:item);}
  function sameOwner(a,b){return a?.ownerId===b?.ownerId&&a?.backpackId===b?.backpackId;}
  function create(candidate,projection,receiver,binding){
-  if(!receiver||typeof receiver.ownerId!=='string'||typeof receiver.backpackId!=='string'||!binding||typeof binding.resourceId!=='string')throw Error('A followed copy needs its receiving owner and source connection.');
+  if(!receiver||[receiver.ownerId,receiver.backpackId].some(value=>typeof value!=='string'||!value||value.length>256)||!binding||typeof binding.resourceId!=='string'||!binding.resourceId||binding.resourceId.length>512||binding.ownerId!==undefined&&binding.ownerId!==projection.source.ownerId)throw Error('A followed copy needs its receiving owner and source connection.');
   if(sameOwner(receiver,projection.source))throw Error('A Proxima cannot follow its own data.');
   for(const maps of Object.values(projection.provenance||{}))for(const origins of Object.values(maps))if(origins.some(origin=>sameOwner(origin,receiver)))throw Error('This data already originated here. Make an independent copy to avoid a follow loop.');
   const entries=[];for(const kind of domain().kinds)for(const item of candidate.records[kind]){const source=anchor(kind,item),raw=sourceRecord(projection,source.kind,source.id);entries.push({kind,localId:item.id,sourceKind:source.kind,sourceId:source.id,sourceBase:sourceSemantic(source.kind,raw),localBase:domain().semantic(kind,item),deleted:false,conflict:null});}
@@ -23,11 +23,12 @@
   const follow=receipt.follow,full=domain().validateProjection(input);
   if(!follow?.enabled)throw Error('This copy is independent.');if(!sameOwner(full.source,receipt.value.source))throw Error('The source identity changed.');if(full.source.seq<follow.sourceSeq)throw Error('Source history moved backwards. Review its restored state before following.');
   const active=follow.entries.filter(entry=>!entry.independent),projected=subset(full,active),candidate=domain().prepareImport(projected,receipt.id),known=new Set(follow.entries.map(entry=>entry.kind+':'+entry.localId));
+  create(candidate,projected,follow.receiver,follow.binding);
   const extras=domain().kinds.flatMap(kind=>candidate.records[kind].filter(item=>!known.has(kind+':'+item.id)).map(item=>({kind,item})));
   if(extras.length)return {full,projected,candidate,updates:[],changes:active.map(entry=>({entry,status:'dependencies',localBase:domain().semantic(entry.kind,(state[entry.kind]||[]).find(item=>item.id===entry.localId)),incoming:null})),extras};
   const updates=[],changes=[];
   for(const entry of active){const local=(state[entry.kind]||[]).find(item=>item.id===entry.localId),raw=sourceRecord(full,entry.sourceKind,entry.sourceId),incoming=candidate.records[entry.kind].find(item=>item.id===entry.localId),sourceBase=sourceSemantic(entry.sourceKind,raw),localBase=domain().semantic(entry.kind,local);
-   if(!raw){if(!entry.deleted)changes.push({entry,status:'deleted',localBase,incoming:null});continue;}
+   if(!raw){changes.push({entry,status:'deleted',localBase,incoming:null});continue;}
    if(sourceBase===entry.sourceBase&&!entry.deleted)continue;
    const timeline=entry.kind==='timelineRows'||entry.kind==='timelineIntervals';let dirty=localBase!==entry.localBase;
    if(timeline){const rowId=entry.kind==='timelineRows'?entry.localId:local?.rowId;dirty=dirty||follow.entries.filter(other=>other.kind==='timelineRows'&&other.localId===rowId||other.kind==='timelineIntervals'&&(state.timelineIntervals||[]).find(item=>item.id===other.localId)?.rowId===rowId).some(other=>domain().semantic(other.kind,(state[other.kind]||[]).find(item=>item.id===other.localId))!==other.localBase);}
