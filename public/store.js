@@ -743,6 +743,7 @@ const Store = (() => {
   }
   function queueChange(apply){return {ok:true,apply:()=>{const value=apply();return {changed:true,entity:{kind:'timeline-queue',id:'queue'},value};}};}
   function timelineSnapshot(){return {rows:structuredClone(state.timelineRows),sessions:structuredClone(state.timelineIntervals)};}
+  function timelineRead(now=Date.now()){const projections=new Map();for(const row of state.timelineRows)if(row.queue)for(const [id,value] of queueProjection(row,now))projections.set(id,value);return state.timelineIntervals.map(x=>{const row=state.timelineRows.find(row=>row.id===x.rowId);return {...x,...(row?{color:row.queue||row.independentColors?(x.color||row.color):row.color,rowOrder:row.rowOrder}:{}),...(projections.get(x.id)||{})};});}
   function syncTimelineRows(type,payload){ensureTimelineRows();if(type==='timeline-interval.patch'){const item=state.timelineIntervals.find(x=>x.id===payload.intervalId),row=item&&state.timelineRows.find(x=>x.id===item.rowId);if(row&&!row.queue&&!row.independentColors)for(const key of ['color'])if(payload.patch?.[key]!==undefined)row[key]=payload.patch[key];}if(type.includes('reorder')){const ids=payload.intervalIds||[payload.intervalId];for(const id of ids){const item=state.timelineIntervals.find(x=>x.id===id),row=item&&state.timelineRows.find(x=>x.id===item.rowId);if(row)row.rowOrder=item.rowOrder;}}for(const item of state.timelineIntervals){const row=state.timelineRows.find(x=>x.id===item.rowId);if(row){if(!row.queue&&!row.independentColors)item.color=row.color;item.rowOrder=row.rowOrder;}}if(type.includes('delete'))for(const row of state.timelineRows){if(!row.queue)continue;const previous=row.queue.ids[0];row.queue.ids=row.queue.ids.filter(id=>state.timelineIntervals.some(x=>x.id===id));if(previous!==row.queue.ids[0]){const next=state.timelineIntervals.find(x=>x.id===row.queue.ids[0]);if(next){next.start=new Date(Date.now()).toISOString();next.end=new Date(Date.now()+1).toISOString();next.followNow=true;next.rev++;}}}if(type.includes('delete'))state.timelineRows=state.timelineRows.filter(row=>row.queue||state.timelineIntervals.some(x=>x.rowId===row.id));}
   function intervalRowPosition(beforeId,exclude){const rows=state.timelineIntervals.map((item,index)=>({item,order:Number.isFinite(item.rowOrder)?item.rowOrder:index})).filter(x=>x.item.id!==exclude).sort((a,b)=>a.order-b.order);const index=beforeId?rows.findIndex(x=>x.item.id===beforeId):rows.length;if(index<0)return null;if(!rows.length)return 0;if(index===0)return rows[0].order-1;if(index===rows.length)return rows.at(-1).order+1;return (rows[index-1].order+rows[index].order)/2;}
 
@@ -1521,6 +1522,11 @@ const Store = (() => {
 
   return {
     snapshot: () => structuredClone(state),
+    /** One read checkpoint through this owner; never exports raw persistence or cockpit state. */
+    remoteProjection(source,selection=null){
+      const read=async()=>{if(globalThis.ProximaPersistence){await ProximaPersistence.ready;const latest=await ProximaPersistence.read();if(latest){state=normalise(latest).state;ensureTimelineRows();}}const now=Date.now();const effective=timelineRead(now).map(item=>({...item,...(item.followNow?{end:new Date(Math.max(Date.parse(item.start)+1,now)).toISOString()}: {})}));return ProximaRemoteDomain.project(state,source,selection,now,effective);};
+      const next=commandQueue.then(()=>globalThis.ProximaPersistence&&globalThis.navigator?.locks?navigator.locks.request('proxima-store-write',read):read());commandQueue=next.catch(()=>{});return next;
+    },
 
     /**
      * What happened when the store was read, and whether the last write failed.
@@ -1540,7 +1546,7 @@ const Store = (() => {
 
     task: (taskId) => state.tasks.find((t) => t.id === taskId) ?? null,
 
-    timelineIntervals:()=>{const projections=new Map();for(const row of state.timelineRows)if(row.queue)for(const [id,value] of queueProjection(row))projections.set(id,value);return state.timelineIntervals.map(x=>{const row=state.timelineRows.find(row=>row.id===x.rowId);return {...x,...(row?{color:row.queue||row.independentColors?(x.color||row.color):row.color,rowOrder:row.rowOrder}:{}),...(projections.get(x.id)||{})};});},
+    timelineIntervals:()=>timelineRead(),
     timelineRows:()=>state.timelineRows.map(x=>({...x})),
     scheduleEvents: () => state.scheduleEvents.map((event) => ({ ...event, recurrence: event.recurrence ? { ...event.recurrence } : null, exceptions: Array.isArray(event.exceptions) ? event.exceptions.map((exception) => ({ ...exception })) : [] })),
 
