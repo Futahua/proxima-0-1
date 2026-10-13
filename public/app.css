@@ -1127,3 +1127,7 @@ main {margin-inline:auto;}
 
 /* A running queue head shows the live end glow but is not resizable. */
 .exact-running-end {pointer-events:none;cursor:inherit;}
+
+/* The device button names the computer whose Proxima this is (this one, or the one viewed): plain text, no box. */
+html body button.proxima-device-name {background:none;border:0;box-shadow:none;border-radius:0;padding:4px 2px;min-width:0;color:var(--dim);font:inherit;font-size:13px;font-weight:600;letter-spacing:.04em;cursor:pointer;}
+html body button.proxima-device-name:hover,html body button.proxima-device-name:focus-visible {background:none;color:var(--ink);outline:none;}
