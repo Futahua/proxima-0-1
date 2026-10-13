@@ -738,11 +738,7 @@ const Store = (() => {
   function overlapsSession(candidate,exclude){return state.timelineIntervals.some(item=>item.id!==exclude&&item.rowId===candidate.rowId&&Date.parse(candidate.start)<(item.followNow?Infinity:Date.parse(item.end))&&Date.parse(item.start)<(candidate.followNow?Infinity:Date.parse(candidate.end)));}
   // Queue proportions are durable; their current endpoints are a read-time projection.
   function queueForInterval(id){return state.timelineRows.find(row=>row.queue?.ids?.includes(id));}
-  function queueProjection(row,now=Date.now(),sessions=state.timelineIntervals){
-    const ids=(row.queue?.ids||[]).filter(id=>sessions.some(x=>x.id===id)),end=Date.parse(row.queue?.end),waiting=ids.slice(1),total=waiting.reduce((sum,id)=>sum+(sessions.find(x=>x.id===id).queueWeight||1),0)||1;
-    const result=new Map();let cursor=now;
-    ids.forEach((id,index)=>{const item=sessions.find(x=>x.id===id);if(!index){result.set(id,{start:item.start,end:new Date(Math.max(Date.parse(item.start)+1,now)).toISOString(),followNow:true,queueId:row.id,queueIndex:index,queueEnd:row.queue.end});return;}const next=end<=now?cursor+1:index===ids.length-1?Math.max(cursor+1,end):Math.max(cursor+1,cursor+Math.max(0,end-now)*(item.queueWeight||1)/total);result.set(id,{start:new Date(cursor).toISOString(),end:new Date(Math.max(cursor+1,next)).toISOString(),followNow:false,queueId:row.id,queueIndex:index,queueEnd:row.queue.end});cursor=next;});return result;
-  }
+  function queueProjection(row,now=Date.now(),sessions=state.timelineIntervals){return ProximaRemoteDomain.queueProjection(row,sessions,now);}
   function queueChange(apply){return {ok:true,apply:()=>{const value=apply();return {changed:true,entity:{kind:'timeline-queue',id:'queue'},value};}};}
   function timelineSnapshot(){return {rows:structuredClone(state.timelineRows),sessions:structuredClone(state.timelineIntervals)};}
   const followObservations=new Map();

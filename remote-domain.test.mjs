@@ -15,6 +15,7 @@ function fixture(seed){
  return {state,memory,context,store:context.store,domain:context.ProximaRemoteDomain};
 }
 const plain=value=>JSON.parse(JSON.stringify(value));
+test('ordinary default-colour calendar events export and import their exact approved values',async()=>{for(const color of ['', 'rebeccapurple']){const source=fixture(),event=await source.store.command({type:'schedule-event.create',payload:{name:'Normal calendar event',start:'2026-10-13T02:00:00.000Z',deadline:'2026-10-13T03:00:00.000Z',color}});assert.equal(event.ok,true);const projection=await source.store.remoteProjection(owner,[{kind:'scheduleEvents',id:event.value.id}]),candidate=source.domain.prepareImport(projection,webcrypto.randomUUID());assert.equal(candidate.records.scheduleEvents[0].color,color);}});
 async function followFixture(){const source=fixture(),projection=await source.store.remoteProjection(owner,[{kind:'tasks',id:'t'}]),copyId=webcrypto.randomUUID(),candidate=source.domain.prepareImport(projection,copyId),follow=source.context.ProximaRemoteFollow.create(candidate,projection,{ownerId:'receiver',backpackId:'local'},{resourceId:'grant'});return {source,projection,candidate,receipt:{id:copyId,value:{source:projection.source},follow},state:candidate.records};}
 test('follow updates only approved records and preserves local layout and unknown fields',async()=>{
  const f=await followFixture();
