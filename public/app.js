@@ -2688,7 +2688,7 @@
     if(peek&&timelineHost.parentNode!==timelinePeek)timelinePeek.append(timelineHost);
     else if(!peek&&timelineHost.parentNode===timelinePeek)timelineHome.after(timelineHost);
     timelinePeek.hidden=!peek;peekDivider.hidden=!peek;timelineHost.classList.toggle('is-calendar-peek',peek);
-    timelineHost.inert=false;ExactTimeline.mount($('#exactTimeline'),Store,{layoutKey:'proxima.timeline.layout.v1'}).configure({readOnly:peek});
+    timelineHost.inert=false;ExactTimeline.mount($('#exactTimeline'),Store,{layoutKey:'proxima.timeline.layout.v1'}).configure({readOnly:peek||!!globalThis.__proximaDevice,remoteReadOnly:!!globalThis.__proximaDevice});
     if(peek)requestAnimationFrame(sizeCalendarPeek);
     else $('#schedule .schedule-frame').style.removeProperty('flex');
   }
