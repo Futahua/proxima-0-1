@@ -182,32 +182,7 @@
     </div>
   </section>
 
-  <section class="hub" id="projectsHub" hidden>
-    <div class="tk-bar">
-      <div>
-        <p class="eyebrow">PROJECTS</p>
-        <!-- The creator's own name for this surface (the original's
-             plugin.settings.mainPageHeader, App.svelte:15-19 and :86). It is the
-             name of the Hub, not a new label for the app. -->
-        <h1>This is Minh</h1>
-      </div>
-      <span class="spacer"></span>
-      <span class="tk-count" id="hubCount"></span>
-      <label class="hub-archived">
-        <input type="checkbox" id="hubShowArchived">
-        <span>Show archived</span>
-      </label>
-      <button class="primary" id="hubNewProject">+ New project</button>
-    </div>
-
-    <p class="tk-empty" id="hubEmpty" hidden>No projects yet. Create one and its tasks will gather here.</p>
-
-    <div class="hub-tabs" role="tablist" aria-label="Project type">
-      <button class="hub-tab active" data-project-kind="task" role="tab" aria-selected="true">📁 Task Projects <span id="taskProjectCount">0</span></button>
-      <button class="hub-tab" data-project-kind="schedule" role="tab" aria-selected="false">▦ Schedules <span id="scheduleProjectCount">0</span></button>
-    </div>
-    <div class="hub-grid" id="hubGrid" hidden></div>
-  </section>
+  <!-- The Projects hub was removed (creator, 2026-10-14). Project and schedule records stay in the store. -->
 
 
 
