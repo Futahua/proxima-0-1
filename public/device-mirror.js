@@ -185,11 +185,11 @@ html.proxima-mirror-strip .schedule-head-actions .proxima-device-name{display:no
       button.className='device '+(isLead(lead,device)?'authority ':'')+(device.self&&isLead(lead,device)&&[...context.delivered.values()].some(item=>!item.ok)?'failed':'');
       button.style.setProperty('--device-tint',tint(device));
       button.innerHTML=glyphs[glyph(device)]+ring;
-      button.title=describe(device,everyone);button.setAttribute('aria-label',button.title.split('\n')[0]);
+      button.setAttribute('aria-label',describe(device,everyone).split('\n')[0]); // no hover tooltip (creator)
       button.setAttribute('aria-pressed',String(isLead(lead,device)));
       button.addEventListener('click',event=>{event.stopPropagation();if(context.toggle)void context.toggle(device);});
       const view=document.createElement('button');view.type='button';view.className='switch';view.innerHTML=caret;
-      view.title=shown?'Showing '+device.name:'Show '+device.name+'’s Proxima';view.setAttribute('aria-label',view.title);view.setAttribute('aria-current',String(shown));
+      view.setAttribute('aria-label',shown?'Showing '+device.name:'Show '+device.name+'’s Proxima');view.setAttribute('aria-current',String(shown));
       view.addEventListener('click',event=>{event.stopPropagation();if(!shown)context.switchTo(device);});
       slot.append(button,view);
       return slot;
