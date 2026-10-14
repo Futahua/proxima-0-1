@@ -7,12 +7,13 @@
  * exchange runs a circular arrow turns around that device's icon; a small dot marks a device the last
  * exchange could not reach (offline, or Proxima not open there). Merges that had to decide something
  * are reported in a short note.
- * The strip under each icon switches the view to that device (it replaces the device-name button); a
- * small arrow marks the device being shown.
+ * With every device holding the same Proxima there is nothing to switch to: the strip replaces the
+ * device-name button and the old copy button (creator, 2026-10-14), and views of another device are
+ * no longer offered from here.
  *
  * Four pages show the strip: a computer's own Proxima, a computer's view of another device (an iframe
  * inside its own Proxima), the phone's own Proxima and the phone's view of a computer. Only a device's
- * own Proxima syncs; the views borrow it (computer) or only switch (phone). On a computer only one
+ * own Proxima syncs; the views borrow its state (computer) or only list devices (phone). On a computer only one
  * open Proxima page drives sync at a time. The phone's owner engine answers computers while the phone's
  * Proxima is closed (Papers clients/android assets/proxima/owner.js).
  *
@@ -24,12 +25,11 @@
   const SYNC_EVERY=30000,AFTER_EDIT=2000;
   let strip=null,render=()=>{};
 
-  // ── The page's context: what the strip lists, activates and switches to ──
+  // ── The page's context: what the strip lists and activates ──
   let context=null;
   const ownerPage=(()=>{if(!viewing||phone)return null;try{return parent!==root&&parent.__proximaMirror?parent:null;}catch{return null;}})();
   if(!viewing&&root.__proximaDeviceCopy&&root.ProximaSync)context=createOwner(root.__proximaDeviceCopy,root.ProximaSync);
-  else if(ownerPage)context={devices:()=>ownerPage.__proximaMirror.devices(),activate:device=>ownerPage.__proximaMirror.activate(device),status:()=>ownerPage.__proximaMirror.status(),current:viewing,
-    switchTo:device=>ownerPage.__proximaShowDevice?.(device.self?null:device)};
+  else if(ownerPage)context={devices:()=>ownerPage.__proximaMirror.devices(),activate:device=>ownerPage.__proximaMirror.activate(device),status:()=>ownerPage.__proximaMirror.status(),current:viewing};
   else if(viewing&&phone)context=createPhoneView();
   if(!context)return;
 
@@ -74,22 +74,18 @@
     addEventListener('message',event=>{if(event.source===parent&&event.data?.type==='papers:phone:owner-changed')void sync.ready.then(()=>{if(typeof Store!=='undefined')return Store.remoteProjection({ownerId:'computer',backpackId:'proxima'}).then(()=>{dispatchEvent(new Event('proxima:remote-imported'));const t=document.querySelector('.exact-timeline');if(t)root.ExactTimeline?.mount(t,null)?.refresh();});});});
     const activate=device=>device.self?syncAll(true):syncOne(device);
     root.__proximaMirror={devices,activate,status:()=>status};
-    const switchTo=phone
-      ?device=>parent.postMessage({type:'papers:proxima-device:open',ownerId:device.self?'local':device.id},location.origin)
-      :device=>{if(!device.self)root.__proximaShowDevice?.(device);};
-    return {devices,activate,switchTo,status:()=>status,current:null,
+    return {devices,activate,status:()=>status,current:null,
       start(){void sync.ready.then(()=>{try{for(const key of ['proxima.mirror.self','proxima.mirror.authority','proxima.mirror.backedUp'])localStorage.removeItem(key);}catch{}drive();});}};
   }
 
-  // The phone's view of a computer: it lists and switches; the phone's own Proxima syncs.
+  // The phone's view of a computer: it lists; the phone's own Proxima syncs.
   function createPhoneView(){
     const pending=new Map();
     addEventListener('message',event=>{const value=event.data;if(event.source!==parent||value?.type!=='papers:proxima-device:result')return;const task=pending.get(value.requestId);if(!task)return;pending.delete(value.requestId);value.ok?task.resolve(value.result):task.reject(Error(value.error||'The phone did not answer.'));});
     const ask=operation=>new Promise((resolve,reject)=>{const requestId=crypto.randomUUID();pending.set(requestId,{resolve,reject});parent.postMessage({type:'papers:proxima-device:request',requestId,operation,ownerId:viewing},location.origin);setTimeout(()=>{if(pending.delete(requestId))reject(Error('The phone did not answer.'));},20000);});
     let known=null;
     return {current:viewing,activate:null,status:()=>new Map(),
-      async devices(){if(!known){const list=await ask('devices'),self=list.find(item=>item.id==='local');known={self:{id:'local',name:self?.name||'This phone',kind:'phone'},others:list.filter(item=>item.id!=='local').map(item=>({id:item.id,name:item.name,kind:item.kind==='phone'?'phone':'pc'}))};}return known;},
-      switchTo:device=>parent.postMessage({type:'papers:proxima-device:open',ownerId:device.self?'local':device.id},location.origin)};
+      async devices(){if(!known){const list=await ask('devices'),self=list.find(item=>item.id==='local');known={self:{id:'local',name:self?.name||'This phone',kind:'phone'},others:list.filter(item=>item.id!=='local').map(item=>({id:item.id,name:item.name,kind:item.kind==='phone'?'phone':'pc'}))};}return known;}};
   }
 
   // ── The strip ──
@@ -106,12 +102,7 @@
 .proxima-mirror .glyph{width:15px;height:15px;pointer-events:none}
 .proxima-mirror .ring{position:absolute;inset:-2px;width:30px;height:30px;pointer-events:none;color:var(--device-tint);display:none}
 .proxima-mirror .device.syncing .ring{display:block;animation:proxima-mirror-turn 1.2s linear infinite}
-.proxima-mirror .switch{width:30px;height:14px;display:grid;place-items:center;color:var(--dim,#97a0b0)}
-.proxima-mirror .switch svg{width:9px;height:6px;opacity:0;transition:opacity .15s}
-.proxima-mirror .switch:hover svg{opacity:.6}
-.proxima-mirror .current .switch svg{opacity:.9;color:var(--accent,#afc3d4)}
-.proxima-mirror .current .switch{cursor:default}
-html.proxima-mirror-strip .schedule-head-actions .proxima-device-name{display:none}
+html.proxima-mirror-strip .schedule-head-actions .proxima-device-name,html.proxima-mirror-strip .proxima-copy-icon{display:none}
 @keyframes proxima-mirror-turn{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.proxima-mirror .device.syncing .ring{animation:none}}`;
   const glyphs={
@@ -119,7 +110,6 @@ html.proxima-mirror-strip .schedule-head-actions .proxima-device-name{display:no
     laptop:'<svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="10" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M1 12.5h14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
     phone:'<svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.5" y="1.5" width="7" height="13" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M7 12.3h2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>'};
   const ring='<svg class="ring" viewBox="0 0 30 30" aria-hidden="true"><path d="M21 4.6A12 12 0 1 1 9 4.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11.8 3L9.9 7.1 7.3 2.6Z" fill="currentColor"/></svg>';
-  const caret='<svg viewBox="0 0 9 6" aria-hidden="true"><path d="M4.5 0L9 6H0Z" fill="currentColor"/></svg>';
   // The same owner identities device-theme.js colours: SlopTop blue, LapDog green, the phone grey.
   const tint=device=>device.kind==='phone'?'#c4c6ca':device.id==='417c0ac8-2d5c-4f32-9cf0-61c22ac0d774'||/^lapdog\b/i.test(device.name)?'#b5c3af':'#afc3d4';
   const glyph=device=>device.kind==='phone'?'phone':device.id==='417c0ac8-2d5c-4f32-9cf0-61c22ac0d774'||/lap|book/i.test(device.name)?'laptop':'desktop';
@@ -137,10 +127,7 @@ html.proxima-mirror-strip .schedule-head-actions .proxima-device-name{display:no
       button.innerHTML=glyphs[glyph(device)]+ring;
       button.setAttribute('aria-label',device.self?'Sync '+device.name+' with the other devices now':'Sync with '+device.name+' now'+(state==='failed'?' (last attempt could not reach it)':'')); // no hover tooltip (creator)
       button.addEventListener('click',event=>{event.stopPropagation();if(context.activate)void context.activate(device);});
-      const view=document.createElement('button');view.type='button';view.className='switch';view.innerHTML=caret;
-      view.setAttribute('aria-label',shown?'Showing '+device.name:'Show '+device.name+'’s Proxima');view.setAttribute('aria-current',String(shown));
-      view.addEventListener('click',event=>{event.stopPropagation();if(!shown)context.switchTo(device);});
-      slot.append(button,view);
+      slot.append(button);
       return slot;
     }));
   };
