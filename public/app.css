@@ -665,10 +665,10 @@ html{color-scheme:dark}
 
 #timekeeping .tk-bar {display:none;}
 #timekeeping {border-top:0;margin-top:0;padding-top:0;}
-#tkPanels {overflow-x:hidden;}
+#tkPanels {overflow-x:hidden;min-height:0;}
 #tkPanels .tk-panel[data-panel="calendar"],#tkPanels .tk-panel[data-panel="countdown"] {display:none;}
 #tkPanels .tk-panel[data-panel="timeline"] {width:100%;min-width:0;flex:1 1 100%;max-height:none;}
-.exact-timeline {position:relative;height:calc(100dvh - 135px);min-height:220px;overflow:hidden;outline:none;background:var(--bg);cursor:crosshair;}
+.exact-timeline {position:relative;height:var(--exact-fit-height,calc(100dvh - 135px));min-height:220px;overflow:hidden;outline:none;background:var(--bg);cursor:crosshair;}
 .exact-ruler {position:absolute;inset:0 0 auto;height:76px;border-bottom:1px solid var(--line);overflow:hidden;}
 .exact-tick {position:absolute;top:58px;white-space:nowrap;font-size:10px;color:var(--dim);padding-left:5px;border-left:1px solid var(--line);}
 .exact-tracks {position:absolute;inset:77px 0 0;overflow:hidden;}
