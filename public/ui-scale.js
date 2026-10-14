@@ -1,10 +1,10 @@
-/* Ctrl+wheel over the header (calendar, clock, device name) or the month/day strip scales the whole
+/* Ctrl+wheel over the header (calendar, clock, device name) only scales the whole
    Proxima view with Papers' real page zoom, so layout, viewport heights and pointer positions stay
-   consistent. The size is remembered per device; Ctrl+wheel over the blobs keeps its own meaning. */
+   consistent. The size is remembered per device; Ctrl+wheel anywhere else keeps its own meaning. */
 (function(root){
   if(new URLSearchParams(root.location.search).has('papers-phone'))return; // the phone pinches instead
   const KEY='proxima.pageZoom',MIN=0.6,MAX=2;
-  const zone='.schedule-head,.exact-month-strip,.exact-date-strip,.exact-current-year';
+  const zone='.schedule-head';
   const read=()=>{try{const value=Number(root.localStorage.getItem(KEY));return Number.isFinite(value)&&value>=MIN&&value<=MAX?value:1;}catch{return 1;}};
   let scale=read();
   const apply=()=>root.postMessage({type:'papers:project:page-zoom',factor:scale},'*');
