@@ -1442,7 +1442,9 @@ const Store = (() => {
    * persistence succeeds, or roll back and report the failure.
    */
   let commandQueue=Promise.resolve();
-  function command(envelope){const execute=async()=>{if(globalThis.ProximaPersistence){const latest=await ProximaPersistence.read();if(latest){state=normalise(latest).state;ensureTimelineRows();}}const before=freezeFollowEdit(envelope);try{const result=await applyCommand(envelope);if(before&&(!result.ok||!result.changed))state=before;return result;}catch(error){if(before)state=before;throw error;}};const next=commandQueue.then(()=>globalThis.ProximaPersistence&&globalThis.navigator?.locks?navigator.locks.request('proxima-store-write',execute):execute());commandQueue=next.catch(()=>{});return next;}
+  // An envelope marked `automatic` (not the creator's action, e.g. a queue freezing when its time is up)
+  // is saved under that mark, so sync never lets it outrank or ask against the creator's edits.
+  function command(envelope){const automatic=envelope?.automatic===true;const execute=async()=>{if(automatic)globalThis.__proximaAutomaticWrites=(globalThis.__proximaAutomaticWrites||0)+1;try{return await executeCommand();}finally{if(automatic)globalThis.__proximaAutomaticWrites--;}};const executeCommand=async()=>{if(globalThis.ProximaPersistence){const latest=await ProximaPersistence.read();if(latest){state=normalise(latest).state;ensureTimelineRows();}}const before=freezeFollowEdit(envelope);try{const result=await applyCommand(envelope);if(before&&(!result.ok||!result.changed))state=before;return result;}catch(error){if(before)state=before;throw error;}};const next=commandQueue.then(()=>globalThis.ProximaPersistence&&globalThis.navigator?.locks?navigator.locks.request('proxima-store-write',execute):execute());commandQueue=next.catch(()=>{});return next;}
   async function applyCommand(envelope) {
     const env = envelope && typeof envelope === 'object' ? envelope : {};
     const type = String(env.type || '');

@@ -44,7 +44,7 @@
   }
   async function syncAll(){
     if(running)return running;
-    running=(async()=>{try{const {others}=await devices();for(const device of others)if(!(status.get(device.id)?.retryAt>Date.now()))await syncOne(device);}catch{}finally{running=null;}})();
+    running=(async()=>{try{const {others}=await devices();for(const device of others)if(!(status.get(device.id)?.retryAt>Date.now()))await syncOne(device);}catch{}finally{running=null;caughtUp?.();}})();
     return running;
   }
   function schedule(ms){clearTimeout(timer);timer=setTimeout(()=>{if(driving)void syncAll();},ms);}
@@ -67,5 +67,9 @@
 
   // For checks: the sync state and an immediate sync.
   root.__proximaMirror={devices,status:()=>status,syncNow:syncAll};
+  // Automatic changes (a queue freezing when its time is up) wait until this device has caught up with
+  // the others it can reach, so a device opened after a while does not redo, from its old copy, what
+  // another device already did. At most 20 seconds when a device does not answer.
+  let caughtUp;root.__proximaCaughtUp=new Promise(resolve=>{caughtUp=resolve;setTimeout(resolve,20000);});
   void sync.ready.then(()=>{try{for(const key of ['proxima.mirror.self','proxima.mirror.authority','proxima.mirror.backedUp'])localStorage.removeItem(key);}catch{}drive();});
 })(globalThis);

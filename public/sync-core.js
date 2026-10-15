@@ -48,8 +48,10 @@
   /** Had a device whose knowledge was `context` seen stamp `s`? */
   const seen=(context,s)=>!!s&&((context&&context[s.o])||0)>=s.n;
   const sameStamp=(a,b)=>!!a&&!!b&&a.o===b.o&&a.n===b.n;
-  const plain=s=>{const out={h:s.h,o:s.o,n:s.n,c:s.c||{}};if(s.alt?.length)out.alt=s.alt.map(a=>{const x={h:a.h,o:a.o,n:a.n,c:a.c||{}};if('v' in a)x.v=a.v;return x;});return out;};
-  const bare=s=>({h:s.h,o:s.o,n:s.n,c:s.c||{}});
+  // `a` marks an automatic edit (a queue freezing when its time is up, a repair after a merge): any edit
+  // the creator made shows over it, and it never asks to be chosen (conflictsOf).
+  const plain=s=>{const out={h:s.h,o:s.o,n:s.n,c:s.c||{}};if(s.a)out.a=1;if(s.alt?.length)out.alt=s.alt.map(a=>{const x={h:a.h,o:a.o,n:a.n,c:a.c||{}};if(a.a)x.a=1;if('v' in a)x.v=a.v;return x;});return out;};
+  const bare=s=>{const out={h:s.h,o:s.o,n:s.n,c:s.c||{}};if(s.a)out.a=1;return out;};
   const withSnapshot=s=>{const out=bare(s);if(s.v!==undefined)out.v=s.v;if(s.also?.length)out.also=s.also.map(bare);return out;};
   /** Every concurrent deletion of a record: its stamp plus the others kept in `also`. */
   const deletionsOf=t=>t?[bare(t),...(t.also||[]).map(bare)]:[];
@@ -150,7 +152,8 @@
         add(entry,entry.v,'v' in entry);for(const a of entry.alt||[])add(a,a.v,'v' in a);
         // Versions some other version had seen are superseded; the rest are concurrent.
         const current=candidates.filter(x=>!candidates.some(y=>y!==x&&seen(y.s.c,x.s)));
-        current.sort((a,b)=>a.s.h<b.s.h?1:a.s.h>b.s.h?-1:0);
+        // The creator's own edits show over automatic ones; otherwise the later edit shows.
+        current.sort((a,b)=>(a.s.a?1:0)-(b.s.a?1:0)||(a.s.h<b.s.h?1:a.s.h>b.s.h?-1:0));
         // Every concurrent version is kept (equal values too): what each device knows of a version's value can
         // differ (a local deletion loses it), so filtering here would let devices keep different sets.
         const winner=current[0],alt=current.slice(1).map(x=>x.has?{...x.s,v:structuredClone(x.v)}:{...x.s});
@@ -208,12 +211,15 @@
       if(!fieldsBy.has(key))fieldsBy.set(key,[]);fieldsBy.get(key).push(s);
       if(!s.alt?.length||!records.has(key))continue;
       // Only versions whose value is known and differs from what shows are a choice to make.
-      const shown=records.get(key)[field],others=s.alt.filter(a=>'v' in a&&!same(a.v,shown)).map(a=>({h:a.h,o:a.o,n:a.n,v:a.v}));
+      // Automatic edits are never a choice: one the creator's edit beat stays out, and when every version
+      // was automatic the later simply shows.
+      if(s.a)continue;
+      const shown=records.get(key)[field],others=s.alt.filter(a=>!a.a&&'v' in a&&!same(a.v,shown)).map(a=>({h:a.h,o:a.o,n:a.n,v:a.v}));
       if(others.length)out.push({kind:'field',key,field,shown:{h:s.h,o:s.o,n:s.n,v:shown},others});
     }
     for(const [k,tomb] of stamps){
       if(!k.endsWith('#'+TOMB))continue;const key=recordKeyOf(k),fields=fieldsBy.get(key)||[];
-      if(records.has(key)&&!fields.some(s=>deletionsOf(tomb).some(d=>seen(s.c,d))))out.push({kind:'delete',key,tomb:bare(tomb),record:structuredClone(records.get(key))});
+      if(records.has(key)&&!deletionsOf(tomb).every(d=>d.a)&&!fields.some(s=>deletionsOf(tomb).some(d=>seen(s.c,d))))out.push({kind:'delete',key,tomb:bare(tomb),record:structuredClone(records.get(key))});
     }
     return out;
   }

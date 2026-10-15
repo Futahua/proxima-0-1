@@ -39,7 +39,7 @@
   // Marks stamps that change, so only those are written.
   function tracked(store){const set=store.stamps.set.bind(store.stamps);store.stamps.set=(key,value)=>{store.dirty.add(key);return set(key,value);};return store;}
   // A stamp records what this device had seen before the edit (c), so others can tell later from concurrent.
-  const nextStamp=store=>()=>{const c={...store.meta.vv};store.meta.clock=core.tick(store.meta.clock,Date.now(),store.meta.node);store.meta.n++;store.meta.vv[store.meta.node]=store.meta.n;return {h:store.meta.clock,o:store.meta.node,n:store.meta.n,c};};
+  const nextStamp=(store,automatic=false)=>()=>{const c={...store.meta.vv};store.meta.clock=core.tick(store.meta.clock,Date.now(),store.meta.node);store.meta.n++;store.meta.vv[store.meta.node]=store.meta.n;return {...(automatic?{a:1}:{}),h:store.meta.clock,o:store.meta.node,n:store.meta.n,c};};
   const HISTORY_DAYS=30,AHEAD_MS=24*3600*1000;
 
   // ── Stamping every save (the caller holds the store's write lock) ──
@@ -47,7 +47,8 @@
   persistence.write=async state=>{
     const before=await read();const result=await write(state);
     const changes=core.diff(before,state);
-    if(changes.length){const store=tracked(await load());core.stampChanges(store.stamps,changes,nextStamp(store));await save(store);dispatchEvent(new Event('proxima-sync:local-change'));}
+    // A command marked automatic (store.js) is stamped so; the creator's edits show over it.
+    if(changes.length){const store=tracked(await load());core.stampChanges(store.stamps,changes,nextStamp(store,(globalThis.__proximaAutomaticWrites||0)>0));await save(store);dispatchEvent(new Event('proxima-sync:local-change'));}
     return result;
   };
 
@@ -75,7 +76,7 @@
     if(!merged.changed)return {state:current,notes,changed:false};
     let next={...merged.state,seq:(Number(current?.seq)||0)+1};
     const repaired=core.repair(next);
-    core.stampChanges(store.stamps,core.diff(next,repaired.state),nextStamp(store)); // repairs are this device's own edits
+    core.stampChanges(store.stamps,core.diff(next,repaired.state),nextStamp(store,true)); // repairs are this device's own, automatic edits
     next=repaired.state;
     await write(next);
     return {state:next,notes:[...notes,...repaired.notes],changed:true};

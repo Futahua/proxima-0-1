@@ -13,6 +13,8 @@ function device(node,state,wall){
   d.next=()=>{const c={...d.vv};d.clock=S.tick(d.clock,d.wall(),node);d.n++;d.vv[node]=d.n;return {h:d.clock,o:node,n:d.n,c};};
   S.bootstrap(d.stamps,d.state,d.next);
   d.edit=change=>{const next=structuredClone(d.state);change(next);S.stampChanges(d.stamps,S.diff(d.state,next),d.next);d.state=next;};
+  // An automatic change (a queue freezing when its time is up): stamped `a`, as proxima-sync does.
+  d.auto=change=>{const next=structuredClone(d.state);change(next);S.stampChanges(d.stamps,S.diff(d.state,next),()=>({...d.next(),a:1}));d.state=next;};
   return d;
 }
 // One exchange: `from` sends what `to` has not seen; `to` merges and repairs (repairs are its own edits).
@@ -21,7 +23,7 @@ function send(from,to){
   for(const change of changes)for(const s of [change.tomb,...Object.values(change.fields)])if(s)to.clock=S.witness(to.clock,s.h);
   const merged=S.merge(to.state,to.stamps,changes);
   to.vv=S.joinVectors(to.vv,from.vv);
-  if(merged.changed){const repaired=S.repair(merged.state).state;S.stampChanges(to.stamps,S.diff(merged.state,repaired),to.next);to.state=repaired;}
+  if(merged.changed){const repaired=S.repair(merged.state).state;S.stampChanges(to.stamps,S.diff(merged.state,repaired),()=>({...to.next(),a:1}));to.state=repaired;}
 }
 const sync=(a,b)=>{send(a,b);send(b,a);send(a,b);};
 const sorted=value=>Object.fromEntries(Object.keys(value).sort().map(key=>[key,value[key]]));
@@ -171,4 +173,44 @@ test("a session's copy of its row order stays on each device",()=>{
   assert.equal(S.changesSince(a.state,a.stamps,b.vv).length,0,'nothing to send');
   t=3000;b.edit(s=>{s.timelineIntervals[0].name='renamed';});send(b,a);
   assert.equal(a.state.timelineIntervals[0].rowOrder,7,'a merge keeps the local copy');
+});
+
+test('a device opened late redoes an automatic change from its old copy: the creator\'s edit shows, nothing to choose', () => {
+  let t = 1000; const pc = device('pc', base, () => t), lap = device('lap', base, () => t); sync(pc, lap);
+  t = 2000; pc.edit(s => { s.timelineIntervals.find(x => x.id === 'x').end = '2026-10-14T08:38:00.000Z'; });
+  t = 3000; lap.auto(s => { s.timelineIntervals.find(x => x.id === 'x').end = '2026-10-14T09:04:00.000Z'; });
+  sync(lap, pc);
+  assert.equal(visible(pc), visible(lap));
+  assert.equal(pc.state.timelineIntervals.find(x => x.id === 'x').end, '2026-10-14T08:38:00.000Z');
+  assert.deepEqual([S.conflictsOf(pc.state, pc.stamps).length, S.conflictsOf(lap.state, lap.stamps).length], [0, 0]);
+});
+test('two devices both doing the same automatic change at different times: the later shows, nothing to choose', () => {
+  let t = 1000; const pc = device('pc', base, () => t), lap = device('lap', base, () => t); sync(pc, lap);
+  t = 2000; pc.auto(s => { const x = s.timelineIntervals.find(i => i.id === 'x'); x.start = '2026-10-14T08:38:00.000Z'; });
+  t = 3000; lap.auto(s => { const x = s.timelineIntervals.find(i => i.id === 'x'); x.start = '2026-10-14T09:04:00.000Z'; });
+  sync(pc, lap);
+  assert.equal(visible(pc), visible(lap));
+  assert.equal(lap.state.timelineIntervals.find(x => x.id === 'x').start, '2026-10-14T09:04:00.000Z');
+  assert.deepEqual([S.conflictsOf(pc.state, pc.stamps).length, S.conflictsOf(lap.state, lap.stamps).length], [0, 0]);
+});
+test('an automatic delete that missed an edit keeps the record without asking', () => {
+  let t = 1000; const pc = device('pc', base, () => t), lap = device('lap', base, () => t); sync(pc, lap);
+  t = 2000; pc.edit(s => { s.timelineIntervals.find(x => x.id === 'z').name = 'Stretch'; });
+  t = 3000; lap.auto(s => { s.timelineIntervals = s.timelineIntervals.filter(x => x.id !== 'z'); });
+  sync(pc, lap);
+  assert.equal(visible(pc), visible(lap));
+  assert.equal(pc.state.timelineIntervals.find(x => x.id === 'z')?.name, 'Stretch');
+  assert.deepEqual([S.conflictsOf(pc.state, pc.stamps).length, S.conflictsOf(lap.state, lap.stamps).length], [0, 0]);
+});
+test('two of the creator\'s own edits still ask, even next to an automatic one', () => {
+  let t = 1000; const pc = device('pc', base, () => t), lap = device('lap', base, () => t), phone = device('phone', base, () => t); sync(pc, lap); sync(lap, phone); sync(pc, phone);
+  t = 2000; pc.edit(s => { s.timelineIntervals.find(x => x.id === 'x').name = 'From PC'; });
+  t = 2500; phone.edit(s => { s.timelineIntervals.find(x => x.id === 'x').name = 'From phone'; });
+  t = 3000; lap.auto(s => { s.timelineIntervals.find(x => x.id === 'x').name = 'Automatic'; });
+  for (let i = 0; i < 2; i++) { sync(pc, lap); sync(lap, phone); sync(pc, phone); }
+  assert.equal(visible(pc), visible(phone)); assert.equal(visible(pc), visible(lap));
+  assert.equal(pc.state.timelineIntervals.find(x => x.id === 'x').name, 'From phone');
+  const conflicts = S.conflictsOf(lap.state, lap.stamps);
+  assert.equal(conflicts.length, 1);
+  assert.equal(JSON.stringify(conflicts[0].others.map(o => o.v)), JSON.stringify(['From PC']));
 });
