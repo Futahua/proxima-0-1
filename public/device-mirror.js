@@ -32,7 +32,9 @@
   async function syncOne(device){
     const previous=status.get(device.id);
     try{
-      const result=await sync.syncWith(device.id,message=>api.exchange(device,message));
+      const {self}=await devices();
+      const result=await sync.syncWith(device.id,message=>api.exchange(device,message),{self:self.name,peer:device.name});
+      dispatchEvent(new Event('proxima-sync:conflicts')); // a merge can add conflicts without changing what shows
       status.set(device.id,{state:'ok',at:Date.now()});
       if(result.notes.length)api.toast('Synced with '+device.name+': '+result.notes.join(' '),9000);
     }catch(error){
