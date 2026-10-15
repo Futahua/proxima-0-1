@@ -24,29 +24,41 @@
 
   /** This device and the other two: {self:{name}, others:[{id,name,kind:'pc'|'phone'}]}. */
   async function devices(){
-    if(phone){const list=await ask('devices');const self=list.find(device=>device.id==='local');return {self:{name:self?.name||'This phone'},others:list.filter(device=>device.id!=='local').map(device=>({id:device.id,name:device.name,kind:'pc'}))};}
+    if(phone){const list=await ask('devices');const self=list.find(device=>device.id==='local');return {self:{name:self?.name||'This phone',kind:'phone'},others:list.filter(device=>device.id!=='local').map(device=>({id:device.id,name:device.name,kind:'pc'}))};}
     const status=await call({operation:'status'});
     // A phone names itself in what it publishes (it paired under its model name).
     for(const peer of status.peers||[]){try{const published=(await call({operation:'peer-proxima',deviceId:peer.id})).snapshot?.deviceName;if(published)peer.name=published;}catch{}}
-    return {self:{name:status.owner?.name||'This computer'},others:[...(status.devices||[]).map(device=>({id:device.id,name:device.name,kind:'pc'})),...(status.peers||[]).map(peer=>({id:peer.id,name:peer.name,kind:'phone',receivedAt:peer.receivedAt}))]};
+    return {self:{name:status.owner?.name||'This computer',id:status.owner?.id,kind:'pc'},others:[...(status.devices||[]).map(device=>({id:device.id,name:device.name,kind:device.kind==='phone'?'phone':'pc',native:true})),...(status.peers||[]).map(peer=>({id:peer.id,name:peer.name,kind:'phone',receivedAt:peer.receivedAt}))]};
   }
   async function proximaShare(ownerId){const catalog=await call({operation:'backpacks',ownerId});if(catalog.online===false)throw Error('That computer is offline.');const share=(catalog.entries||[]).find(entry=>entry.kind==='proxima');if(!share)throw Error('That computer has no Proxima open.');return share;}
   /** Another device's Proxima as a projection. */
   async function fetchFrom(device){
     if(phone)return (await ask('snapshot',{ownerId:device.id})).snapshot;
-    if(device.kind==='phone')return (await call({operation:'peer-proxima',deviceId:device.id})).snapshot;
+    if(device.kind==='phone'&&!device.native)return (await call({operation:'peer-proxima',deviceId:device.id})).snapshot;
     const share=await proximaShare(device.id);
     const result=await call({operation:'backpack-view',ownerId:device.id,resourceId:share.id});
     if(result.online===false)throw Error(device.name+' is offline.');
     return result.snapshot;
   }
-  /** Overwrites another device's Proxima with this one; a phone's is replaced when its Proxima next opens. */
+  /** Overwrites through the live owner, resolving only after its backup and persistence succeed. */
   async function pushTo(device,projection){
     if(phone){await ask('replace',{ownerId:device.id,snapshot:projection},120000);return 'replaced';}
-    if(device.kind==='phone'){const sent=await call({operation:'peer-proxima-replace',deviceId:device.id,snapshot:projection},120000);return sent?.delivered?'sent':'queued-offline';}
+    if(device.kind==='phone'&&!device.native){const sent=await call({operation:'peer-proxima-replace',deviceId:device.id,snapshot:projection},120000);if(!sent?.delivered)throw Error('The phone did not confirm replacement.');return 'replaced';}
     const share=await proximaShare(device.id);
     await call({operation:'backpack-replace',ownerId:device.id,resourceId:share.id,snapshot:projection},120000);
     return 'replaced';
+  }
+  /** One Proxima sync exchange (proxima-sync.js) with a device's live owner; it rides the replace route,
+   * whose owner hands a payload carrying proximaSync to the sync instead of replacing anything. */
+  async function exchange(device,message){
+    // records.tasks is deliberately not a list: a device still running the old whole-copy code then fails
+    // while building the copy, before writing anything, instead of replacing its Proxima with nothing.
+    const payload={version:1,source:{ownerId:'proxima-sync',backpackId:'proxima',seq:0,observedAt:new Date().toISOString()},records:{tasks:'proxima-sync'},proximaSync:message};
+    const pick=value=>value?.proximaSync??value?.result?.proximaSync??value?.result?.result?.proximaSync;
+    if(phone)return pick(await ask('replace',{ownerId:device.id,snapshot:payload},90000));
+    if(device.kind==='phone'&&!device.native)throw Error('The phone must be connected.');
+    const share=await proximaShare(device.id);
+    return pick(await call({operation:'backpack-replace',ownerId:device.id,resourceId:share.id,snapshot:payload},90000));
   }
   const ownProjection=()=>Store.remoteProjection({ownerId:phone?'phone':'computer',backpackId:'proxima'},null,true);
 
@@ -123,7 +135,7 @@
     const heading=document.createElement('div');heading.className='heading';heading.textContent='Copies data from';menu.append(heading);
     for(const device of known.others){
       const item=document.createElement('button');item.type='button';item.textContent=device.name;
-      if(device.kind==='phone'){const note=document.createElement('small');note.textContent='As last shared'+(device.receivedAt?' · '+ago(device.receivedAt):'');item.append(note);}
+      if(device.kind==='phone'&&!device.native){const note=document.createElement('small');note.textContent='As last shared'+(device.receivedAt?' · '+ago(device.receivedAt):'');item.append(note);}
       item.addEventListener('click',()=>{closeMenu();void copyFrom(device,known.self);});menu.append(item);
     }
     if(!known.others.length){const none=document.createElement('div');none.className='heading';none.textContent='No other device yet';menu.append(none);}
@@ -139,11 +151,11 @@
   }
   async function overwriteOthers(known){
     const names=known.others.map(device=>device.name).join(' and ');
-    if(!await confirmBox([['Overwrite all devices’ Proxima data with '+known.self.name+'.'],['This will overwrite all '+names+'’s Proxima data.'],['Each device keeps a backup of what it had.'+(known.others.some(device=>device.kind==='phone')?' If the phone app is closed, it takes the copy when it next opens.':''),'note']],'Overwrite'))return;
+    if(!await confirmBox([['Overwrite all devices’ Proxima data with '+known.self.name+'.'],['This will overwrite all '+names+'’s Proxima data.'],['Each device keeps a backup of what it had.','note']],'Overwrite'))return;
     toast('Copying '+known.self.name+'’s Proxima…',60000);
     let projection;try{projection=await ownProjection();}catch(error){toast('Nothing was changed: '+error.message,8000);return;}
     const outcomes=[];
-    for(const device of known.others){try{const result=await pushTo(device,projection);outcomes.push(device.name+(result==='queued-offline'?': will be replaced when its app next opens':result==='sent'?': sent':': overwritten'));}catch(error){outcomes.push(device.name+': not changed ('+error.message+')');}}
+    for(const device of known.others){try{const result=await pushTo(device,projection);outcomes.push(device.name+': overwritten');}catch(error){outcomes.push(device.name+': not changed ('+error.message+')');}}
     document.querySelectorAll('.proxima-copy-toast').forEach(node=>node.remove());toast(outcomes.join(' · '),10000);
   }
 
@@ -163,28 +175,25 @@
   }
   if(document.readyState==='loading')addEventListener('DOMContentLoaded',install,{once:true});else install();
 
+  // device-mirror.js (the authoritative-device toggle) reuses these rather than a second transport.
+  root.__proximaDeviceCopy={devices,fetchFrom,pushTo,exchange,ownProjection,backup,stateFrom,toast,confirmBox};
+
   // ── The phone: publish its Proxima to the computers, and take a replacement left for it ──
   if(phone){
     let timer=0;
     const publish=()=>{clearTimeout(timer);timer=setTimeout(async()=>{try{await ask('publish',{snapshot:await ownProjection()},120000);}catch{}},1500);};
-    // A replacement a computer sent the phone: taken when Proxima opens, or at once when it is already open.
-    let taking=false;
-    const takeReplacement=async()=>{
-      if(taking||document.hidden||document.querySelector('.proxima-copy-confirm'))return false;taking=true;
-      try{const pendingReplacement=await ask('replacement',{},30000);if(!pendingReplacement?.snapshot)return false;
-        await ask('replacement-done',{from:pendingReplacement.ownerId},30000).catch(()=>{});
-        toast('Taking '+(pendingReplacement.from||'a computer')+'\u2019s Proxima\u2026',60000);
-        await replaceAll(pendingReplacement.snapshot,pendingReplacement.from||'a computer');return true;}
-      catch{return false;}finally{taking=false;}
-    };
     addEventListener('load',async()=>{
       await ProximaPersistence.ready;
-      if(await takeReplacement())return;
       const write=ProximaPersistence.write.bind(ProximaPersistence);
       ProximaPersistence.write=async state=>{const result=await write(state);publish();return result;};
       publish();
     },{once:true});
-    // A computer sends its replacement straight to the phone app, which hands it to this page.
-    addEventListener('message',event=>{if(event.source===parent&&event.data?.type==='papers:phone:proxima-replacement')void takeReplacement();});
+    addEventListener('message',async event=>{
+      if(event.source!==parent||event.data?.type!=='papers:phone:owner-changed')return;
+      await ProximaPersistence.ready;
+      if(typeof Store==='undefined')return;
+      await Store.refreshReadSnapshot();dispatchEvent(new Event('proxima:remote-imported'));
+      const timeline=document.querySelector('.exact-timeline');if(timeline)root.ExactTimeline?.mount(timeline,null)?.refresh();
+    });
   }
 })(globalThis);

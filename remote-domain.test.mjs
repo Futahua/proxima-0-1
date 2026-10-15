@@ -15,6 +15,17 @@ function fixture(seed){
  return {state,memory,context,store:context.store,domain:context.ProximaRemoteDomain};
 }
 const plain=value=>JSON.parse(JSON.stringify(value));
+test('live control reads owner placement separately while ordinary copies exclude it',async()=>{
+ const f=fixture(),ordinary=await f.store.remoteProjection(owner),control=await f.store.remoteProjection(owner,null,true);
+ assert.equal(ordinary.viewLayout,undefined);assert.equal(control.viewLayout.tasks.t.ganttRow,20);assert.equal(control.viewLayout.timelineRows.row.rowOrder,9);assert.equal(f.domain.validateProjection(control).source.seq,ordinary.source.seq);
+ const copy=f.domain.prepareImport(control,webcrypto.randomUUID());assert.equal(copy.records.tasks.find(t=>t.name==='Task').ganttRow,undefined);assert.equal(copy.viewLayout,undefined);
+});
+test('remote commands refuse stale source checkpoints and replay accepted acts without a second write',async()=>{
+ const f=fixture(),envelope={type:'task.create',commandId:webcrypto.randomUUID(),expectedSeq:9,payload:{name:'Remote verified task'}};
+ const accepted=await f.store.command(envelope);assert.equal(accepted.ok,true);assert.equal(f.store.tasks().filter(t=>t.name===envelope.payload.name).length,1);
+ const after=f.memory.get('proxima.store.v1'),replayed=await f.store.command(envelope);assert.equal(replayed.ok,true);assert.equal(replayed.replayed,true);assert.equal(f.memory.get('proxima.store.v1'),after);
+ const refused=await f.store.command({...envelope,commandId:webcrypto.randomUUID(),payload:{name:'Stale task'}});assert.equal(refused.ok,false);assert.equal(refused.code,'SOURCE_CHANGED');assert.equal(f.memory.get('proxima.store.v1'),after);
+});
 test('ordinary default-colour calendar events export and import their exact approved values',async()=>{for(const color of ['', 'rebeccapurple']){const source=fixture(),event=await source.store.command({type:'schedule-event.create',payload:{name:'Normal calendar event',start:'2026-10-13T02:00:00.000Z',deadline:'2026-10-13T03:00:00.000Z',color}});assert.equal(event.ok,true);const projection=await source.store.remoteProjection(owner,[{kind:'scheduleEvents',id:event.value.id}]),candidate=source.domain.prepareImport(projection,webcrypto.randomUUID());assert.equal(candidate.records.scheduleEvents[0].color,color);}});
 async function followFixture(){const source=fixture(),projection=await source.store.remoteProjection(owner,[{kind:'tasks',id:'t'}]),copyId=webcrypto.randomUUID(),candidate=source.domain.prepareImport(projection,copyId),follow=source.context.ProximaRemoteFollow.create(candidate,projection,{ownerId:'receiver',backpackId:'local'},{resourceId:'grant'});return {source,projection,candidate,receipt:{id:copyId,value:{source:projection.source},follow},state:candidate.records};}
 test('follow updates only approved records and preserves local layout and unknown fields',async()=>{

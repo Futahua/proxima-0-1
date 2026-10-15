@@ -1252,17 +1252,8 @@
   $('#newTaskBtn').addEventListener('click', () => openTask(null));
   const openProjectDialog = () => { projectForm.reset(); projectForm.elements.projectType.value = hubKind; projectDialog.showModal(); };
   $('#newProjectBtn').addEventListener('click', openProjectDialog);
-  $('#hubNewProject').addEventListener('click', openProjectDialog);
-  $('#hubShowArchived').addEventListener('change', (event) => {
-    // Which projects are listed is presentation only; nothing is written.
-    showArchived = event.currentTarget.checked;
-    renderHub();
-  });
-  $$('.hub-tab').forEach((button) => button.addEventListener('click', () => {
-    hubKind = button.dataset.projectKind;
-    $$('.hub-tab').forEach((tab) => { const active = tab === button; tab.classList.toggle('active', active); tab.setAttribute('aria-selected', active ? 'true' : 'false'); });
-    renderHub();
-  }));
+  // The Projects hub (its archive toggle and type tabs) was removed (creator, 2026-10-14); project
+  // records stay in the store.
   // The lens scopes the Daily board. On a project route it is hidden and the
   // address decides, so this handler can only ever fire on Daily.
   projectFilter.addEventListener('change', renderRoute);
@@ -2637,9 +2628,9 @@
   }
 
   let overviewMode=localStorage.getItem('proxima:overview-mode')||'calendar';
-  if(!['calendar','board','projects'].includes(overviewMode))overviewMode='calendar';
-  const overviewOrder=['board','projects'];let lastMainOverview=overviewMode==='calendar'?'calendar':'board';
-  const overviewButtons={calendar:'scheduleRange',board:'overviewBoard',projects:'overviewProjects'};
+  if(!['calendar','board'].includes(overviewMode))overviewMode='calendar'; // the Projects overview was removed (creator, 2026-10-14)
+  const overviewOrder=['board'];let lastMainOverview=overviewMode==='calendar'?'calendar':'board';
+  const overviewButtons={calendar:'scheduleRange',board:'overviewBoard'};
   const timelineHost=$('#timekeeping'),timelineHome=document.createComment('Timeline full-view position'),timelinePeek=$('#calendarTimelinePeek');
   const peekDivider=$('#calendarTimelineDivider'),peekNavigator=$('#calendarTimelineNavigator');
   timelineHost.before(timelineHome);
@@ -2688,7 +2679,8 @@
     if(peek&&timelineHost.parentNode!==timelinePeek)timelinePeek.append(timelineHost);
     else if(!peek&&timelineHost.parentNode===timelinePeek)timelineHome.after(timelineHost);
     timelinePeek.hidden=!peek;peekDivider.hidden=!peek;timelineHost.classList.toggle('is-calendar-peek',peek);
-    timelineHost.inert=false;ExactTimeline.mount($('#exactTimeline'),Store,{layoutKey:'proxima.timeline.layout.v1'}).configure({readOnly:peek||!!globalThis.__proximaDevice,remoteReadOnly:!!globalThis.__proximaDevice});
+    const remoteReadOnly=!!globalThis.__proximaDevice&&!globalThis.__proximaDevice.canControl;
+    timelineHost.inert=false;ExactTimeline.mount($('#exactTimeline'),Store,{layoutKey:'proxima.timeline.layout.v1'}).configure({readOnly:peek||remoteReadOnly,remoteReadOnly});
     if(peek)requestAnimationFrame(sizeCalendarPeek);
     else $('#schedule .schedule-frame').style.removeProperty('flex');
   }
@@ -2740,13 +2732,12 @@
     ['#boardHead', '#runbar', '#columns'].forEach(sel=>{$(sel).hidden=true;});
     $('#timekeeping').hidden=surface!=='schedule'||overviewMode==='projects';
     $('#projectCanvas').hidden = surface !== 'project';
-    $('#projectsHub').hidden = surface !== 'schedule'||overviewMode!=='projects';
     $('#schedule .schedule-frame').hidden=overviewMode!=='calendar';
     $('#schedule').classList.toggle('overview-header-only',overviewMode!=='calendar');
     if(overviewMode!=='calendar')$('#schedule').style.height='auto';
     $('#scheduleNew').hidden=overviewMode!=='calendar';
     $('#scheduleRange').hidden=lastMainOverview!=='calendar';$('#overviewBoard').hidden=lastMainOverview!=='board';$('#scheduleRange').title='Switch to timeline';$('#overviewBoard').title='Switch to calendar';
-    for(const [id,mode] of [['scheduleRange','calendar'],['overviewBoard','board'],['overviewProjects','projects']]){document.getElementById(id).setAttribute('aria-pressed',String(overviewMode===mode));}
+    for(const [id,mode] of [['scheduleRange','calendar'],['overviewBoard','board']]){document.getElementById(id).setAttribute('aria-pressed',String(overviewMode===mode));}
     $('#schedule').hidden = surface !== 'schedule';
     requestAnimationFrame(positionOverviewUnderline);
     $('#routeMissing').hidden = surface !== 'missing';
@@ -3258,6 +3249,7 @@
   }
 
   async function seedRequestedSchedule() {
+    if(globalThis.__proximaDevice)return; // only the owner performs startup data work
     const fixture = window.PROXIMA_SCHEDULE_FIXTURE;
     if (!fixture || !fixture.project || !Array.isArray(fixture.events)) return;
     const seedMarker = 'proxima.schedule.seed.lich-hoc-hk1-2026';
@@ -3361,8 +3353,7 @@
     const surface = currentSurface();
     if (surface === 'daily') renderDaily();
     else if (surface === 'project') renderProject(Store.project(route().id));
-    else if (surface === 'hub') renderHub();
-    else if (surface === 'schedule') { renderSchedule(); renderDaily(); renderHub(); }
+    else if (surface === 'schedule') { renderSchedule(); renderDaily(); }
     // 'missing' draws nothing: the section is a statement, written once on entry.
   }
 
@@ -3400,314 +3391,7 @@
     });
   }
 
-  // ══ Projects Hub ═══════════════════════════════════════════════════════════
-  // A portfolio view: a project's identity and its PRESSURE, legible before you
-  // open anything. Every number on a card is derived from the tasks in the store
-  // at render time — nothing here is stored, so nothing here can go stale or
-  // disagree with the board it summarises.
-
-  /**
-   * A project's pressure, counted the same way the rest of the app counts it.
-   * "Overdue" matches Timekeeping's band exactly: an open task whose deadline day
-   * has passed, using end-of-day expiry so a task due today is not overdue.
-   */
-  function projectStats(project, tasks, now) {
-    const own = tasks.filter((t) => t.project === project.id);
-    const open = own.filter((t) => t.status !== 'finished');
-    const overdue = open.filter((t) => t.deadline && dayEnd(t.deadline) < now).length;
-    const p1 = open.filter((t) => t.weight >= P1_WEIGHT).length;
-    const upcoming = open
-      .filter((t) => t.deadline && dayEnd(t.deadline) >= now)
-      .map((t) => dayStart(t.deadline));
-    const nextDeadline = upcoming.length ? Math.min.apply(null, upcoming) : null;
-    const reversed = own.filter((t) => isReversed(t)).length;
-    return {
-      total: own.length,
-      open: open.length,
-      finished: own.length - open.length,
-      running: own.filter((t) => t.status === 'running').length,
-      overdue: overdue,
-      p1: p1,
-      nextDeadline: nextDeadline,
-      reversed: reversed,
-      unplaced: open.filter((t) => !t.deadline).length,
-    };
-  }
-
-  /**
-   * A stable visual identity per project. The original tints a card by the
-   * project's age relative to the others; we do not store an icon or a colour, so
-   * identity is derived from the id — the same project always wears the same
-   * colour, and no two projects in a Hub are likely to collide. Age is shown as
-   * text instead, where it can be read rather than inferred from a shade.
-   */
-  function projectHue(project) {
-    let hash = 0;
-    const key = String(project.id || project.name || '');
-    for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) % 360;
-    return hash;
-  }
-
-  /** "3w ago", "2mo ago" — derived from an instant, never stored. */
-  function ageLabel(iso, now) {
-    const ms = new Date(iso).getTime();
-    if (!Number.isFinite(ms)) return 'unknown age';
-    const mins = Math.floor((now - ms) / 60000);
-    if (mins < 1) return 'just now';
-    if (mins < 60) return mins + 'm ago';
-    const hours = Math.floor(mins / 60);
-    if (hours < 24) return hours + 'h ago';
-    const days = Math.floor(hours / 24);
-    if (days < 30) return days + (days === 1 ? 'd' : 'd') + ' ago';
-    const months = Math.floor(days / 30);
-    if (months < 12) return months + 'mo ago';
-    return Math.floor(months / 12) + 'y ago';
-  }
-
-  let showArchived = false;
-
-  /**
-   * What "P1" means here. We have no priority field — the store keeps weight, a
-   * task's share of the run — so the Hub reads the closest thing it has rather
-   * than inventing a field and leaving it empty. Weight 5+ is the heaviest fifth
-   * of the scale, i.e. the work that dominates a horizon. Says so on hover.
-   */
-  const P1_WEIGHT = 5;
-
-  function renderHub() {
-    const tasks = Store.tasks();
-    const now = Date.now();
-    const projects = Store.projects().slice().sort((a, b) =>
-      String(a.name).localeCompare(String(b.name)));
-    const taskProjects = projects.filter((p) => p.projectType !== 'schedule');
-    const scheduleProjects = projects.filter((p) => p.projectType === 'schedule');
-    $('#taskProjectCount').textContent = String(taskProjects.length);
-    $('#scheduleProjectCount').textContent = String(scheduleProjects.length);
-    const listed = projects.filter((p) => p.projectType === hubKind && Boolean(p.archivedAt) === showArchived);
-
-    const scopedProjects = hubKind === 'schedule' ? scheduleProjects : taskProjects;
-    const archivedCount = scopedProjects.filter((p) => p.archivedAt).length;
-    $('#hubCount').textContent = scopedProjects.length === 0
-      ? (hubKind === 'schedule' ? 'No schedules' : 'No projects')
-      : showArchived
-        ? archivedCount + (archivedCount === 1 ? ' archived project' : ' archived projects')
-        : (scopedProjects.length - archivedCount) + ' active of ' + scopedProjects.length;
-
-    const grid = $('#hubGrid');
-    grid.replaceChildren();
-    const none = listed.length === 0;
-    $('#hubEmpty').hidden = !none;
-    grid.hidden = none;
-    if (none) {
-      $('#hubEmpty').textContent = showArchived
-        ? 'No archived ' + (hubKind === 'schedule' ? 'schedules.' : 'projects.')
-        : hubKind === 'schedule'
-          ? 'No schedules yet. Create one to hold calendar events.'
-          : 'No projects yet. Create one and its tasks will gather here.';
-      return;
-    }
-
-    listed.forEach((project) => grid.append(project.projectType === 'schedule'
-      ? scheduleHubCardFor(project, now)
-      : hubCardFor(project, projectStats(project, tasks, now), now)));
-  }
-
-  function scheduleHubCardFor(project, now) {
-    const card = document.createElement('article');
-    card.className = 'hub-card schedule-hub-card' + (project.archivedAt ? ' archived' : '');
-    card.dataset.id = project.id;
-    const events = Store.scheduleEvents().filter((event) => event.project === project.id);
-    const upcoming = events.filter((event) => new Date(event.deadline).getTime() >= now).length;
-    const head = document.createElement('div'); head.className = 'hub-head';
-    const mark = document.createElement('span'); mark.className = 'hub-mark schedule-mark'; mark.textContent = '▦'; mark.setAttribute('aria-hidden', 'true');
-    const title = document.createElement('div'); title.className = 'hub-title';
-    const name = document.createElement('h3'); name.textContent = project.name; title.append(name);
-    const meta = document.createElement('p'); meta.className = 'hub-meta'; meta.textContent = project.description || 'Schedule'; title.append(meta); head.append(mark, title);
-    card.append(head);
-    const pressure = document.createElement('div'); pressure.className = 'hub-pressure';
-    pressure.append(hubStat(events.length + ' Events', 'Calendar event series in this schedule'), hubStat(upcoming + ' Upcoming', 'Event series that have not ended'));
-    card.append(pressure);
-    const acts = document.createElement('div'); acts.className = 'hub-acts';
-    const open = document.createElement('a'); open.className = 'primary'; open.href = '#/schedule/' + encodeURIComponent(project.id); open.textContent = 'Open Schedule'; acts.append(open);
-    if (!project.archivedAt) acts.append(hubAction('Archive', 'Hide from the Hub without touching its events', async (button) => { const result = await send('project.archive', { projectId: project.id }); if (reportRefusal(result, button)) return; refreshAfterWrite(); }));
-    else acts.append(hubAction('Restore', 'Return this schedule to the active list', async (button) => { const result = await send('project.restore', { projectId: project.id }); if (reportRefusal(result, button)) return; refreshAfterWrite(); }));
-    acts.append(hubAction('Delete', 'Delete this schedule and its event series', () => confirmDeleteSchedule(project, events.length)));
-    card.append(acts);
-    return card;
-  }
-
-  function hubCardFor(project, stats, now) {
-    const card = document.createElement('article');
-    card.className = 'hub-card' + (project.archivedAt ? ' archived' : '');
-    card.dataset.id = project.id;
-    card.style.setProperty('--hue', String(projectHue(project)));
-
-    // Identity: a monogram block in the project's own colour, then name, then the
-    // description the modal collects.
-    const head = document.createElement('div');
-    head.className = 'hub-head';
-    const mark = document.createElement('span');
-    mark.className = 'hub-mark';
-    mark.textContent = (project.name || '?').trim().charAt(0).toUpperCase() || '?';
-    mark.setAttribute('aria-hidden', 'true');
-    const title = document.createElement('div');
-    title.className = 'hub-title';
-    const name = document.createElement('h3');
-    name.textContent = project.name;
-    title.append(name);
-    const meta = document.createElement('p');
-    meta.className = 'hub-meta';
-    meta.textContent = project.archivedAt
-      ? 'Archived ' + new Date(project.archivedAt).toLocaleDateString() + ' · age ' + ageLabel(project.createdAt, now)
-      : 'Age ' + ageLabel(project.createdAt, now);
-    title.append(meta);
-    head.append(mark, title);
-    if (project.archivedAt) {
-      const badge = document.createElement('span');
-      badge.className = 'hub-badge';
-      badge.textContent = 'ARCHIVED';
-      head.append(badge);
-    }
-    card.append(head);
-
-    if (project.description) {
-      const desc = document.createElement('p');
-      desc.className = 'hub-desc';
-      desc.textContent = project.description;
-      card.append(desc);
-    }
-
-    // Pressure. The same numbers the board and Timekeeping will show once this
-    // project is scoped, because they are counted from the same tasks.
-    const pressure = document.createElement('div');
-    pressure.className = 'hub-pressure';
-    pressure.append(hubStat(String(stats.total) + (stats.total === 1 ? ' task' : ' tasks'), stats.total === 0 ? 'No tasks in this project yet' : stats.running + ' running, ' + stats.finished + ' finished'));
-    pressure.append(hubStat(stats.overdue + ' overdue', stats.overdue === 0 ? 'Nothing past its deadline' : 'Deadlines that have passed', stats.overdue > 0 ? 'bad' : ''));
-    pressure.append(hubStat(stats.p1 + ' P1', 'Tasks at weight ' + P1_WEIGHT + ' or above', stats.p1 > 0 ? 'hot' : ''));
-    pressure.append(hubStat(
-      stats.nextDeadline === null ? 'No next deadline' : 'Next ' + new Date(stats.nextDeadline).toLocaleDateString(),
-      stats.nextDeadline === null ? 'No open task has a deadline' : 'The soonest deadline among open tasks',
-      ''));
-    card.append(pressure);
-
-    // Anything the card knows is wrong with its own data says so, rather than
-    // being averaged into a healthy-looking total.
-    if (stats.reversed > 0) {
-      const warn = document.createElement('p');
-      warn.className = 'hub-warn';
-      warn.textContent = '⚠ ' + stats.reversed + (stats.reversed === 1 ? ' task has' : ' tasks have') + ' reversed dates — open the project to fix';
-      card.append(warn);
-    }
-
-    const acts = document.createElement('div');
-    acts.className = 'hub-acts';
-
-    // A card ENTERS the project: it is a destination, and this is a link, so the
-    // address it goes to can be read, copied, bookmarked or opened in a new tab.
-    // It used to set the project dropdown and re-render the page under the reader —
-    // filtering dressed as navigation, which left them on the same page with a
-    // changed control and a note telling them how to change it back.
-    const open = document.createElement('a');
-    open.className = 'primary';
-    open.href = '#/project/' + encodeURIComponent(project.id);
-    open.textContent = 'Open project';
-    open.title = 'Open this project’s own workspace';
-    acts.append(open);
-
-    if (project.archivedAt) {
-      acts.append(hubAction('Restore', 'Return this project to the active list', async (button) => {
-        const result = await send('project.restore', { projectId: project.id });
-        if (reportRefusal(result, button)) return;
-        // The lens labels archived projects, so it is rebuilt with them.
-        refreshProjectOptions();
-        refreshAfterWrite();
-      }));
-    } else {
-      acts.append(hubAction('Archive', 'Hide from the Hub without touching its tasks', async (button) => {
-        const result = await send('project.archive', { projectId: project.id });
-        if (reportRefusal(result, button)) return;
-        // A lens pointing at a project that has just been archived is a state the
-        // reader never asked for, so the lens is released with it. Only the lens:
-        // which project the page IS is the address's business now.
-        clearLensIf(project.id);
-        refreshProjectOptions();
-        refreshAfterWrite();
-      }));
-    }
-
-    acts.append(hubAction('Delete', 'Delete this project', () => confirmDeleteProject(project, stats)));
-    card.append(acts);
-    return card;
-  }
-
-  function hubStat(value, title, tone) {
-    const span = document.createElement('span');
-    span.className = 'hub-stat' + (tone ? ' ' + tone : '');
-    span.textContent = value;
-    span.title = title;
-    return span;
-  }
-
-  function confirmDeleteSchedule(project, eventCount) {
-    $('#confirmTitle').textContent = 'Delete “' + project.name + '”?';
-    $('#confirmBody').textContent = 'This will delete ' + eventCount + (eventCount === 1 ? ' event series' : ' event series') + '. This cannot be undone.';
-    $('#confirmOk').textContent = 'Delete schedule';
-    confirmDialog.__onOk = async () => {
-      const result = await send('project.delete', { projectId: project.id });
-      if (reportRefusal(result, null)) return;
-      refreshAfterWrite();
-      flash('Deleted “' + project.name + '”.', null, {});
-    };
-    confirmDialog.showModal();
-  }
-
-  function hubAction(label, title, onClick) {
-    const btn = document.createElement('button');
-    btn.className = 'ghost';
-    btn.textContent = label;
-    btn.title = title;
-    btn.addEventListener('click', onClick);
-    return btn;
-  }
-
-  /**
-   * Deleting a project does not delete its tasks. The dialog says exactly how many
-   * will become uncategorised, because that number is the whole consequence and
-   * the reader is entitled to it before agreeing.
-   */
-  function confirmDeleteProject(project, stats) {
-    const taskWord = stats.total === 1 ? 'task' : 'tasks';
-    const consequence = stats.total === 0
-      ? 'It has no tasks.'
-      : 'Its ' + stats.total + ' ' + taskWord + ' will not be deleted — they become uncategorised and stay on the board.';
-    $('#confirmTitle').textContent = 'Delete “' + project.name + '”?';
-    $('#confirmBody').textContent = consequence + ' This cannot be undone.';
-    $('#confirmOk').textContent = stats.total === 0 ? 'Delete project' : 'Delete project, keep ' + stats.total + ' ' + taskWord;
-    confirmDialog.__onOk = async () => {
-      const result = await send('project.delete', { projectId: project.id });
-      if (reportRefusal(result, null)) return;
-      clearLensIf(project.id);
-      refreshProjectOptions();
-      refreshAfterWrite();
-      const orphaned = (result.value && result.value.orphaned) || 0;
-      flash('Deleted “' + project.name + '”. ' + (orphaned
-        ? orphaned + ' ' + (orphaned === 1 ? 'task is' : 'tasks are') + ' now uncategorised.'
-        : 'It had no tasks.'), null, {});
-    };
-    confirmDialog.showModal();
-  }
-
-  /**
-   * Release the Daily lens when the project it points at stops being listed.
-   *
-   * Only the lens. Which project the page IS belongs to the address now, so a
-   * project disappearing can no longer leave the page showing something that is
-   * not there — and a stale address says so in its own words (see the missing
-   * route) instead of silently falling back to the whole board.
-   */
-  function clearLensIf(projectId) {
-    if (projectFilter.value === projectId) projectFilter.value = '';
-  }
+  // The Projects Hub (portfolio cards, archive and delete actions) was removed (creator, 2026-10-14).
 
   /** A write landed: re-read it on the surface that is actually mounted. */
   const refreshAfterWrite = renderRoute;
