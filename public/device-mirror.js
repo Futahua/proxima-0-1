@@ -26,14 +26,15 @@
   style.textContent='.schedule-head-actions .proxima-device-name,.proxima-copy-icon{display:none}';
   (document.head||document.documentElement).append(style);
 
-  let known=null,timer=0,driving=false,running=null;
+  let known=null,knownAt=0,timer=0,driving=false,running=null;
   const status=new Map(); // device id -> {state:'ok'|'failed', at, error, wait, retryAt}
-  async function devices(){if(!known)known=await api.devices();return known;}
+  async function devices(){if(!known||Date.now()-knownAt>30000){known=await api.devices();knownAt=Date.now();}return known;}
   async function syncOne(device){
     const previous=status.get(device.id);
     try{
       const {self}=await devices();
       const result=await sync.syncWith(device.id,message=>api.exchange(device,message),{self:self.name,peer:device.name});
+      if(root.ProximaWorkspaces)await root.ProximaWorkspaces.syncWith(device,message=>api.exchange(device,message));
       dispatchEvent(new Event('proxima-sync:conflicts')); // a merge can add conflicts without changing what shows
       status.set(device.id,{state:'ok',at:Date.now()});
       if(result.notes.length)api.toast('Synced with '+device.name+': '+result.notes.join(' '),9000);
@@ -44,7 +45,7 @@
   }
   async function syncAll(){
     if(running)return running;
-    running=(async()=>{try{const {others}=await devices();for(const device of others)if(!(status.get(device.id)?.retryAt>Date.now()))await syncOne(device);}catch{}finally{running=null;caughtUp?.();}})();
+    running=(async()=>{try{const {others}=await devices();for(const device of [...others].sort((a,b)=>(/sloptop/i.test(b.name)?1:0)-(/sloptop/i.test(a.name)?1:0)))if(!(status.get(device.id)?.retryAt>Date.now()))await syncOne(device);}catch{}finally{running=null;caughtUp?.();}})();
     return running;
   }
   function schedule(ms){clearTimeout(timer);timer=setTimeout(()=>{if(driving)void syncAll();},ms);}

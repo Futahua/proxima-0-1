@@ -1278,6 +1278,13 @@ const Store = (() => {
       const rowOrder=intervalRowPosition(payload.beforeId,item.id);if(rowOrder===null)return refuse('INTERVAL_NOT_FOUND',{});
       return {ok:true,apply:()=>{const before={...item};item.rowOrder=rowOrder;return {value:{...item},entity:{kind:'timeline-interval',id:item.id},before,after:{...item},changed:true};}};
     },
+    'timeline-interval.template'(payload,ctx) {
+      const item=state.timelineIntervals.find(x=>x.id===payload.intervalId);if(!item)return refuse('INTERVAL_NOT_FOUND',{});
+      const conflict=checkRev(ctx,'timeline-interval',item.id);if(conflict)return conflict;
+      if(payload.template!==null&&payload.template!=='as-you-go')return refuse('PAYLOAD_INVALID',{});
+      const next=payload.template===null?null:item.template?.kind==='as-you-go'?item.template:{version:1,kind:'as-you-go',workspaceId:id('workspace')};
+      return {ok:true,apply:()=>{if(JSON.stringify(item.template??null)===JSON.stringify(next))return {changed:false,value:{...item}};const before=structuredClone(item);item.template=next;return {changed:true,entity:{kind:'timeline-interval',id:item.id},before,after:structuredClone(item),value:{...item}};}};
+    },
     'timeline-interval.create'(payload) {
       if(typeof payload.name!=='string'||!payload.name.trim())return refuse('NAME_REQUIRED',{});
       if(typeof payload.start!=='string'||typeof payload.end!=='string'||!/(Z|[+-]\d\d:\d\d)$/i.test(payload.start)||!/(Z|[+-]\d\d:\d\d)$/i.test(payload.end))return refuse('INTERVAL_TIME_INVALID',{});

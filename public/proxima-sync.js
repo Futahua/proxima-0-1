@@ -97,6 +97,7 @@
 
   /** Answers a peer: {from, vv, changes} -> {node, vv, changes, notes}. */
   async function exchange(message){
+    if(message?.workspaceProtocol===1){if(!root.ProximaWorkspaces)throw Error('Blob workspace sync is unavailable.');return root.ProximaWorkspaces.exchange(message);}
     await ready;
     if(message?.protocol!==2)throw Error('Update Proxima on this device before syncing; its action-authority protocol is older.');
     if(message.probe)return withWriteLock(async()=>{const store=await load();return {protocol:2,node:store.meta.node,vv:store.meta.vv,changes:[],notes:[]};});

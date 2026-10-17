@@ -23,10 +23,14 @@
  * other records (a session's copy of its row's order) and compare-and-set tokens stay local. */
 (function(root){
   'use strict';
-  const COLLECTIONS=['projects','tasks','scheduleEvents','timelineRows','timelineIntervals','importedRuns'];
-  const SINGLETONS=['run'];
+  // The workspace uses these same merge rules with its own record collections.
+  // Storage, transport and application still belong to their existing owners.
+  function createDomain(options={}){
+  const COLLECTIONS=Object.freeze([...(options.collections||['projects','tasks','scheduleEvents','timelineRows','timelineIntervals','importedRuns'])]);
+  const SINGLETONS=Object.freeze([...(options.singletons||['run'])]);
+  if([...COLLECTIONS,...SINGLETONS].some(name=>typeof name!=='string'||! /^[a-zA-Z][a-zA-Z0-9]*$/.test(name))||new Set([...COLLECTIONS,...SINGLETONS]).size!==COLLECTIONS.length+SINGLETONS.length)throw Error('Invalid sync domain collections.');
   // Per-device fields: compare-and-set tokens (bumped locally after a merge) and derived copies.
-  const LOCAL_FIELDS={'*':new Set(['rev']),timelineIntervals:new Set(['rev','rowOrder'])};
+  const LOCAL_FIELDS=options.localFields||{'*':new Set(['rev']),timelineIntervals:new Set(['rev','rowOrder'])};
   const localFields=collection=>LOCAL_FIELDS[collection]||LOCAL_FIELDS['*'];
   const TOMB='~';
 
@@ -201,7 +205,7 @@
     for(const name of SINGLETONS){const key=name+'/'+name;if(touchedSet.has(key))next[name]=records.has(key)?withLocal(name,records.get(key),state[name]):null;}
     return next;
   }
-  const REVISED=new Set(['projects','tasks','scheduleEvents','timelineIntervals','importedRuns','run']);
+  const REVISED=new Set(options.revised||['projects','tasks','scheduleEvents','timelineIntervals','importedRuns','run']);
   /** A merged record keeps this device's local fields and gets a new revision, so an edit based on
    * what was shown before is refused. */
   function withLocal(collection,merged,previous){
@@ -277,5 +281,7 @@
     return {state:next,notes};
   }
 
-  root.ProximaSyncCore=Object.freeze({COLLECTIONS,SINGLETONS,TOMB,tick,witness,stamp,timeOf,seen,recordsOf,diff,stampChanges,bootstrap,changesSince,merge,conflictsOf,joinVectors,vectorOf,repair});
+  return Object.freeze({COLLECTIONS,SINGLETONS,TOMB,tick,witness,stamp,timeOf,seen,recordsOf,diff,stampChanges,bootstrap,changesSince,merge,conflictsOf,joinVectors,vectorOf,repair,createDomain});
+  }
+  root.ProximaSyncCore=createDomain();
 })(globalThis);
