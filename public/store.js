@@ -1282,7 +1282,10 @@ const Store = (() => {
       const item=state.timelineIntervals.find(x=>x.id===payload.intervalId);if(!item)return refuse('INTERVAL_NOT_FOUND',{});
       const conflict=checkRev(ctx,'timeline-interval',item.id);if(conflict)return conflict;
       if(payload.template!==null&&payload.template!=='as-you-go')return refuse('PAYLOAD_INVALID',{});
-      const next=payload.template===null?null:item.template?.kind==='as-you-go'?item.template:{version:1,kind:'as-you-go',workspaceId:id('workspace')};
+      // Every blob's folder lives in the one synced As you Go root. A blob keeps its folder until
+      // that folder is deleted; choosing As you Go again then gives it a fresh one (renew).
+      const keep=item.template?.kind==='as-you-go'&&item.template.version===2&&!payload.renew;
+      const next=payload.template===null?null:keep?item.template:{version:2,kind:'as-you-go',workspaceId:'ayg-root',folderId:id('blobfolder')};
       return {ok:true,apply:()=>{if(JSON.stringify(item.template??null)===JSON.stringify(next))return {changed:false,value:{...item}};const before=structuredClone(item);item.template=next;return {changed:true,entity:{kind:'timeline-interval',id:item.id},before,after:structuredClone(item),value:{...item}};}};
     },
     'timeline-interval.create'(payload) {

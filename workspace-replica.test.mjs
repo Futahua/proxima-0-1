@@ -67,3 +67,18 @@ test('a stale pane cannot overwrite a received workspace organization change',as
   const a=device('pc'),b=device('phone');await link(a);await sync(a,b);const stale=await a.replica.load('w'),edit=await b.replica.load('w');edit.state.shortcuts[0].name='Human name';await b.replica.save('w',edit.state,edit.revision);await sync(b,a);
   stale.state.shortcuts[0].name='Stale';assert.equal((await a.replica.save('w',stale.state,stale.revision)).ok,false);assert.equal((await a.replica.load('w')).state.shortcuts[0].name,'Human name');
 });
+test('a blob folder is created once in the synced root, follows the blob name, and reads as deleted everywhere once binned',async()=>{
+  const a=device('pc'),b=device('phone');
+  assert.deepEqual(plain(await a.replica.folder('w','blob-1')),{exists:false,binned:false});
+  await a.replica.ensureFolder('w','blob-1','Essay');await a.replica.ensureFolder('w','blob-1','Essay');
+  const groups=(await a.replica.load('w')).state.groups;assert.equal(groups.length,1);assert.equal(groups[0].id,'blob-1');assert.equal(groups[0].parentId,'root');
+  await a.replica.ensureFolder('w','blob-1','Essay, renamed');await sync(a,b);
+  assert.equal((await b.replica.folder('w','blob-1')).name,'Essay, renamed');
+  // Deleting the folder in the phone's As you Go bins it; every device then reads it as deleted.
+  const loaded=await b.replica.load('w');loaded.state.groups[0].bin={parentId:'root',order:0,binnedAt:'2026-10-17T00:00:00.000Z'};
+  assert.equal((await b.replica.save('w',loaded.state,loaded.revision)).ok,true);await sync(b,a);
+  assert.equal((await a.replica.folder('w','blob-1')).binned,true);
+  // A binned folder is not recreated or renamed by the blob.
+  assert.equal((await a.replica.ensureFolder('w','blob-1','Essay')).binned,true);
+  assert.equal((await a.replica.folders('w'))['blob-1'].binned,true);
+});

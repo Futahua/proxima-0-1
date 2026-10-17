@@ -51,8 +51,10 @@
   function day(value){if(typeof value!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(value)||new Date(value+'T00:00:00.000Z').toISOString().slice(0,10)!==value)throw Error('Invalid task day.');}
   function template(value){
     if(value==null)return;
-    shape(value,['version','kind','workspaceId'],'blob template');
-    if(value.version!==1||value.kind!=='as-you-go'||typeof value.workspaceId!=='string'||! /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(value.workspaceId))throw Error('Invalid blob template.');
+    shape(value,['version','kind','workspaceId','folderId'],'blob template');
+    const ident=v=>typeof v==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(v);
+    // Version 1 gave each blob its own workspace; version 2 is a folder in the shared synced root.
+    if(value.kind!=='as-you-go'||!ident(value.workspaceId)||!(value.version===1&&value.folderId===undefined||value.version===2&&ident(value.folderId)))throw Error('Invalid blob template.');
   }
   function runValues(run){instant(run.lockedAt,'run lock');instant(run.target,'run target');number(run.total,'run total');if(!Array.isArray(run.members))throw Error('Invalid run members.');for(const member of run.members){shape(member,['id','name','weight','duration','startsAt','endsAt'],'run member');text(member.id,'run member identity',true);text(member.name,'run member name',true);number(member.weight,'run member weight',1);number(member.duration,'run member duration');number(member.startsAt,'run member start');number(member.endsAt,'run member end');if(member.endsAt<member.startsAt)throw Error('Invalid run member range.');}}
   function validateProjection(input){

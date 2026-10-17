@@ -92,6 +92,26 @@
       const proposed=uuid(),versionId=await transaction(async(journal,stamps)=>{const parents=observed.baseVersion?[observed.baseVersion]:[],known=journal.state.workspaceVersions.find(v=>v.workspaceId===workspaceId&&v.entryId===entryId&&v.hash===observed.hash&&JSON.stringify(v.parents)===JSON.stringify(parents));if(known)return known.id;author(journal,stamps,W.appendVersion(journal.state,{id:proposed,workspaceId,entryId,parents,kind:'content',hash:observed.hash,size:observed.size}),'observed');return proposed;});
       await files({operation:'publish',workspaceId,entryId,name,hash:observed.hash,versionId});
     }
+    // A blob's folder in the synced root. Missing means not created or not yet synced here;
+    // binned (or inside a binned folder) means deleted, which leaves the blob without a template.
+    function folderOf(journal,workspaceId,folderId){
+      const groups=new Map(journal.state.workspaceEntries.filter(e=>e.workspaceId===workspaceId&&e.kind==='group').map(e=>[e.recordId,e]));
+      const record=groups.get(folderId);if(!record)return {exists:false,binned:false};
+      let binned=false;const seen=new Set();for(let g=record;g&&!seen.has(g.recordId);g=groups.get(g.parentId)){seen.add(g.recordId);if(g.bin)binned=true;}
+      return {exists:true,binned,name:record.name,icon:record.icon??null};
+    }
+    async function folder(workspaceId,folderId){return transaction(async journal=>structuredClone(folderOf(journal,workspaceId,folderId)));}
+    async function folders(workspaceId){return transaction(async journal=>Object.fromEntries(journal.state.workspaceEntries.filter(e=>e.workspaceId===workspaceId&&e.kind==='group').map(e=>[e.recordId,structuredClone(folderOf(journal,workspaceId,e.recordId))])));}
+    /** Creates the blob's folder at the synced root, or renames it to follow the blob. Both are the
+     * creator's own actions (choosing a template, renaming the blob), so they are human-authored. */
+    async function ensureFolder(workspaceId,folderId,name){return transaction(async(journal,stamps)=>{
+      const key=recordKey(workspaceId,'group',folderId),current=journal.state.workspaceEntries.find(e=>e.id===key);
+      if(current?.bin||current&&current.name===name)return folderOf(journal,workspaceId,folderId);
+      const order=journal.state.workspaceEntries.filter(e=>e.workspaceId===workspaceId&&e.kind==='group'&&e.parentId==='root').length;
+      const next=current?{...current,name}:{id:key,recordId:folderId,workspaceId,kind:'group',parentId:'root',order,name,icon:null};
+      author(journal,stamps,{...journal.state,workspaceEntries:[...journal.state.workspaceEntries.filter(e=>e.id!==key),next]});
+      return folderOf(journal,workspaceId,folderId);
+    });}
     async function entries(){return transaction(async journal=>structuredClone(journal.state.workspaceEntries.filter(record=>record.kind==='shortcut'&&record.workspaceFileId)));}
     async function reconcile(){
       const errors=[];
@@ -159,7 +179,7 @@
       }else for(const field of Object.keys(record))stamps.set(conflict.key+'#'+field,nextStamp(journal));
       return {ok:true};
     });}
-    return Object.freeze({load,save,importFile,capture,reconcile,exchange,syncWith,remove,restore,status,history,conflicts,resolveMetadata,flush:()=>tail});
+    return Object.freeze({load,save,importFile,capture,reconcile,exchange,syncWith,remove,restore,status,history,conflicts,resolveMetadata,folder,folders,ensureFolder,flush:()=>tail});
   }
   root.ProximaWorkspaceReplica=Object.freeze({create});
 })(globalThis);

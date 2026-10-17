@@ -17,7 +17,7 @@ test('choosing/removing a template is durable, idempotent and participates only 
   let {store,memory}=fixture();const {value:blob}=await create(store);
   const request={type:'timeline-interval.template',commandId:'choose-ayg',ifRev:blob.rev,payload:{intervalId:blob.id,template:'as-you-go'}};
   const first=await store.command(request);assert.equal(first.ok,true);const binding=plain(first.value.template);
-  assert.equal(binding.kind,'as-you-go');assert.ok(binding.workspaceId);assert.equal((await store.command(request)).value.template.workspaceId,binding.workspaceId);
+  assert.equal(binding.kind,'as-you-go');assert.equal(binding.workspaceId,'ayg-root');assert.ok(binding.folderId);assert.equal((await store.command(request)).value.template.folderId,binding.folderId);
   assert.equal((await store.command({type:'timeline-interval.template',payload:{intervalId:blob.id,template:'as-you-go'}})).changed,false);
   ({store}=fixture(memory));assert.deepEqual(plain(store.timelineIntervals()[0].template),binding);
   await store.command({type:'timeline-interval.template',payload:{intervalId:blob.id,template:null}});assert.equal(store.timelineIntervals()[0].template,null);
@@ -28,11 +28,13 @@ test('choosing/removing a template is durable, idempotent and participates only 
 test('workspace bindings stay with the session on rename/reorder and separate blobs have separate identities',async()=>{
   const {store}=fixture();const a=await create(store,'A'),b=await create(store,'B');
   for(const blob of [a,b])assert.equal((await store.command({type:'timeline-interval.template',payload:{intervalId:blob.value.id,template:'as-you-go'}})).ok,true);
-  const before=store.timelineIntervals().find(item=>item.id===a.value.id).template.workspaceId;
-  assert.notEqual(before,store.timelineIntervals().find(item=>item.id===b.value.id).template.workspaceId);
+  const before=store.timelineIntervals().find(item=>item.id===a.value.id).template.folderId;
+  // One shared synced root; each blob has its own folder in it.
+  assert.equal(store.timelineIntervals().find(item=>item.id===b.value.id).template.workspaceId,'ayg-root');
+  assert.notEqual(before,store.timelineIntervals().find(item=>item.id===b.value.id).template.folderId);
   await store.command({type:'timeline-interval.patch',payload:{intervalId:a.value.id,patch:{name:'Renamed'}}});
   await store.command({type:'timeline-interval.reorder',payload:{intervalId:a.value.id}});
-  assert.equal(store.timelineIntervals().find(item=>item.id===a.value.id).template.workspaceId,before);
+  assert.equal(store.timelineIntervals().find(item=>item.id===a.value.id).template.folderId,before);
   assert.equal((await store.command({type:'timeline-interval.template',ifRev:1,payload:{intervalId:a.value.id,template:null}})).ok,false);
 });
 test('remote projections retain validated template references without exporting local native paths',async()=>{
@@ -43,4 +45,13 @@ test('remote projections retain validated template references without exporting 
   assert.throws(()=>domain.independentCandidate(projection),/Independent copying/);
   const bad=plain(projection);bad.records.timelineIntervals[0].template.path='C:/private';assert.throws(()=>domain.validateProjection(bad),/Unapproved/);
   assert.equal(JSON.stringify(projection).includes('C:/private'),false);
+});
+
+test('choosing As you Go again after its folder was deleted gives the blob a fresh folder',async()=>{
+  const {store}=fixture(),{value:blob}=await create(store);
+  const first=(await store.command({type:'timeline-interval.template',payload:{intervalId:blob.id,template:'as-you-go'}})).value.template;
+  const same=(await store.command({type:'timeline-interval.template',payload:{intervalId:blob.id,template:'as-you-go'}})).value.template;
+  assert.equal(same.folderId,first.folderId);
+  const renewed=(await store.command({type:'timeline-interval.template',payload:{intervalId:blob.id,template:'as-you-go',renew:true}})).value.template;
+  assert.notEqual(renewed.folderId,first.folderId);assert.equal(renewed.workspaceId,'ayg-root');assert.equal(renewed.version,2);
 });

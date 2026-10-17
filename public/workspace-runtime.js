@@ -58,6 +58,20 @@
     const history=await replica.history(workspaceId,item.workspaceFileId);
     return {item,target:{targetId:item.workspaceFileId,id:item.workspaceFileId,path:item.target,name:item.name,kind:'file',revision:history.versions.length+1,status:available.available&&item.workspaceAvailability==='local'?'present':history.deleted?'deleted':'unavailable'}};
   }
+  // The newest content version before a deletion: what a restore from the Bin brings back.
+  async function restoreLatest(workspaceId,entryId){
+    const history=await replica.history(workspaceId,entryId),byId=new Map(history.versions.map(v=>[v.id,v])),queue=history.heads.flatMap(v=>v.parents);let content;
+    while(queue.length&&!content){const value=byId.get(queue.shift());if(value?.kind==='content')content=value;else if(value)queue.push(...value.parents);}
+    if(!content)throw Error('Choose a retained content version before restoring this entry.');
+    await replica.restore(workspaceId,entryId,content.id);
+  }
+  // Restoring an entry from the Bin restores its file on every device.
+  async function restoreUnbinned(workspaceId,document){
+    for(const item of document.shortcuts||[]){
+      if(!item.workspaceFileId||!(item.placements||[]).length||item.placements.some(p=>p.bin))continue;
+      if((await replica.history(workspaceId,item.workspaceFileId)).deleted)await restoreLatest(workspaceId,item.workspaceFileId);
+    }
+  }
   async function frameCall(workspaceId,method,args=[]){
     if(method==='load')return replica.load(workspaceId);
     if(method==='save'){
@@ -65,7 +79,11 @@
       const document=args[2]?.automatic?(typeof args[0]==='string'?JSON.parse(args[0]):structuredClone(args[0])):await prepareDocument(workspaceId,args[0]);
       // Importing files changes only the version collection. Read its new
       // checked revision before committing this same serialized local action.
-      const baseline=await replica.load(workspaceId);if(baseline.entryRevision!==current.entryRevision)return {ok:false,code:'STALE_REVISION'};return replica.save(workspaceId,document,baseline.revision,args[2]);
+      const baseline=await replica.load(workspaceId);if(baseline.entryRevision!==current.entryRevision)return {ok:false,code:'STALE_REVISION'};
+      const saved=await replica.save(workspaceId,document,baseline.revision,args[2]);
+      if(!saved.ok||args[2]?.automatic)return saved;
+      await restoreUnbinned(workspaceId,document);
+      return {ok:true,revision:(await replica.load(workspaceId)).revision};
     }
     if(method==='flush'){await replica.flush();return {ok:true};}
     if(method==='launch'||method==='reveal'){
@@ -86,14 +104,18 @@
         }
         if(operation==='file-target-restore'){
           if(detail.expectedRevision!==undefined&&detail.expectedRevision!==found.target.revision)throw Error('This workspace file changed before restoration.');
-          const history=await replica.history(workspaceId,found.item.workspaceFileId),byId=new Map(history.versions.map(v=>[v.id,v])),queue=history.heads.flatMap(v=>v.parents);let content;
-          while(queue.length&&!content){const value=byId.get(queue.shift());if(value?.kind==='content')content=value;else if(value)queue.push(...value.parents);}
-          if(!content)throw Error('Choose a retained content version before restoring this entry.');
-          await replica.restore(workspaceId,found.item.workspaceFileId,content.id);return {ok:true,target:{...found.target,status:'present',revision:found.target.revision+1}};
+          await restoreLatest(workspaceId,found.item.workspaceFileId);return {ok:true,target:{...found.target,status:'present',revision:found.target.revision+1}};
         }
         return {ok:true,target:found.target};
       }
-      if(['delete','move','rename','workspace-files'].includes(operation))throw Error('Change managed files through their workspace entries.');
+      if(operation==='delete'){
+        // Killing a managed file is a recoverable deletion that reaches every device's Bin.
+        const doc=(await replica.load(workspaceId)).state,items=(detail.paths||[]).map(path=>doc.shortcuts.find(item=>item.workspaceFileId&&item.target===path));
+        if(!items.length||items.some(item=>!item))throw Error('Only files in this workspace can be killed here.');
+        for(const item of items)await replica.remove(workspaceId,item.workspaceFileId);
+        await reconcile();return {ok:true,targets:[]};
+      }
+      if(['move','rename','workspace-files'].includes(operation))throw Error('Change managed files through their workspace entries.');
       return call(operation,detail);
     }
     throw Error('That operation is not available in a blob file pane.');
