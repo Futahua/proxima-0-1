@@ -61,12 +61,20 @@
   // A device that just reached this one is online, so a backoff from when it was unreachable must not
   // keep this side from syncing back (and recording its acknowledgement) for up to 30 minutes. At most
   // once a minute, so a device that is still unreachable is not retried on every contact.
+  // The page that receives an exchange (on a computer, the hidden owner) need not be the page that
+  // drives, so the contact is told to every Proxima page on this device.
   let contactAt=0;
-  function peerContact(){
-    if(Date.now()-contactAt<60000)return;contactAt=Date.now();let retry=false;
+  const contacts=typeof BroadcastChannel==='function'?new BroadcastChannel('proxima-sync-peer-contact'):null;
+  function retryFailed(){
+    let retry=false;
     for(const [id,value] of status)if(value.state==='failed'&&value.retryAt>Date.now()){status.set(id,{...value,retryAt:0});retry=true;}
     if(retry)schedule(1000);
   }
+  function peerContact(){
+    if(Date.now()-contactAt<60000)return;contactAt=Date.now();
+    retryFailed();contacts?.postMessage('contact');
+  }
+  contacts?.addEventListener('message',retryFailed);
   if(replaceAll)root.__proximaReplaceAll=(projection,from)=>{
     if(projection?.proximaSync){peerContact();return sync.exchange(projection.proximaSync).then(proximaSync=>({proximaSync}));}
     if(projection?.mirror)throw Error('This device now syncs instead of taking whole copies; update '+(projection.mirror.name||'the sending device')+'.');
