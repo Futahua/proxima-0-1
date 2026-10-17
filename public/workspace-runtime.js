@@ -41,7 +41,9 @@
     for(const item of document.shortcuts||[]){
       if(/^https?:\/\//i.test(item.target||''))continue;
       const old=previous.shortcuts.find(value=>value.id===item.id);
-      if(old?.workspaceFileId){if(item.target!==old.target)throw Error('Import a new entry to replace this managed file; the existing file and history are retained.');item.workspaceFileId=old.workspaceFileId;item.workspaceFilename=old.workspaceFilename;item.target=old.target;continue;}
+      // A managed file's location belongs to this workspace, not to the pane: a pane may report it
+      // in another form, which must never refuse the save (that refusal blocked Papers' reload).
+      if(old?.workspaceFileId){item.workspaceFileId=old.workspaceFileId;item.workspaceFilename=old.workspaceFilename;item.target=old.target;continue;}
       const source=await materialize(item.target),description=await files({operation:'enumerate',path:source});
       if(description.kind==='folder'){for(const placement of item.placements||[])await folder(source,placement.parentId,item.name);removed.add(item.id);continue;}
       const imported=await replica.importFile(workspaceId,source,description.name,item.id);item.workspaceFileId=imported.workspaceFileId;item.workspaceFilename=description.name;item.target=imported.target;

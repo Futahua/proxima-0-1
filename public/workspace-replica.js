@@ -75,8 +75,22 @@
         records=old.map(e=>e.kind==='view'&&!stamps.get('workspaceEntries/'+e.id+'#value')?.u?(views.find(v=>v.id===e.id)||e):e);
         records.push(...views.filter(v=>!old.some(e=>e.id===v.id)));
       }
-      for(const old of journal.state.workspaceEntries.filter(e=>e.workspaceId===workspaceId&&['group','shortcut'].includes(e.kind)))if(!records.some(e=>e.id===old.id))throw Error('Use the recoverable Bin in blob workspaces. Permanent removal awaits a retention policy.');
-      author(journal,stamps,{...journal.state,workspaceEntries:[...journal.state.workspaceEntries.filter(record=>record.workspaceId!==workspaceId),...records]},metadata.automatic?'automatic':'human');
+      // Only entries in the kill bin can leave. Emptying the kill bin recycles their files: each gets
+      // a deletion version, so every device recycles its copy while the bytes stay in history.
+      const entries=journal.state.workspaceEntries.filter(e=>e.workspaceId===workspaceId),groups=new Map(entries.filter(e=>e.kind==='group').map(e=>[e.recordId,e]));
+      const binnedUnder=id=>{const seen=new Set();for(let g=groups.get(id);g&&!seen.has(g.recordId);g=groups.get(g.parentId)){seen.add(g.recordId);if(g.bin)return true;}return false;};
+      const inKillBin=old=>old.kind==='group'?binnedUnder(old.recordId):entries.filter(e=>e.kind==='placement'&&e.shortcutId===old.recordId).every(p=>p.bin||binnedUnder(p.parentId));
+      const removed=entries.filter(e=>['group','shortcut'].includes(e.kind)&&!records.some(r=>r.id===e.id));
+      if(removed.length&&metadata.automatic)throw Error('Only the creator empties the kill bin.');
+      for(const old of removed)if(!inKillBin(old))throw Error('Kill it first: only entries in the kill bin can be emptied.');
+      let next={...journal.state,workspaceEntries:[...journal.state.workspaceEntries.filter(record=>record.workspaceId!==workspaceId),...records]};
+      for(const old of removed){
+        if(old.kind!=='shortcut'||!old.workspaceFileId)continue;
+        const state=W.inspect(next,workspaceId,old.workspaceFileId);
+        if(state.missing.length)throw Error('Wait for this file’s history to sync before emptying it.');
+        if(state.heads.length&&!state.deleted)next=W.appendVersion(next,{id:uuid(),workspaceId,entryId:old.workspaceFileId,kind:'delete',parents:state.heads.map(v=>v.id)});
+      }
+      author(journal,stamps,next,metadata.automatic?'automatic':'human');
       journal.views[workspaceId]=doc.view||{};
       return {ok:true,revision:String(journal.n)+':'+JSON.stringify(journal.vv)};
     });}
@@ -127,6 +141,17 @@
         const applied=await files({operation:head.kind==='delete'?'delete':'publish',workspaceId:entry.workspaceId,entryId:entry.workspaceFileId,name:filename,versionId:head.id,...head.kind==='content'?{hash:head.hash}:{}});
         if(applied.localChange)await capture(entry.workspaceId,entry.workspaceFileId,filename);
       }catch(error){errors.push({entryId:entry.recordId,message:error.message});}
+      // Files whose entries were emptied from the kill bin: recycle this device's copy. A copy edited
+      // here meanwhile is captured instead, so the edit survives as a conflict with the deletion.
+      const named=new Set((await entries()).map(e=>e.workspaceId+'/'+e.workspaceFileId));
+      const emptied=await transaction(async journal=>{const out=new Map();for(const v of journal.state.workspaceVersions){const key=v.workspaceId+'/'+v.entryId;if(!named.has(key))out.set(key,[v.workspaceId,v.entryId]);}return [...out.values()];});
+      for(const [workspaceId,entryId] of emptied)try{
+        const inspection=await transaction(async journal=>W.inspect(journal.state,workspaceId,entryId));
+        if(!inspection.deleted)continue;const head=inspection.deletions[0];
+        const binding=await files({operation:'path',workspaceId,entryId,name:'recycled'});if(binding.versionId===head.id||!binding.available&&!binding.hash)continue;
+        const applied=await files({operation:'delete',workspaceId,entryId,name:'recycled',versionId:head.id});
+        if(applied.localChange)await capture(workspaceId,entryId,'recycled');
+      }catch(error){errors.push({entryId,message:error.message});}
       return errors;
     }
     async function remove(workspaceId,entryId){

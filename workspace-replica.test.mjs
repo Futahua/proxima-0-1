@@ -11,9 +11,9 @@ function device(id,previous=null){
   d.files=async p=>{
     if(p.operation==='content-root')return {path:id+'-content'};
     if(p.operation==='content-check')return {available:d.content.has(p.hash),path:id+'-content/'+p.hash,size:d.content.get(p.hash)?.length};
-    const key=p.workspaceId+'/'+p.entryId,path=id+'/'+key+'/'+p.name,b=d.bindings.get(key);
+    const key=p.workspaceId+'/'+p.entryId,b=d.bindings.get(key),path=id+'/'+key+'/'+(b?.name||p.name); // like Papers, a binding keeps its file name
     if(p.operation==='import'){
-      const bytes=b?d.working.get(path):d.originals.get(p.path);if(bytes==null)throw Error('Missing original');const h=hash(bytes);d.content.set(h,bytes);if(!b){d.working.set(path,bytes);d.bindings.set(key,{hash:h,versionId:null});}
+      const bytes=b?d.working.get(path):d.originals.get(p.path);if(bytes==null)throw Error('Missing original');const h=hash(bytes);d.content.set(h,bytes);if(!b){d.working.set(path,bytes);d.bindings.set(key,{hash:h,versionId:null,name:p.name});}
       return {path,hash:h,size:bytes.length,baseHash:b?.hash??null,baseVersion:b?.versionId??null};
     }
     if(p.operation==='path')return {path,available:d.working.has(path),hash:b?.hash??null,versionId:b?.versionId??null};
@@ -21,9 +21,9 @@ function device(id,previous=null){
     if(p.operation==='publish'){
       if(!d.content.has(p.hash))throw Error('Missing content');
       if(d.working.has(path)&&hash(d.working.get(path))!==b?.hash&&hash(d.working.get(path))!==p.hash)return {ok:false,localChange:{hash:hash(d.working.get(path))}};
-      d.working.set(path,d.content.get(p.hash));d.bindings.set(key,{hash:p.hash,versionId:p.versionId});return {ok:true,path};
+      d.working.set(path,d.content.get(p.hash));d.bindings.set(key,{hash:p.hash,versionId:p.versionId,name:b?.name||p.name});return {ok:true,path};
     }
-    if(p.operation==='delete'){d.working.delete(path);d.bindings.set(key,{hash:null,versionId:p.versionId});return {ok:true};}
+    if(p.operation==='delete'){d.working.delete(path);d.bindings.set(key,{hash:null,versionId:p.versionId,name:b?.name||p.name});return {ok:true};}
     throw Error('Unknown file fixture operation '+p.operation);
   };
   d.replica=context.ProximaWorkspaceReplica.create({uuid:randomUUID,storage:{load:async()=>({state:structuredClone(d.journal),revision:d.revision}),save:async(value,revision)=>{if(revision!==d.revision)return {ok:false,code:'STALE_REVISION'};d.journal=structuredClone(value);d.revision++;return {ok:true};}},files:d.files,copy:async(paths,destination)=>{
@@ -81,4 +81,22 @@ test('a blob folder is created once in the synced root, follows the blob name, a
   // A binned folder is not recreated or renamed by the blob.
   assert.equal((await a.replica.ensureFolder('w','blob-1','Essay')).binned,true);
   assert.equal((await a.replica.folders('w'))['blob-1'].binned,true);
+});
+test('killing keeps the file; only emptying the kill bin recycles it, on every device',async()=>{
+  const a=device('pc'),b=device('phone');const imported=await link(a);await sync(a,b);const phonePath=(await b.replica.load('w')).state.shortcuts[0].target;
+  // Kill: the entry goes to the kill bin, the file stays where it is.
+  let loaded=await a.replica.load('w');loaded.state.shortcuts[0].placements[0].bin={parentId:'root',order:0,binnedAt:'2026-10-17T00:00:00.000Z'};
+  assert.equal((await a.replica.save('w',loaded.state,loaded.revision)).ok,true);await a.replica.reconcile();await sync(a,b);
+  assert.equal(a.working.get(imported.target),'drawing A');assert.equal(b.working.get(phonePath),'drawing A');
+  assert.equal((await b.replica.history('w','file-one')).deleted,false);
+  // Emptying the kill bin removes the entry and recycles the file everywhere; the bytes stay in history.
+  loaded=await a.replica.load('w');loaded.state.shortcuts=[];
+  assert.equal((await a.replica.save('w',loaded.state,loaded.revision)).ok,true);await a.replica.reconcile();await sync(a,b);await b.replica.reconcile();
+  assert.equal(a.working.has(imported.target),false);assert.equal(b.working.has(phonePath),false);
+  const history=await b.replica.history('w','file-one');assert.equal(history.deleted,true);assert.ok(history.versions.some(v=>v.kind==='content'&&b.content.has(v.hash)));
+});
+test('an entry that is not in the kill bin cannot be emptied',async()=>{
+  const a=device('pc');await link(a);const loaded=await a.replica.load('w');loaded.state.shortcuts=[];
+  await assert.rejects(a.replica.save('w',loaded.state,loaded.revision),/kill bin/);
+  assert.equal((await a.replica.load('w')).state.shortcuts.length,1);
 });
