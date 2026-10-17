@@ -39,16 +39,20 @@
   // Marks stamps that change, so only those are written.
   function tracked(store){const set=store.stamps.set.bind(store.stamps);store.stamps.set=(key,value)=>{store.dirty.add(key);return set(key,value);};return store;}
   // A stamp records what this device had seen before the edit (c), so others can tell later from concurrent.
-  const nextStamp=(store,automatic=false)=>()=>{const c={...store.meta.vv};store.meta.clock=core.tick(store.meta.clock,Date.now(),store.meta.node);store.meta.n++;store.meta.vv[store.meta.node]=store.meta.n;return {...(automatic?{a:1}:{}),h:store.meta.clock,o:store.meta.node,n:store.meta.n,c};};
+  const nextStamp=(store,automatic=false,intent={})=>(key,field)=>{const c={...store.meta.vv};store.meta.clock=core.tick(store.meta.clock,Date.now(),store.meta.node);store.meta.n++;store.meta.vv[store.meta.node]=store.meta.n;const prior=key&&store.stamps.get(key+'#'+field),basis=automatic&&intent.type==='timeline-queue.delete'&&key?(field==='~'?[...store.stamps].filter(([k])=>k.startsWith(key+'#')).map(([,s])=>s):prior?[prior]:[]):[];return {...(automatic?{a:1}:{u:1}),...(intent.type?{action:{type:intent.type,id:intent.commandId||null}}:{}),...(basis.length?{b:basis.map(s=>({o:s.o,n:s.n}))}:{}),h:store.meta.clock,o:store.meta.node,n:store.meta.n,c};};
   const HISTORY_DAYS=30,AHEAD_MS=24*3600*1000;
 
   // ── Stamping every save (the caller holds the store's write lock) ──
   const read=persistence.read.bind(persistence),write=persistence.write.bind(persistence);
-  persistence.write=async state=>{
-    const before=await read();const result=await write(state);
+  persistence.write=async (state,intent={origin:'automatic'})=>{
+    const before=await read();
     const changes=core.diff(before,state);
     // A command marked automatic (store.js) is stamped so; the creator's edits show over it.
-    if(changes.length){const store=tracked(await load());core.stampChanges(store.stamps,changes,nextStamp(store,(globalThis.__proximaAutomaticWrites||0)>0));await save(store);dispatchEvent(new Event('proxima-sync:local-change'));}
+    const store=tracked(await load()),automatic=intent.origin!=='human';
+    if(!automatic&&intent.type==='timeline-interval.patch'&&intent.intervalId&&intent.fields?.length){const key='timelineIntervals/'+intent.intervalId,record=core.recordsOf(state).get(key);if(record){let change=changes.find(x=>x.key===key);if(!change){change={key,fields:[],deleted:false};changes.push(change);}for(const field of intent.fields)if(['name','start','end','followNow','color','deadline','checked'].includes(field)&&!change.fields.includes(field))change.fields.push(field);}}
+    if(automatic&&intent.type!=='timeline-queue.delete'&&changes.some(change=>change.deleted?[...store.stamps].some(([key,s])=>key.startsWith(change.key+'#')&&s.u):change.fields.some(field=>store.stamps.get(change.key+'#'+field)?.u)))throw Error('An automatic update cannot replace a deliberate edit.');
+    const result=await write(state);
+    if(changes.length){core.stampChanges(store.stamps,changes,nextStamp(store,automatic,intent));await save(store);dispatchEvent(new Event('proxima-sync:local-change'));}
     return result;
   };
 
@@ -75,7 +79,7 @@
     store.meta.history=[...store.meta.history.filter(h=>h.at>=cutoff),...merged.overwritten.map(o=>({...o,at:now}))].slice(-5000);
     if(!merged.changed)return {state:current,notes,changed:false};
     let next={...merged.state,seq:(Number(current?.seq)||0)+1};
-    const repaired=core.repair(next);
+    const repaired=core.repair(next,store.stamps);
     core.stampChanges(store.stamps,core.diff(next,repaired.state),nextStamp(store,true)); // repairs are this device's own, automatic edits
     next=repaired.state;
     await write(next);
@@ -94,6 +98,8 @@
   /** Answers a peer: {from, vv, changes} -> {node, vv, changes, notes}. */
   async function exchange(message){
     await ready;
+    if(message?.protocol!==2)throw Error('Update Proxima on this device before syncing; its action-authority protocol is older.');
+    if(message.probe)return withWriteLock(async()=>{const store=await load();return {protocol:2,node:store.meta.node,vv:store.meta.vv,changes:[],notes:[]};});
     if(!message||typeof message!=='object'||!Array.isArray(message.changes)||!message.vv||typeof message.vv!=='object')throw Error('Invalid Proxima sync request.');
     let outcome;
     if(typeof Store!=='undefined')await Store.flushCommands?.(); // before the lock: a queued edit may be waiting for it
@@ -101,7 +107,7 @@
       const store=tracked(await load()),applied=await apply(store,message.changes,message.vv);
       const reply=core.changesSince(applied.state,store.stamps,message.vv);
       await save(store);
-      outcome={changed:applied.changed,reply:{node:store.meta.node,vv:store.meta.vv,changes:reply,notes:applied.notes}};
+      outcome={changed:applied.changed,reply:{protocol:2,node:store.meta.node,vv:store.meta.vv,changes:reply,notes:applied.notes}};
     });
     if(outcome.changed)await afterChange();
     return outcome.reply;
@@ -110,10 +116,12 @@
   /** Syncs with one device through `send(message) -> reply`. Returns {received, sent, notes}. */
   async function syncWith(peerId,send,names={}){
     await ready;
+    const capability=await send({protocol:2,probe:true,vv:{},changes:[]});
+    if(capability?.protocol!==2)throw Error('Update Proxima on the other device before syncing; it cannot preserve human-action authority.');
     let message;
-    await withWriteLock(async()=>{const store=await load();const known=store.meta.peers[peerId]||{};message={vv:store.meta.vv,changes:core.changesSince(await read(),store.stamps,known)};});
+    await withWriteLock(async()=>{const store=await load();const known=store.meta.peers[peerId]||{};message={protocol:2,vv:store.meta.vv,changes:core.changesSince(await read(),store.stamps,known)};});
     const reply=await send(message);
-    if(!reply||!Array.isArray(reply.changes)||!reply.vv)throw Error('The device did not answer the sync.');
+    if(!reply||reply.protocol!==2||!Array.isArray(reply.changes)||!reply.vv)throw Error('The device did not answer with the supported sync authority protocol.');
     let outcome;
     if(typeof Store!=='undefined')await Store.flushCommands?.();
     await withWriteLock(async()=>{

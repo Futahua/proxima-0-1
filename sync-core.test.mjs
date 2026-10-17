@@ -214,3 +214,33 @@ test('two of the creator\'s own edits still ask, even next to an automatic one',
   assert.equal(conflicts.length, 1);
   assert.equal(JSON.stringify(conflicts[0].others.map(o => o.v)), JSON.stringify(['From PC']));
 });
+
+test('explicit human stop and endpoint beat an offline phone clock, legacy writes and replay through a third device',()=>{
+ let pcTime=1000,phoneTime=1000;const pc=device('pc',base,()=>pcTime),phone=device('phone',base,()=>phoneTime),lap=device('lap',base,()=>pcTime);sync(pc,phone);sync(pc,lap);
+ const human=(d,change)=>{const next=structuredClone(d.state);change(next);S.stampChanges(d.stamps,S.diff(d.state,next),()=>({...d.next(),u:1,action:{id:'human-stop',type:'timeline-interval.patch'}}));d.state=next;};
+ phoneTime=1000+30*86400000;phone.auto(s=>{const x=s.timelineIntervals.find(i=>i.id==='x');x.end='2026-11-14T09:00:00.000Z';x.followNow=true;});
+ pcTime=2000;human(pc,s=>{const x=s.timelineIntervals.find(i=>i.id==='x');x.end='2026-10-14T08:38:00.000Z';x.followNow=false;});
+ for(let i=0;i<3;i++){sync(phone,lap);sync(lap,pc);sync(pc,phone);}
+ for(const d of [pc,phone,lap]){const x=d.state.timelineIntervals.find(i=>i.id==='x');assert.equal(x.end,'2026-10-14T08:38:00.000Z');assert.equal(x.followNow,false);}
+ // Even a background write made after reading the manual value must not supersede it.
+ phone.auto(s=>{s.timelineIntervals.find(i=>i.id==='x').end='2026-12-14T09:00:00.000Z';});sync(phone,pc);assert.equal(pc.state.timelineIntervals.find(i=>i.id==='x').end,'2026-10-14T08:38:00.000Z');
+ // A pre-provenance client cannot promote its clock into deliberate authority.
+ phone.edit(s=>{s.timelineIntervals.find(i=>i.id==='x').followNow=true;});sync(phone,pc);assert.equal(pc.state.timelineIntervals.find(i=>i.id==='x').followNow,false);
+ assert.equal(pc.stamps.get('timelineIntervals/x#followNow').u,1);assert.equal(pc.stamps.get('timelineIntervals/x#followNow').action.id,'human-stop');
+});
+
+test('an authorized queue expiry can follow its exact human basis but cannot erase a newer deliberate edit',()=>{
+ let t=1000;const a=device('pc',base,()=>t),b=device('phone',base,()=>t);sync(a,b);
+ const manual=(d,end)=>{const next=structuredClone(d.state);next.timelineIntervals[0].end=end;S.stampChanges(d.stamps,S.diff(d.state,next),()=>({...d.next(),u:1}));d.state=next;};
+ manual(a,'2026-10-14T08:50:00.000Z');sync(a,b);const prior=b.stamps.get('timelineIntervals/x#end');
+ t=2000;const next=structuredClone(b.state);next.timelineIntervals[0].end='2026-10-14T08:55:00.000Z';S.stampChanges(b.stamps,S.diff(b.state,next),()=>({...b.next(),a:1,b:[{o:prior.o,n:prior.n}]}));b.state=next;
+ manual(a,'2026-10-14T08:38:00.000Z');sync(b,a);assert.equal(a.state.timelineIntervals[0].end,'2026-10-14T08:38:00.000Z');assert.equal(visible(a),visible(b));
+});
+
+test('an automatic deletion and structural repair cannot remove or retime an explicit human edit',()=>{
+ let t=1000;const a=device('pc',base,()=>t),b=device('phone',base,()=>t);sync(a,b);
+ const next=structuredClone(a.state);next.timelineIntervals[0].followNow=true;S.stampChanges(a.stamps,S.diff(a.state,next),()=>({...a.next(),u:1}));a.state=next;sync(a,b);
+ t=5000;b.auto(s=>{s.timelineIntervals=s.timelineIntervals.filter(i=>i.id!=='x');});sync(b,a);assert.ok(a.state.timelineIntervals.some(i=>i.id==='x'));assert.equal(visible(a),visible(b));
+ const state=structuredClone(a.state);state.timelineIntervals.push({id:'late-clock',rowId:'r1',start:'2026-10-14T10:00:00.000Z',end:'2026-10-14T11:00:00.000Z',followNow:true});
+ const repaired=S.repair(state,a.stamps);assert.equal(repaired.state.timelineIntervals.find(i=>i.id==='x').followNow,true);
+});

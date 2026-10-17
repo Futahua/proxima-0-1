@@ -79,7 +79,7 @@
   async function replaceAll(projection,from){
     if(!projection?.records)throw Error('That device sent no Proxima data.');
     await ProximaPersistence.ready;await Store.flushCommands();
-    const write=async()=>{const current=await ProximaPersistence.read();await backup(current,'Before copying from '+from);await ProximaPersistence.write(stateFrom(projection,current));};
+    const write=async()=>{const current=await ProximaPersistence.read();await backup(current,'Before copying from '+from);await ProximaPersistence.write(stateFrom(projection,current),{origin:'human',type:'device-copy.replace'});};
     if(navigator.locks)await navigator.locks.request('proxima-store-write',write);else await write();
     setTimeout(()=>location.reload(),300);
     return {replaced:true};
@@ -185,7 +185,7 @@
     addEventListener('load',async()=>{
       await ProximaPersistence.ready;
       const write=ProximaPersistence.write.bind(ProximaPersistence);
-      ProximaPersistence.write=async state=>{const result=await write(state);publish();return result;};
+      ProximaPersistence.write=async (state,intent)=>{const result=await write(state,intent);publish();return result;};
       publish();
     },{once:true});
     addEventListener('message',async event=>{

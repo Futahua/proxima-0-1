@@ -48,10 +48,13 @@
   /** Had a device whose knowledge was `context` seen stamp `s`? */
   const seen=(context,s)=>!!s&&((context&&context[s.o])||0)>=s.n;
   const sameStamp=(a,b)=>!!a&&!!b&&a.o===b.o&&a.n===b.n;
+  const authorized=(automatic,human)=>automatic.a&&automatic.b?.some(base=>sameStamp(base,human));
+  const supersedes=(later,earlier)=>seen(later.c,earlier)&&(!earlier.u||later.u||authorized(later,earlier));
+  const provenance=s=>({...s.u?{u:1}:{},...s.action?{action:s.action}:{},...s.b?.length?{b:s.b}:{}});
   // `a` marks an automatic edit (a queue freezing when its time is up, a repair after a merge): any edit
   // the creator made shows over it, and it never asks to be chosen (conflictsOf).
-  const plain=s=>{const out={h:s.h,o:s.o,n:s.n,c:s.c||{}};if(s.a)out.a=1;if(s.alt?.length)out.alt=s.alt.map(a=>{const x={h:a.h,o:a.o,n:a.n,c:a.c||{}};if(a.a)x.a=1;if('v' in a)x.v=a.v;return x;});return out;};
-  const bare=s=>{const out={h:s.h,o:s.o,n:s.n,c:s.c||{}};if(s.a)out.a=1;return out;};
+  const plain=s=>{const out={h:s.h,o:s.o,n:s.n,c:s.c||{},...provenance(s)};if(s.a)out.a=1;if(s.alt?.length)out.alt=s.alt.map(a=>{const x={h:a.h,o:a.o,n:a.n,c:a.c||{},...provenance(a)};if(a.a)x.a=1;if('v' in a)x.v=a.v;return x;});return out;};
+  const bare=s=>{const out={h:s.h,o:s.o,n:s.n,c:s.c||{},...provenance(s)};if(s.a)out.a=1;return out;};
   const withSnapshot=s=>{const out=bare(s);if(s.v!==undefined)out.v=s.v;if(s.also?.length)out.also=s.also.map(bare);return out;};
   /** Every concurrent deletion of a record: its stamp plus the others kept in `also`. */
   const deletionsOf=t=>t?[bare(t),...(t.also||[]).map(bare)]:[];
@@ -82,8 +85,8 @@
     for(const change of changes){
       // A deletion carries the record as it was, so a device that later sees it revived (by an edit
       // the deleter had not seen) can restore the fields it had thrown away.
-      if(change.deleted){const tomb=next();if(change.record)tomb.v=structuredClone(change.record);stamps.set(change.key+'#'+TOMB,tomb);keepValues(stamps,change.key,change.record);continue;}
-      for(const field of change.fields)stamps.set(change.key+'#'+field,next());
+      if(change.deleted){const tomb=next(change.key,TOMB);if(change.record)tomb.v=structuredClone(change.record);stamps.set(change.key+'#'+TOMB,tomb);keepValues(stamps,change.key,change.record);continue;}
+      for(const field of change.fields)stamps.set(change.key+'#'+field,next(change.key,field));
     }
   }
   /** Stamps every field of every record not stamped yet (the first run on a device). */
@@ -116,16 +119,25 @@
   }
 
   /** Is the record alive: some field was edited without its deleter having seen that edit? */
-  function aliveUnder(tomb,fieldStamps){if(!tomb)return true;const context=deletionContext(tomb);return fieldStamps.some(s=>!seen(context,s));}
+  function aliveUnder(tomb,fieldStamps){if(!tomb)return true;const context=deletionContext(tomb);return fieldStamps.some(s=>!seen(context,s)||s.u&&!deletionsOf(tomb).some(d=>supersedes(d,s)));}
 
   /** Merges a peer's changes. Returns {state, changed, touched, overwritten}; `stamps` is updated in
    * place. overwritten: [{key, field, before, by}] — values replaced by edits that had seen them, kept
    * as history. Conflicts are read from the stamps afterwards (conflictsOf). */
   function merge(state,stamps,incoming){
     const records=recordsOf(state),touched=[],overwritten=[];
+    const pending=[...incoming];
+    // A legacy peer may have removed its own record before learning that the
+    // deletion lacked authority. Re-materialize retained human values even if
+    // its vector already acknowledges those field stamps.
+    for(const [stampKey,tomb] of stamps)if(stampKey.endsWith('#'+TOMB)){
+      const key=recordKeyOf(stampKey);if(records.has(key)||pending.some(change=>change.key===key))continue;
+      const fields=Object.fromEntries([...stamps].filter(([k])=>recordKeyOf(k)===key&&!k.endsWith('#'+TOMB)).map(([k,s])=>[k.slice(key.length+1),{...plain(s),...('v' in s?{v:s.v}:{})}]));
+      if(Object.values(fields).some(s=>s.u&&!deletionsOf(tomb).some(d=>supersedes(d,s))))pending.push({key,fields,tomb});
+    }
     const fieldsOf=new Map(); // record key -> its field stamp keys (not the deletion)
     for(const key of stamps.keys())if(!key.endsWith('#'+TOMB)){const record=recordKeyOf(key);if(!fieldsOf.has(record))fieldsOf.set(record,new Set());fieldsOf.get(record).add(key);}
-    for(const change of incoming){
+    for(const change of pending){
       const key=change.key,collection=key.split('/')[0];
       if(!COLLECTIONS.includes(collection)&&!SINGLETONS.includes(collection))continue;
       const before=records.has(key)?records.get(key):null;
@@ -135,7 +147,7 @@
       // shows), so every device combines the same set, whichever order they arrive in.
       if(change.tomb){
         const all=[];for(const d of [...deletionsOf(localTomb),...deletionsOf(change.tomb)])if(!all.some(x=>sameStamp(x,d)))all.push(d);
-        const current=all.filter(x=>!all.some(y=>y!==x&&seen(y.c,x))).sort((a,b)=>a.h<b.h?1:a.h>b.h?-1:0);
+        const current=all.filter(x=>!all.some(y=>y!==x&&supersedes(y,x))).sort((a,b)=>(b.u?1:0)-(a.u?1:0)||(a.h<b.h?1:a.h>b.h?-1:0));
         const snapshot={...(localTomb?.v||{}),...(change.tomb.v||{})};
         const next={...current[0]};if(current.length>1)next.also=current.slice(1);if(Object.keys(snapshot).length)next.v=snapshot;
         stamps.set(key+'#'+TOMB,next);
@@ -151,9 +163,9 @@
         if(local){const kept=!haveValue&&'v' in local;add(local,haveValue?record[field]:kept?local.v:undefined,haveValue||kept);for(const a of local.alt||[])add(a,a.v,'v' in a);}
         add(entry,entry.v,'v' in entry);for(const a of entry.alt||[])add(a,a.v,'v' in a);
         // Versions some other version had seen are superseded; the rest are concurrent.
-        const current=candidates.filter(x=>!candidates.some(y=>y!==x&&seen(y.s.c,x.s)));
+        const current=candidates.filter(x=>!candidates.some(y=>y!==x&&supersedes(y.s,x.s)));
         // The creator's own edits show over automatic ones; otherwise the later edit shows.
-        current.sort((a,b)=>(a.s.a?1:0)-(b.s.a?1:0)||(a.s.h<b.s.h?1:a.s.h>b.s.h?-1:0));
+        current.sort((a,b)=>(b.s.u?1:0)-(a.s.u?1:0)||(a.s.a?1:0)-(b.s.a?1:0)||(a.s.h<b.s.h?1:a.s.h>b.s.h?-1:0));
         // Every concurrent version is kept (equal values too): what each device knows of a version's value can
         // differ (a local deletion loses it), so filtering here would let devices keep different sets.
         const winner=current[0],alt=current.slice(1).map(x=>x.has?{...x.s,v:structuredClone(x.v)}:{...x.s});
@@ -229,7 +241,7 @@
   function vectorOf(stamps){const out={};for(const s of stamps.values())if((out[s.o]||0)<s.n)out[s.o]=s.n;return out;}
 
   /** Cross-record repairs after a merge. Deterministic; returns {state, notes}. */
-  function repair(state){
+  function repair(state,stamps){
     const notes=[];let next=state;
     const intervals=Array.isArray(state.timelineIntervals)?state.timelineIntervals:[],rows=Array.isArray(state.timelineRows)?state.timelineRows:[];
     const ids=new Set(intervals.map(item=>item.id));
@@ -249,7 +261,7 @@
       if(items.length<2)continue;
       items.sort((a,b)=>Date.parse(b.start)-Date.parse(a.start)||(a.id<b.id?-1:1));
       const keep=items[0];
-      for(const item of items.slice(1)){const end=new Date(Math.max(Date.parse(item.start)+1,Date.parse(keep.start))).toISOString();ended.set(item.id,{...item,followNow:false,end});}
+      for(const item of items.slice(1)){if(['followNow','end'].some(field=>stamps?.get('timelineIntervals/'+item.id+'#'+field)?.u))continue;const end=new Date(Math.max(Date.parse(item.start)+1,Date.parse(keep.start))).toISOString();ended.set(item.id,{...item,followNow:false,end});}
       notes.push('Two sessions were live in "'+((rows.find(r=>r.id===row)||{}).name||keep.name||'a row')+'"; the earlier one was ended when the later one started.');
     }
     // Row order: duplicates (two devices moved rows at once) are renumbered by order, then identity.
@@ -257,7 +269,7 @@
     if(new Set(orders).size!==orders.length){
       const sorted=[...rowsOut].sort((a,b)=>(Number.isFinite(a.rowOrder)?a.rowOrder:Infinity)-(Number.isFinite(b.rowOrder)?b.rowOrder:Infinity)||(String(a.id)<String(b.id)?-1:1));
       const position=new Map(sorted.map((row,index)=>[row.id,index]));
-      rowsOut=rowsOut.map(row=>Number.isFinite(row.rowOrder)&&row.rowOrder!==position.get(row.id)?{...row,rowOrder:position.get(row.id)}:row);
+      rowsOut=rowsOut.map(row=>!stamps?.get('timelineRows/'+row.id+'#rowOrder')?.u&&Number.isFinite(row.rowOrder)&&row.rowOrder!==position.get(row.id)?{...row,rowOrder:position.get(row.id)}:row);
       notes.push('Rows moved on two devices at once were put in one order.');
     }
     if(rowsOut.some((row,index)=>row!==rows[index]))next={...next,timelineRows:rowsOut};

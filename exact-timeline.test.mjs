@@ -70,3 +70,24 @@ test('a shift extension that stays in its row keeps the displayed row order',asy
   const d=store.timelineIntervals().find(x=>x.id===ids[3]);const extended=await store.command({type:'timeline-queue.extend-selection',payload:{intervalIds:[d.id],revisions:{[d.id]:d.rev},time:'2026-10-11T02:00:00Z',edge:'end',index:2,reorder:false}});assert.equal(extended.ok,true);assert.equal(shown(),'B,C,D,A');assert.equal(rows(),'B,C,D,A');
   // A row whose stored order lags its intervals (as after an undo) still renumbers by what is shown.
   await store.command({type:'timeline.undo'});await store.command({type:'timeline.undo'});assert.equal(shown(),'A,B,C,D');const b=store.timelineIntervals().find(x=>x.id===ids[1]);assert.equal((await store.command({type:'timeline-queue.extend-selection',payload:{intervalIds:[b.id],revisions:{[b.id]:b.rev},time:'2026-10-11T03:00:00Z',edge:'end',index:1,reorder:false}})).ok,true);assert.equal(shown(),'A,B,C,D');assert.equal(rows(),'A,B,C,D');});
+
+test('queuing a different blob merges instead of restoring the existing group',()=>{
+ const choose=ctx.ExactTimeline.queueSelectionAction,rows=[{id:'group',queueReturn:{}}];
+ assert.equal(choose([{id:'a',rowId:'group'},{id:'new',rowId:'new-row'}],rows),'collapse');
+ assert.equal(choose([{id:'a',rowId:'group'},{id:'b',rowId:'group'}],rows),'restore');
+ assert.equal(choose([{id:'a',queueId:'live'},{id:'new',rowId:'new-row'}],rows),'enqueue');
+ assert.equal(choose([{id:'a',rowId:'group'},{id:'b',rowId:'other'}],[...rows,{id:'other',queueReturn:{}}]),'collapse');
+});
+
+test('incremental collapse retains all old members, colors and atomic undo instead of returning them',async()=>{
+ const c=vm.createContext({location:{search:'',protocol:'file:',hostname:'',port:''},localStorage:{getItem:()=>null,setItem:()=>{}},URLSearchParams,structuredClone,crypto:webcrypto,console,setTimeout,clearTimeout});vm.runInContext(await readStoreCode()+'\nglobalThis.store=Store;',c);const store=c.store,base=Date.now()-1000000,records=[];
+ for(let i=0;i<4;i++)records.push((await store.command({type:'timeline-interval.create',payload:{name:'blob '+i,start:new Date(base+i*10000).toISOString(),end:new Date(base+100000+i*10000).toISOString(),color:['#dd6688','#66bbcc','#aabb66','#778899'][i]}})).value);
+ const colors=Object.fromEntries(records.map((x,i)=>[x.id,['#dd6688','#66bbcc','#aabb66','#778899'][i]]));
+ assert.equal((await store.command({type:'timeline-queue.collapse',payload:{intervalIds:records.slice(0,3).map(x=>x.id),colors}})).ok,true);
+ const before=store.timelineIntervals().map(x=>({...x}));
+ assert.equal((await store.command({type:'timeline-queue.collapse',payload:{intervalIds:[records[1].id,records[3].id],colors}})).ok,true);
+ let merged=store.timelineIntervals();assert.equal(merged.length,4);assert.equal(new Set(merged.map(x=>x.rowId)).size,1);for(const old of before.slice(0,3)){const current=merged.find(x=>x.id===old.id);assert.equal(current.color,old.color);assert.equal(current.name,old.name);assert.equal(current.end,old.end);}
+ assert.equal((await store.command({type:'timeline.undo'})).ok,true);for(const old of before){const current=store.timelineIntervals().find(x=>x.id===old.id);for(const key of ['rowId','start','end','color'])assert.equal(current[key],old[key]);}
+ assert.equal((await store.command({type:'timeline.redo'})).ok,true);assert.equal(new Set(store.timelineIntervals().map(x=>x.rowId)).size,1);
+ assert.equal((await store.command({type:'timeline-queue.restore',payload:{intervalId:records[3].id}})).ok,true);for(const original of records){const current=store.timelineIntervals().find(x=>x.id===original.id);assert.equal(current.rowId,original.rowId);assert.equal(current.start,original.start);}
+});
