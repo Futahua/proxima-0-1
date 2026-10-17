@@ -58,8 +58,17 @@
   // Sync requests ride the replace route; whole copies from a device still running the authority
   // model are refused, because they would overwrite edits.
   const replaceAll=root.__proximaReplaceAll;
+  // A device that just reached this one is online, so a backoff from when it was unreachable must not
+  // keep this side from syncing back (and recording its acknowledgement) for up to 30 minutes. At most
+  // once a minute, so a device that is still unreachable is not retried on every contact.
+  let contactAt=0;
+  function peerContact(){
+    if(Date.now()-contactAt<60000)return;contactAt=Date.now();let retry=false;
+    for(const [id,value] of status)if(value.state==='failed'&&value.retryAt>Date.now()){status.set(id,{...value,retryAt:0});retry=true;}
+    if(retry)schedule(1000);
+  }
   if(replaceAll)root.__proximaReplaceAll=(projection,from)=>{
-    if(projection?.proximaSync)return sync.exchange(projection.proximaSync).then(proximaSync=>({proximaSync}));
+    if(projection?.proximaSync){peerContact();return sync.exchange(projection.proximaSync).then(proximaSync=>({proximaSync}));}
     if(projection?.mirror)throw Error('This device now syncs instead of taking whole copies; update '+(projection.mirror.name||'the sending device')+'.');
     return replaceAll(projection,from);
   };
