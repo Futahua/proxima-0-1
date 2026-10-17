@@ -44,6 +44,8 @@
  }
  async function flush(){if(!frame)return;const requestId=crypto.randomUUID();return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{flushes.delete(requestId);reject(Error('The file pane has not confirmed saving yet.'));},15000);flushes.set(requestId,{resolve,reject,timer});frame.contentWindow.postMessage({type:'proxima:workspace:flush',workspaceId:ROOT,requestId},origin);});}
  async function report(){try{const peers=(await root.__proximaDeviceCopy?.devices())?.others||[],state=await root.ProximaWorkspaces.status(ROOT,peers),errors=[...root.ProximaWorkspaces.errors.values()];pane.parts.status.textContent=state.label+(errors.length?' · '+errors[0].message:'');pane.parts.status.dataset.state=errors.length?'error':state.kind;
+  // Nothing shows while everything is synced; waiting, conflicts and errors always do.
+  pane.parts.status.hidden=!errors.length&&['synced','local'].includes(state.kind);
   const conflicts=await root.ProximaWorkspaces.conflicts(ROOT);const area=pane.parts.conflicts;area.replaceChildren();area.hidden=!conflicts.length;
   for(const conflict of conflicts){const row=document.createElement('div'),title=document.createElement('strong');title.textContent=conflict.name+' — both versions kept';row.append(title);for(const version of conflict.versions||[]){if(version.kind!=='content')continue;const choose=document.createElement('button');choose.type='button';choose.textContent='Keep '+version.device+' · '+version.hash.slice(0,7);choose.onclick=async()=>{choose.disabled=true;try{await root.ProximaWorkspaces.restore(ROOT,conflict.entryId,version.id);await report();}catch(error){pane.parts.status.textContent=error.message;choose.disabled=false;}};row.append(choose);}area.append(row);}
  }catch(e){pane.parts.status.textContent=e.message;}}
@@ -51,10 +53,12 @@
  async function mount(id,{force=false}={}){build();const item=Store.timelineIntervals().find(x=>x.id===id);if(!item)throw Error('This blob no longer exists.');pane.hidden=false;selected=id;pane.parts.title.textContent=item.name;
   if(isV2(item)&&!folders.has(item.template.folderId))await readFolders();
   if(!propagated(item)){
+   pane.classList.remove('has-folder');pane.parts.status.hidden=false;
    pane.parts.select.value='';await flush().catch(()=>{});closeFrame();
    pane.parts.body.textContent=isV2(item)?'This blob’s folder was deleted. Choose As you Go to give it a new one.':'Choose As you Go to give this blob its own folder.';pane.parts.status.textContent='';pane.parts.conflicts.hidden=true;return;
   }
-  pane.parts.select.value='as-you-go';
+  // With a folder open the pane has no header: As you Go's own strip carries the close button.
+  pane.parts.select.value='as-you-go';pane.classList.add('has-folder');
   const folderId=item.template.folderId;
   // Opening (or choosing) creates the folder if it is not here yet, and keeps its name the blob's.
   const folder=await root.ProximaWorkspaces.ensureFolder(ROOT,folderId,item.name);folders.set(folderId,folder);
@@ -68,6 +72,7 @@
  }
  function open(id){chain=chain.catch(()=>{}).then(()=>mount(id)).catch(e=>{build();pane.hidden=false;pane.parts.status.textContent=e.message;});return chain;}
  addEventListener('message',event=>{if(!frame||event.source!==frame.contentWindow||event.origin!==origin||event.data?.workspaceId!==ROOT)return;const v=event.data;
+  if(v.type==='proxima:workspace:close'){pane.hidden=true;return;}
   if(v.type==='proxima:workspace:flushed'){const t=flushes.get(v.requestId);if(t){flushes.delete(v.requestId);clearTimeout(t.timer);v.ok?t.resolve():t.reject(Error(v.error));}return;}
   if(v.type!=='proxima:workspace:request'||typeof v.requestId!=='string'||!Array.isArray(v.args))return;
   const source=event.source,target=origin;Promise.resolve(root.ProximaWorkspaces.frameCall(ROOT,v.method,v.args)).then(result=>source.postMessage({type:'proxima:workspace:result',requestId:v.requestId,workspaceId:ROOT,ok:true,result},target),error=>source.postMessage({type:'proxima:workspace:result',requestId:v.requestId,workspaceId:ROOT,ok:false,error:error.message},target));

@@ -94,6 +94,7 @@
       return call(method==='launch'?'open':'reveal',{path:item.target});
     }
     if(method==='resolve-dropped')return (await request('papers:project:resolve-dropped-targets',{files:args[0]})).targets;
+    if(method==='resolve-web-icon'){const {type,requestId,ok,...result}=await request('papers:project:resolve-web-link-icon',{url:String(args[0]||'')});return result;}
     if(method==='pick-target')return (await request('papers:project:as-you-go-pick-target',{kind:args[0]})).target;
     if(method==='pick-phone')return (await request('papers:phone:pick-files')).picked;
     if(method==='file'){
