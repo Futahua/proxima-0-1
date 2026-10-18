@@ -106,6 +106,8 @@ test('a device that only reaches another through a relay still learns that it ca
   const others=[{id:'hub',name:'SlopTop'},{id:'phone2',name:'Poordroid'}];
   // SlopTop syncs with every device it reaches (here the phone), recording what each confirmed.
   await sync(laptop,hub);await sync(hub,phone);
+  // The phone replies before applying files; its next exchange reports them applied.
+  await phone.replica.reconcile();await sync(hub,phone);
   assert.equal((await laptop.replica.status('w',others)).kind,'waiting');
   await sync(laptop,hub);
   const state=await laptop.replica.status('w',others);

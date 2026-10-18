@@ -179,7 +179,11 @@
         for(const stamp of stamps.values())journal.clock=S.witness(journal.clock,stamp.h);
         return {workspaceProtocol:1,node:journal.node,vv:structuredClone(journal.vv),acks:structuredClone(journal.peers),changes:S.changesSince(journal.state,stamps,message.vv),needed:await needed(journal),contentRoot:(await files({operation:'content-root'})).transportPath??(await files({operation:'content-root'})).path};
       });
-      await reconcile();reply.pending=(await transaction(journal=>publications(journal))).length;return reply;
+      // Reply first, then apply the received changes to files: on the phone that work can take far
+      // longer than the asking device waits (re-checking or copying hundreds of MB).
+      reply.pending=(await transaction(journal=>publications(journal))).length;
+      void reconcile().catch(()=>{});
+      return reply;
     }
     async function runLimited(jobs,limit){
       const failures=[];let next=0;
