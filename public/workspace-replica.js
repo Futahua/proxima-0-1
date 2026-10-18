@@ -162,17 +162,27 @@
     }
     async function needed(journal){const out=[];for(const value of journal.state.workspaceVersions)if(value.kind==='content'&&!out.some(x=>x.hash===value.hash)&&!(await files({operation:'content-check',hash:value.hash})).available)out.push({hash:value.hash,size:value.size});return out;}
     async function publications(journal,workspaceId=null){const out=[];for(const entry of journal.state.workspaceEntries){if(entry.kind!=='shortcut'||!entry.workspaceFileId||workspaceId&&entry.workspaceId!==workspaceId)continue;const inspection=W.inspect(journal.state,entry.workspaceId,entry.workspaceFileId);if(inspection.conflict||inspection.heads.length!==1)continue;const binding=await files({operation:'path',workspaceId:entry.workspaceId,entryId:entry.workspaceFileId,name:entry.workspaceFilename||entry.name});if(binding.versionId!==inspection.heads[0].id)out.push(entry.id);}return out;}
+    // What each device has confirmed, as known here. Exchanges carry it on, so a device that cannot
+    // reach another directly (the phone only over SlopTop's cable) still learns that it caught up.
+    function mergeAcks(journal,acks){
+      if(!acks||typeof acks!=='object')return;
+      for(const [id,ack] of Object.entries(acks)){
+        if(!ack||typeof ack!=='object'||!ack.vv||typeof ack.vv!=='object')continue;
+        const known=journal.peers[id],newer=(ack.at||0)>(known?.at||0);
+        journal.peers[id]={name:known?.name||ack.name,node:known?.node||ack.node,vv:S.joinVectors(known?.vv||{},ack.vv),at:Math.max(known?.at||0,ack.at||0),waiting:newer?ack.waiting||0:known.waiting||0};
+      }
+    }
     async function exchange(message){
       if(message?.workspaceProtocol!==1||!message.vv||!Array.isArray(message.changes))throw Error('Unsupported workspace exchange.');
       const reply=await transaction(async(journal,stamps)=>{
-        const result=W.merge(journal.state,stamps,message.changes);journal.state=result.state;journal.vv=S.joinVectors(journal.vv,message.vv);
+        const result=W.merge(journal.state,stamps,message.changes);journal.state=result.state;journal.vv=S.joinVectors(journal.vv,message.vv);mergeAcks(journal,message.acks);
         for(const stamp of stamps.values())journal.clock=S.witness(journal.clock,stamp.h);
-        return {workspaceProtocol:1,node:journal.node,vv:structuredClone(journal.vv),changes:S.changesSince(journal.state,stamps,message.vv),needed:await needed(journal),contentRoot:(await files({operation:'content-root'})).transportPath??(await files({operation:'content-root'})).path};
+        return {workspaceProtocol:1,node:journal.node,vv:structuredClone(journal.vv),acks:structuredClone(journal.peers),changes:S.changesSince(journal.state,stamps,message.vv),needed:await needed(journal),contentRoot:(await files({operation:'content-root'})).transportPath??(await files({operation:'content-root'})).path};
       });
       await reconcile();reply.pending=(await transaction(journal=>publications(journal))).length;return reply;
     }
     async function syncWith(peer,send){
-      await reconcile();const message=await transaction(async(journal,stamps)=>({workspaceProtocol:1,vv:structuredClone(journal.vv),changes:S.changesSince(journal.state,stamps,journal.peers[peer.id]?.vv||{})}));
+      await reconcile();const message=await transaction(async(journal,stamps)=>({workspaceProtocol:1,vv:structuredClone(journal.vv),acks:structuredClone(journal.peers),changes:S.changesSince(journal.state,stamps,journal.peers[peer.id]?.vv||{})}));
       const reply=await send(message);if(reply?.workspaceProtocol!==1)throw Error('Update the other device to sync blob workspaces.');
       await exchange(reply);
       const ownRoot=await files({operation:'content-root'});
@@ -180,8 +190,8 @@
       const remoteRoot='\\\\papers~'+peer.id+'\\'+reply.contentRoot;
       for(const item of localNeeded)if(!(reply.needed||[]).some(missing=>missing.hash===item.hash))await copy([remoteRoot+'\\'+item.hash],ownRoot.path);
       for(const item of reply.needed||[]){const source=await files({operation:'content-check',hash:item.hash});if(source.available)await copy([source.path],remoteRoot);}
-      const confirmed=await send({workspaceProtocol:1,vv:reply.vv,changes:[]});
-      await transaction(async journal=>{journal.peers[peer.id]={name:peer.name,node:confirmed.node,vv:confirmed.vv,at:now(),waiting:(confirmed.needed?.length||0)+(confirmed.pending||0)};});
+      const confirmed=await send({workspaceProtocol:1,vv:reply.vv,changes:[],acks:await transaction(async journal=>structuredClone(journal.peers))});
+      await transaction(async journal=>{journal.peers[peer.id]={name:peer.name,node:confirmed.node,vv:confirmed.vv,at:now(),waiting:(confirmed.needed?.length||0)+(confirmed.pending||0)};mergeAcks(journal,confirmed.acks);});
       await reconcile();return {ok:true};
     }
     async function status(workspaceId,devices=[]){return transaction(async(journal,stamps)=>{

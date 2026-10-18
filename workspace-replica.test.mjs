@@ -100,3 +100,14 @@ test('an entry that is not in the kill bin cannot be emptied',async()=>{
   await assert.rejects(a.replica.save('w',loaded.state,loaded.revision),/kill bin/);
   assert.equal((await a.replica.load('w')).state.shortcuts.length,1);
 });
+test('a device that only reaches another through a relay still learns that it caught up',async()=>{
+  // LapDog cannot reach the phone; both sync with SlopTop. LapDog must not wait for the phone forever.
+  const laptop=device('laptop'),hub=device('hub'),phone=device('phone2');await link(laptop);
+  const others=[{id:'hub',name:'SlopTop'},{id:'phone2',name:'Poordroid'}];
+  // SlopTop syncs with every device it reaches (here the phone), recording what each confirmed.
+  await sync(laptop,hub);await sync(hub,phone);
+  assert.equal((await laptop.replica.status('w',others)).kind,'waiting');
+  await sync(laptop,hub);
+  const state=await laptop.replica.status('w',others);
+  assert.equal(state.kind,'synced',JSON.stringify(state));
+});
