@@ -20,9 +20,18 @@
   const files=detail=>call('workspace-files',detail);
   const updates=typeof BroadcastChannel==='function'?new BroadcastChannel('proxima-workspace-updates'):null;
   updates?.addEventListener('message',event=>{dispatchEvent(new Event('proxima:workspace-changed'));if(event.data?.records)dispatchEvent(new Event('proxima-sync:local-change'));});
-  const replica=root.ProximaWorkspaceReplica.create({storage:{load:()=>files({operation:'journal-load'}),save:(state,revision)=>files({operation:'journal-save',state,revision})},files,copy:(paths,destination)=>call('copy',{paths,destination}),changed:change=>{updates?.postMessage(change);dispatchEvent(new Event('proxima:workspace-changed'));if(change?.records)dispatchEvent(new Event('proxima-sync:local-change'));}});
+  const replica=root.ProximaWorkspaceReplica.create({storage:{load:()=>files({operation:'journal-load'}),save:(state,revision)=>files({operation:'journal-save',state,revision})},files,copy:(paths,destination)=>call('copy',{paths,destination}),verifyDurable:async hashes=>{const api=root.__proximaDeviceCopy;if(!api)return [];const list=await api.devices(),bop=list.others.find(d=>d.id==='44091a08-55e1-46b8-8fa7-df60366779c2'||/^bop$/i.test(d.name));if(!bop)return [];return (await api.exchange(bop,{workspaceProtocol:1,cacheProof:true,hashes})).available||[];},changed:change=>{updates?.postMessage(change);dispatchEvent(new Event('proxima:workspace-changed'));if(change?.records)dispatchEvent(new Event('proxima-sync:local-change'));}});
   let reconciling=null;
-  function reconcile(){return reconciling??=(replica.reconcile().then(issues=>{if(issues.length)errors.set('local',{message:issues[0].message});else errors.delete('local');return issues;}).finally(()=>{reconciling=null;}));}
+  function reconcile(){return reconciling??=(replica.reconcile().then(async issues=>{if(issues.length)errors.set('local',{message:issues[0].message});else errors.delete('local');await replica.maintainCache();return issues;}).finally(()=>{reconciling=null;}));}
+  async function download(workspaceId,entryId){
+    const wanted=await replica.requestLocal(workspaceId,entryId);await replica.reconcile();
+    if(!(await files({operation:'content-check',hash:wanted.hash})).available){
+      const api=root.__proximaDeviceCopy,list=await api.devices();let error;
+      for(const peer of [...list.others].sort((a,b)=>Number(/^bop$/i.test(b.name))-Number(/^bop$/i.test(a.name))))try{await replica.syncWith(peer,message=>api.exchange(peer,message));if((await files({operation:'content-check',hash:wanted.hash})).available)break;}catch(e){error=e;}
+      if(!(await files({operation:'content-check',hash:wanted.hash})).available)throw error||Error('No connected device has this file. Its folder entry is kept.');
+    }
+    await replica.reconcile();return replica.entry(workspaceId,entryId);
+  }
   const errors=new Map();
   async function syncWith(peer,send){try{await replica.syncWith(peer,send);errors.delete(peer.id);}catch(error){errors.set(peer.id,{name:peer.name,message:error.message});throw error;}}
   // Pictures in the synced root travel to every device inside its records and are only shown as
@@ -88,10 +97,13 @@
     return item?{item,history:await replica.history(workspaceId,item.workspaceFileId)}:null;
   }
   async function target(workspaceId,detail){
-    let found=await find(workspaceId,detail);
+    let found=detail.targetId?await replica.entry(workspaceId,detail.targetId,{observe:true}):null;
+    if(!found){
+      const candidate=await find(workspaceId,detail);
+      if(candidate)found=await replica.entry(workspaceId,candidate.item.workspaceFileId,{observe:true});
+    }
     if(!found)throw Error('This file has not been imported into this workspace.');
-    const available=await files({operation:'path',workspaceId,entryId:found.item.workspaceFileId,name:found.item.workspaceFilename||found.item.name});
-    if(available.available&&await replica.capture(workspaceId,found.item.workspaceFileId,found.item.workspaceFilename||found.item.name))found=await find(workspaceId,{targetId:found.item.workspaceFileId});
+    const available=found.binding;
     const {item,history}=found;
     return {item,target:{targetId:item.workspaceFileId,id:item.workspaceFileId,path:item.target,name:item.name,kind:'file',revision:history.versions.length+1,status:available.available&&item.workspaceAvailability==='local'?'present':history.deleted?'deleted':'unavailable'}};
   }
@@ -125,8 +137,9 @@
     }
     if(method==='flush'){await replica.flush();return {ok:true};}
     if(method==='launch'||method==='reveal'){
-      const item=(await replica.entry(workspaceId,args[0]))?.item||(await replica.load(workspaceId)).state.shortcuts.find(item=>item.id===args[0]);if(!item)throw Error('That workspace entry is unavailable.');
-      if(item.workspaceAvailability==='pending')throw Error('This file is waiting to download to this device.');
+      let item=(await replica.entry(workspaceId,args[0]))?.item||(await replica.load(workspaceId)).state.shortcuts.find(item=>item.id===args[0]);if(!item)throw Error('That workspace entry is unavailable.');
+      if(item.workspaceFileId&&item.workspaceAvailability!=='local')item=(await download(workspaceId,item.workspaceFileId)).item;
+      if(phone&&item.workspaceFileId)await files({operation:'cache-protect',workspaceId,entryId:item.workspaceFileId,name:item.workspaceFilename||item.name});
       return call(method==='launch'?'open':'reveal',{path:item.target});
     }
     // Dropped File objects lose their disk paths crossing from the pane into this page, and Papers then
@@ -138,6 +151,7 @@
     if(method==='pick-phone')return (await request('papers:phone:pick-files')).picked;
     if(method==='file'){
       const [operation,detail={}]=args;
+      if(operation==='workspace-download'){const found=await target(workspaceId,detail);await download(workspaceId,found.item.workspaceFileId);return {ok:true,target:(await target(workspaceId,detail)).target};}
       if(operation.startsWith('file-target-')){
         const found=await target(workspaceId,detail);
         if(operation==='file-target-delete'){
@@ -158,6 +172,7 @@
         await reconcile();return {ok:true,targets:[]};
       }
       if(['move','rename','workspace-files'].includes(operation))throw Error('Change managed files through their workspace entries.');
+      if(phone&&['open','reveal'].includes(operation)){const found=await target(workspaceId,detail);await files({operation:'cache-protect',workspaceId,entryId:found.item.workspaceFileId,name:found.item.workspaceFilename||found.item.name});}
       return call(operation,detail);
     }
     throw Error('That operation is not available in a blob file pane.');

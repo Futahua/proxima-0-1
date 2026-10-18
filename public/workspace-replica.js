@@ -2,7 +2,7 @@
  * This adapter reuses Proxima's merge rules. The native host owns actual bytes. */
 (function(root){
   'use strict';
-  function create({storage,files,copy,uuid=()=>crypto.randomUUID(),now=()=>Date.now(),changed=()=>{}}){
+  function create({storage,files,copy,uuid=()=>crypto.randomUUID(),now=()=>Date.now(),changed=()=>{},deferReconcile=true,allowCachePolicy=true,verifyDurable=async()=>[]}){
     const W=root.ProximaWorkspaceDomain,S=W.core;let tail=Promise.resolve();
     const fresh=()=>({version:1,node:uuid(),n:0,clock:null,vv:{},stamps:[],state:{workspaceEntries:[],workspaceVersions:[]},peers:{},views:{}});
     function serial(work){const next=tail.catch(()=>{}).then(work);tail=next;return next;}
@@ -42,21 +42,27 @@
       const binding=await files({operation:'path',workspaceId,entryId:item.workspaceFileId,name:item.workspaceFilename||item.name});item.target=binding.path;
       const inspection=W.inspect(journal.state,workspaceId,item.workspaceFileId);
       item.workspaceAvailability=binding.available&&(inspection.conflict||inspection.heads.some(v=>v.id===binding.versionId&&v.kind==='content'))?'local':'pending';item.workspaceConflict=inspection.conflict;
+      if(item.workspaceAvailability!=='local'&&inspection.heads.some(v=>journal.cache?.evicted?.[v.hash]))item.workspaceAvailability='evicted';
+      item.fileTarget={id:item.workspaceFileId,status:item.workspaceAvailability==='local'?'present':'unavailable',revision:journal.state.workspaceVersions.filter(v=>v.workspaceId===workspaceId&&v.entryId===item.workspaceFileId).length+1};
       // The same recoverable deletion appears in every replica's ordinary AYG Bin.
       if(inspection.deleted)for(const placement of item.placements)placement.bin??={parentId:placement.parentId,order:placement.order??0,binnedAt:'1970-01-01T00:00:00.000Z'};
       return binding;
     }
     // One file, without building the whole workspace: opening or checking a file asks the device
     // about that file only. Matches the file's id or its entry's id.
-    async function entry(workspaceId,id){
+    async function entry(workspaceId,id,{observe=false}={}){
       const snapshot=await transaction(async journal=>{
         const records=journal.state.workspaceEntries.filter(value=>value.workspaceId===workspaceId),value=records.find(e=>e.kind==='shortcut'&&e.workspaceFileId&&(e.workspaceFileId===id||e.recordId===id));if(!value)return null;
         const {workspaceId:_w,kind,id:_id,recordId,...item}=structuredClone(value);item.id=recordId;
         item.placements=records.filter(p=>p.kind==='placement'&&p.shortcutId===recordId).map(({workspaceId,kind,id,recordId,shortcutId,...p})=>({...p,id:recordId}));
-        return {item,journal:{state:{workspaceVersions:journal.state.workspaceVersions.filter(v=>v.workspaceId===workspaceId&&v.entryId===value.workspaceFileId)}}};
+        return {item,journal:{n:journal.n,cache:structuredClone(journal.cache||{}),state:{workspaceVersions:journal.state.workspaceVersions.filter(v=>v.workspaceId===workspaceId&&v.entryId===value.workspaceFileId)}}};
       });
-      if(!snapshot)return null;const {item,journal}=snapshot;await bind(journal,workspaceId,item);
-      return {item,history:{versions:journal.state.workspaceVersions,...W.inspect(journal.state,workspaceId,item.workspaceFileId)}};
+      if(!snapshot)return null;const {item,journal}=snapshot;
+      const binding=await bind(journal,workspaceId,item);
+      // Reuse this snapshot when the file is unchanged. A captured edit commits through
+      // the existing checked writer, then requires a fresh entry/version snapshot.
+      if(observe&&binding.available&&await capture(workspaceId,item.workspaceFileId,item.workspaceFilename||item.name))return entry(workspaceId,item.workspaceFileId);
+      return {item,binding,history:{versions:journal.state.workspaceVersions,...W.inspect(journal.state,workspaceId,item.workspaceFileId)}};
     }
     async function document(journal,workspaceId){
       const records=(journal.state.workspaceEntries||[]).filter(value=>value.workspaceId===workspaceId),groups=[],shortcuts=[];
@@ -112,13 +118,25 @@
     });}
     async function importFile(workspaceId,path,name,entryId=uuid()){
       const captured=await files({operation:'import',workspaceId,entryId,name,path});
+      await transaction(async journal=>{const cache=cacheOf(journal);(cache.ownHashes??={})[captured.hash]=true;});
       if(captured.baseVersion&&captured.hash===captured.baseHash)return {target:captured.path,name,workspaceFileId:entryId,kind:'file'};
       const proposed=uuid(),versionId=await transaction(async(journal,stamps)=>{const known=journal.state.workspaceVersions.find(v=>v.workspaceId===workspaceId&&v.entryId===entryId&&v.hash===captured.hash&&!v.parents.length);if(known)return known.id;author(journal,stamps,W.appendVersion(journal.state,{id:proposed,workspaceId,entryId,parents:[],kind:'content',hash:captured.hash,size:captured.size}));return proposed;});
       await files({operation:'publish',workspaceId,entryId,name,hash:captured.hash,versionId});
       return {target:captured.path,name,workspaceFileId:entryId,kind:'file'};
     }
+    async function receiveFile(workspaceId,path,name,parentId,entryId,placementId){
+      const captured=await files({operation:'import',workspaceId,entryId,name,path});
+      const versionId=await transaction(async(journal,stamps)=>{
+        const groups=new Map(journal.state.workspaceEntries.filter(x=>x.workspaceId===workspaceId&&x.kind==='group').map(x=>[x.recordId,x]));let parent=parentId;const visited=new Set();while(parent&&parent!=='root'){if(visited.has(parent)||!groups.has(parent)||groups.get(parent).bin)throw Error('This folder is unavailable.');visited.add(parent);parent=groups.get(parent).parentId;}
+        const existing=journal.state.workspaceEntries.find(x=>x.workspaceId===workspaceId&&x.kind==='shortcut'&&x.workspaceFileId===entryId);if(existing){const head=W.inspect(journal.state,workspaceId,entryId).heads;if(head.length!==1||head[0].hash!==captured.hash)throw Error('Upload identity changed.');return head[0].id;}
+        const version=uuid(),shortcut={id:recordKey(workspaceId,'shortcut',entryId),recordId:entryId,workspaceId,kind:'shortcut',name,description:'',workspaceFileId:entryId,workspaceFilename:name,icon:null},placement={id:recordKey(workspaceId,'placement',placementId),recordId:placementId,workspaceId,kind:'placement',shortcutId:entryId,parentId:parentId||'root',order:now()};
+        let next={...journal.state,workspaceEntries:[...journal.state.workspaceEntries,shortcut,placement]};next=W.appendVersion(next,{id:version,workspaceId,entryId,parents:[],kind:'content',hash:captured.hash,size:captured.size});author(journal,stamps,next);return version;
+      });
+      await files({operation:'publish',workspaceId,entryId,name,hash:captured.hash,versionId});return {entryId,hash:captured.hash,size:captured.size};
+    }
     async function capture(workspaceId,entryId,name){
       const observed=await files({operation:'capture',workspaceId,entryId,name});if(observed.hash===observed.baseHash)return;
+      await transaction(async journal=>{const cache=cacheOf(journal);(cache.ownHashes??={})[observed.hash]=true;});
       const proposed=uuid(),versionId=await transaction(async(journal,stamps)=>{const parents=observed.baseVersion?[observed.baseVersion]:[],known=journal.state.workspaceVersions.find(v=>v.workspaceId===workspaceId&&v.entryId===entryId&&v.hash===observed.hash&&JSON.stringify(v.parents)===JSON.stringify(parents));if(known)return known.id;author(journal,stamps,W.appendVersion(journal.state,{id:proposed,workspaceId,entryId,parents,kind:'content',hash:observed.hash,size:observed.size}),'observed');return proposed;});
       await files({operation:'publish',workspaceId,entryId,name,hash:observed.hash,versionId});return versionId;
     }
@@ -143,6 +161,52 @@
       return folderOf(journal,workspaceId,folderId);
     });}
     async function entries(){return transaction(async journal=>structuredClone(journal.state.workspaceEntries.filter(record=>record.kind==='shortcut'&&record.workspaceFileId)));}
+    function cacheOf(journal){return journal.cache??={enabled:false,evicted:{},arrivals:{},debt:0,wanted:{}};}
+    async function cachePolicy(enabled,expected){
+      if(!allowCachePolicy&&enabled!==undefined)throw Error('BOP keeps its durable files.');
+      if(enabled!==undefined&&typeof enabled!=='boolean')throw Error('Invalid cache setting.');
+      const inventory=enabled!==undefined?(await files({operation:'cache-list'})).items:[];
+      return transaction(async journal=>{
+        const cache=cacheOf(journal);cache.evicted??={};cache.arrivals??={};cache.wanted??={};cache.debt??=0;
+        if(expected!==undefined&&cache.enabled!==expected)throw Error('This setting changed. Refresh and try again.');
+        if(enabled!==undefined){if(enabled&&!cache.enabled){for(const item of inventory||[])cache.arrivals[item.hash]=item.at;cache.debt=0;}cache.enabled=enabled;}
+        return {enabled:cache.enabled,deferredBytes:cache.debt||0,lastError:cache.lastError||null};
+      });
+    }
+    async function requestLocal(workspaceId,entryId){await trimming.catch(()=>{});return transaction(async journal=>{
+      const inspection=W.inspect(journal.state,workspaceId,entryId);if(inspection.conflict||inspection.heads.length!==1||inspection.heads[0].kind!=='content')throw Error('Resolve this file’s versions first.');
+      const hash=inspection.heads[0].hash,cache=cacheOf(journal);delete cache.evicted[hash];cache.wanted[hash]=true;present.delete(hash);return {hash};
+    });}
+    let trimming=Promise.resolve();
+    function replaceDownloaded(){
+      const work=trimming.catch(()=>{}).then(async()=>{
+        if(!(await cachePolicy()).enabled)return;
+        const inventory=(await files({operation:'cache-list'})).items||[];
+        const incoming=await transaction(async journal=>{const cache=cacheOf(journal),fresh=[];for(const item of inventory){if(cache.arrivals[item.hash]!==item.at||cache.wanted[item.hash]){fresh.push(item.hash);cache.arrivals[item.hash]=item.at;if(cache.enabled&&!cache.ownHashes?.[item.hash])cache.debt+=item.size;}delete cache.wanted[item.hash];if(cache.ownHashes)delete cache.ownHashes[item.hash];}if(fresh.length)cache.keepNewest=fresh;return cache.keepNewest||fresh;});
+        const candidates=inventory.filter(item=>!incoming.includes(item.hash)).sort((a,b)=>a.at-b.at);
+        for(const item of candidates){
+          const plan=await transaction(async journal=>{
+            const cache=cacheOf(journal);if(!cache.enabled||cache.debt<=0||cache.wanted[item.hash])return null;
+            if(!journal.state.workspaceVersions.some(v=>v.kind==='content'&&v.hash===item.hash))return null;
+            const bindings=[];
+            for(const entry of journal.state.workspaceEntries.filter(e=>e.kind==='shortcut'&&e.workspaceFileId)){
+              const inspection=W.inspect(journal.state,entry.workspaceId,entry.workspaceFileId);
+              if(!inspection.heads.some(v=>v.hash===item.hash))continue;
+              if(inspection.conflict||inspection.heads.length!==1)return null;
+              bindings.push({workspaceId:entry.workspaceId,entryId:entry.workspaceFileId,versionId:inspection.heads[0].id});
+            }
+            return {bindings};
+          });
+          if(!plan)continue;
+          let durable=[];try{durable=await verifyDurable([item.hash]);}catch{}if(!durable.includes(item.hash))continue;
+          const armed=await transaction(async journal=>{const cache=cacheOf(journal);if(!cache.enabled||cache.wanted[item.hash]||cache.debt<=0)return false;cache.evicted[item.hash]=true;return true;});
+          if(!armed)continue;
+          let removed;try{removed=await files({operation:'cache-evict',hash:item.hash,bindings:plan.bindings});}catch(error){removed={ok:false,error:error.message};}
+          present.delete(item.hash);
+          await transaction(async journal=>{const cache=cacheOf(journal);if(removed.ok){cache.debt=Math.max(0,cache.debt-item.size);cache.lastError=null;}else{delete cache.evicted[item.hash];cache.lastError=removed.error||'A working file was retained.';}});
+        }
+      });trimming=work;return work;
+    }
     let tidiedAt=0;
     async function reconcile(){
       const errors=[];
@@ -156,7 +220,9 @@
         const inspection=await transaction(async journal=>W.inspect(journal.state,entry.workspaceId,entry.workspaceFileId));
         if(inspection.conflict||inspection.missing.length||!inspection.heads.length)continue;
         const head=inspection.heads[0];
-        if(head.id===binding.versionId)continue;
+        const intentionallyAbsent=await transaction(async journal=>!!journal.cache?.evicted?.[head.hash]);
+        if(intentionallyAbsent&&!binding.available)continue;
+        if(head.id===binding.versionId&&(binding.available||head.kind==='delete'))continue;
         if(head.kind==='content'&&!(await files({operation:'content-check',hash:head.hash})).available)continue;
         const applied=await files({operation:head.kind==='delete'?'delete':'publish',workspaceId:entry.workspaceId,entryId:entry.workspaceFileId,name:filename,versionId:head.id,...head.kind==='content'?{hash:head.hash}:{}});
         if(applied.localChange)await capture(entry.workspaceId,entry.workspaceFileId,filename);
@@ -184,8 +250,8 @@
     // device again for every version on every status check kept the phone's record queue busy.
     const present=new Map();
     async function has(hash){const seen=present.get(hash);if(seen&&now()-seen<60000)return true;const available=(await files({operation:'content-check',hash})).available;if(available)present.set(hash,now());else present.delete(hash);return available;}
-    async function needed(journal){const out=[];for(const value of journal.state.workspaceVersions)if(value.kind==='content'&&!out.some(x=>x.hash===value.hash)&&!(await has(value.hash)))out.push({hash:value.hash,size:value.size});return out;}
-    async function publications(journal,workspaceId=null){const out=[];for(const entry of journal.state.workspaceEntries){if(entry.kind!=='shortcut'||!entry.workspaceFileId||workspaceId&&entry.workspaceId!==workspaceId)continue;const inspection=W.inspect(journal.state,entry.workspaceId,entry.workspaceFileId);if(inspection.conflict||inspection.heads.length!==1)continue;const binding=await files({operation:'path',workspaceId:entry.workspaceId,entryId:entry.workspaceFileId,name:entry.workspaceFilename||entry.name});if(binding.versionId!==inspection.heads[0].id)out.push(entry.id);}return out;}
+    async function needed(journal){const out=[];for(const value of journal.state.workspaceVersions)if(value.kind==='content'&&!out.some(x=>x.hash===value.hash)&&(journal.cache?.evicted?.[value.hash]||!(await has(value.hash))))out.push({hash:value.hash,size:value.size});return out;}
+    async function publications(journal,workspaceId=null){const out=[];for(const entry of journal.state.workspaceEntries){if(entry.kind!=='shortcut'||!entry.workspaceFileId||workspaceId&&entry.workspaceId!==workspaceId)continue;const inspection=W.inspect(journal.state,entry.workspaceId,entry.workspaceFileId);if(inspection.conflict||inspection.heads.length!==1||journal.cache?.evicted?.[inspection.heads[0]?.hash])continue;const binding=await files({operation:'path',workspaceId:entry.workspaceId,entryId:entry.workspaceFileId,name:entry.workspaceFilename||entry.name});if(binding.versionId!==inspection.heads[0].id)out.push(entry.id);}return out;}
     // What each device has confirmed, as known here. Exchanges carry it on, so a device that cannot
     // reach another directly (the phone only over SlopTop's cable) still learns that it caught up.
     function mergeAcks(journal,acks){
@@ -197,16 +263,19 @@
       }
     }
     async function exchange(message){
+      if(message?.workspaceProtocol===1&&message.cacheControl){const control=message.cacheControl;return {workspaceProtocol:1,cachePolicy:await cachePolicy(control.enabled,control.expected)};}
+      if(message?.workspaceProtocol===1&&message.cacheProof===true){if(!Array.isArray(message.hashes)||message.hashes.length>100)throw Error('Invalid content check.');const available=[];for(const hash of message.hashes)if(/^[a-f0-9]{64}$/.test(hash)&&(await files({operation:'content-check',hash})).available)available.push(hash);return {workspaceProtocol:1,available};}
+      if(message?.workspaceProtocol===1&&message.storageProbe===true)return {workspaceProtocol:1,storage:await files({operation:'storage-status'}),cachePolicy:allowCachePolicy?await cachePolicy():null};
       if(message?.workspaceProtocol!==1||!message.vv||!Array.isArray(message.changes))throw Error('Unsupported workspace exchange.');
       const reply=await transaction(async(journal,stamps)=>{
         const result=W.merge(journal.state,stamps,message.changes);journal.state=result.state;journal.vv=S.joinVectors(journal.vv,message.vv);mergeAcks(journal,message.acks);
         for(const stamp of stamps.values())journal.clock=S.witness(journal.clock,stamp.h);
-        return {workspaceProtocol:1,node:journal.node,vv:structuredClone(journal.vv),acks:structuredClone(journal.peers),changes:S.changesSince(journal.state,stamps,message.vv),needed:await needed(journal),contentRoot:(await files({operation:'content-root'})).transportPath??(await files({operation:'content-root'})).path};
+        return {workspaceProtocol:1,node:journal.node,vv:structuredClone(journal.vv),acks:structuredClone(journal.peers),changes:S.changesSince(journal.state,stamps,message.vv),needed:await needed(journal),withheld:Object.keys(journal.cache?.evicted||{}),contentRoot:(await files({operation:'content-root'})).transportPath??(await files({operation:'content-root'})).path};
       });
       // Reply first, then apply the received changes to files: on the phone that work can take far
       // longer than the asking device waits (re-checking or copying hundreds of MB).
       reply.pending=(await transaction(journal=>publications(journal))).length;
-      void reconcile().catch(()=>{});
+      if(deferReconcile)void reconcile().catch(()=>{});else await reconcile();
       return reply;
     }
     async function runLimited(jobs,limit){
@@ -219,17 +288,17 @@
       const reply=await send(message);if(reply?.workspaceProtocol!==1)throw Error('Update the other device to sync blob workspaces.');
       await exchange(reply);
       const ownRoot=await files({operation:'content-root'});
-      const localNeeded=await transaction(needed);
+      const localNeeded=await transaction(async journal=>(await needed(journal)).filter(item=>!journal.cache?.evicted?.[item.hash]));
       const remoteRoot='\\\\papers~'+peer.id+'\\'+reply.contentRoot;
       // File contents copy up to three at a time in each direction, so one large file does not hold
       // up small ones in other folders. A failed copy does not stop the others; it is reported after.
       const pulls=localNeeded.filter(item=>!(reply.needed||[]).some(missing=>missing.hash===item.hash)).map(item=>()=>copy([remoteRoot+'\\'+item.hash],ownRoot.path));
-      const pushes=(reply.needed||[]).map(item=>async()=>{const source=await files({operation:'content-check',hash:item.hash});if(source.available)await copy([source.path],remoteRoot);});
+      const pushes=(reply.needed||[]).filter(item=>!(reply.withheld||[]).includes(item.hash)).map(item=>async()=>{const source=await files({operation:'content-check',hash:item.hash});if(source.available)await copy([source.path],remoteRoot);});
       const failures=(await Promise.all([runLimited(pulls,3),runLimited(pushes,3)])).flat();
-      if(failures.length)throw failures[0];
+      if(failures.length){await reconcile();await replaceDownloaded();throw failures[0];}
       const confirmed=await send({workspaceProtocol:1,vv:reply.vv,changes:[],acks:await transaction(async journal=>structuredClone(journal.peers))});
-      await transaction(async journal=>{journal.peers[peer.id]={name:peer.name,node:confirmed.node,vv:confirmed.vv,at:now(),waiting:(confirmed.needed?.length||0)+(confirmed.pending||0)};mergeAcks(journal,confirmed.acks);});
-      await reconcile();return {ok:true};
+      await transaction(async journal=>{journal.peers[peer.id]={name:peer.name,node:confirmed.node,vv:confirmed.vv,at:now(),waiting:(confirmed.needed||[]).filter(item=>!(confirmed.withheld||[]).includes(item.hash)).length+(confirmed.pending||0)};mergeAcks(journal,confirmed.acks);});
+      await reconcile();await replaceDownloaded();return {ok:true};
     }
     // Status only reads: it takes a snapshot in the queue and asks the device about files outside it,
     // so a status check never holds up opening, saving or syncing.
@@ -256,7 +325,7 @@
       }else for(const field of Object.keys(record))stamps.set(conflict.key+'#'+field,nextStamp(journal));
       return {ok:true};
     });}
-    return Object.freeze({load,entry,save,importFile,capture,reconcile,exchange,syncWith,remove,restore,status,history,conflicts,resolveMetadata,folder,folders,ensureFolder,flush:()=>tail});
+      return Object.freeze({load,entry,save,importFile,receiveFile,capture,reconcile,exchange,syncWith,remove,restore,status,history,conflicts,resolveMetadata,folder,folders,ensureFolder,cachePolicy,requestLocal,maintainCache:replaceDownloaded,flush:async()=>{await tail;await trimming;}});
   }
   root.ProximaWorkspaceReplica=Object.freeze({create});
 })(globalThis);

@@ -95,15 +95,16 @@
     return body;
   }
 
-  let panel=null,badge=null;
-  async function open(){
+  let panel=null,badge=null,mountedHost=null;
+  async function open(host=mountedHost){
+    mountedHost=host;
     const {conflicts,names,self}=await sync.conflicts();
     panel?.remove();panel=document.createElement('div');panel.className='proxima-conflicts';
     const section=document.createElement('section');panel.append(section);
     section.innerHTML=`<header><h2>${conflicts.length?conflicts.length+' sync conflict'+(conflicts.length>1?'s':''):'No sync conflicts'}</h2><button type="button" aria-label="Close">×</button></header>`;
     section.querySelector('header button').addEventListener('click',close);
     panel.addEventListener('click',event=>{if(event.target===panel)close();});
-    if(!conflicts.length)section.insertAdjacentHTML('beforeend','<div class="empty">Every device agrees. Conflicts appear here when two devices change the same thing without seeing each other’s change.</div>');
+    if(!conflicts.length)section.insertAdjacentHTML('beforeend','<div class="empty">No unresolved conflicts recorded on this device.</div>');
     const state=typeof Store!=='undefined'?Store.snapshot():{};
     const device=node=>node===self?'this device':names[node]||'another device';
     for(const conflict of conflicts){
@@ -129,9 +130,9 @@
       }
       card.append(options);section.append(card);
     }
-    document.body.append(panel);
+    (mountedHost||document.body).append(panel);
   }
-  function close(){panel?.remove();panel=null;}
+  function close(){panel?.remove();panel=null;mountedHost=null;}
 
   async function refreshBadge(){
     const host=document.getElementById('overviewProjects');if(!host)return;
@@ -139,9 +140,10 @@
     if(!badge){badge=document.createElement('span');badge.className='proxima-conflict-badge';}
     if(getComputedStyle(host).position==='static')host.style.position='relative';
     if(count){badge.textContent=String(count);if(badge.parentNode!==host)host.append(badge);}else badge.remove();
-    host.title=count?count+' sync conflict'+(count>1?'s':'')+' — click to resolve':'Sync conflicts';host.setAttribute('aria-label',host.title);
+    host.title='Devices, storage and sync'+(count?' · '+count+' conflict'+(count>1?'s':''):'');host.setAttribute('aria-label',host.title);
   }
   function install(){
+    addEventListener('proxima:open-conflicts',event=>void open(event.detail?.host||null));
     const host=document.getElementById('overviewProjects');
     if(!host){setTimeout(install,500);return;}
     host.addEventListener('click',event=>{event.stopPropagation();void open();});

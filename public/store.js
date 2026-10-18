@@ -750,7 +750,7 @@ const Store = (() => {
   function followedRead(now=Date.now()){const projected=new Map();for(const receipt of state.remoteImports||[]){const follow=receipt.follow;if(!follow?.enabled)continue;const observation=followObservations.get(receipt.id),source=observation?.projection||follow.snapshot;if(!source)continue;const sourceNow=Date.parse(source.source.observedAt)+(observation?.online?Math.max(0,now-observation.receivedAt):0),effective=new Map();for(const row of source.records.timelineRows)if(row.queue)for(const [id,item] of queueProjection(row,sourceNow,source.records.timelineIntervals))effective.set(id,item);const snapshot=structuredClone(source);snapshot.effectiveIntervals=source.records.timelineIntervals.map(item=>{const value={...item,...(effective.get(item.id)||{}),...(item.followNow&&!effective.has(item.id)?{end:new Date(Math.max(Date.parse(item.start)+1,sourceNow)).toISOString()}: {})};return Object.fromEntries(['id','start','end','followNow','color','queueId','queueIndex','queueEnd'].filter(key=>Object.hasOwn(value,key)).map(key=>[key,value[key]]));});let candidate;try{candidate=ProximaRemoteDomain.prepareImport(ProximaRemoteFollow.subset(snapshot,follow.entries.filter(entry=>!entry.independent)),receipt.id);}catch{continue;}for(const entry of follow.entries.filter(entry=>entry.kind==='timelineIntervals'&&!entry.independent&&!entry.conflict&&!entry.deleted)){const local=state.timelineIntervals.find(item=>item.id===entry.localId),rowId=local?.rowId,related=follow.entries.filter(other=>other.kind==='timelineRows'&&other.localId===rowId||other.kind==='timelineIntervals'&&state.timelineIntervals.find(item=>item.id===other.localId)?.rowId===rowId);if(related.some(other=>other.independent||other.conflict||ProximaRemoteDomain.semantic(other.kind,(state[other.kind]||[]).find(item=>item.id===other.localId))!==other.localBase))continue;const item=candidate.records.timelineIntervals.find(item=>item.id===entry.localId),raw=source.records.timelineIntervals.find(item=>item.id===entry.sourceId);if(item&&raw&&(raw.followNow||source.records.timelineRows.some(row=>row.queue?.ids.includes(raw.id))))projected.set(entry.localId,{start:item.start,end:item.end,sourceFollowing:true,sourceLive:observation?.online===true,sourceOwner:receipt.label||source.source.ownerId});}}return projected;}
   function timelineRead(now=Date.now()){const projections=followedRead(now);for(const row of state.timelineRows)if(row.queue)for(const [id,value] of queueProjection(row,now))projections.set(id,value);return state.timelineIntervals.map(x=>{const row=state.timelineRows.find(row=>row.id===x.rowId);return {...x,...(row?{color:row.queue||row.independentColors?(x.color||row.color):row.color,rowOrder:row.rowOrder}:{}),...(projections.get(x.id)||{})};});}
   function freezeFollowEdit(envelope){const type=envelope?.type||'',payload=envelope?.payload||{};if(!type.startsWith('timeline-interval.')&&!type.startsWith('timeline-queue.')||type.includes('reorder')||envelope.commandId&&state.commands[envelope.commandId])return null;const selected=new Set(payload.intervalIds||[payload.intervalId].filter(Boolean)),rows=new Set(payload.rowIds||[payload.rowId].filter(Boolean));for(const item of state.timelineIntervals)if(selected.has(item.id))rows.add(item.rowId);const projected=followedRead(),updates=state.timelineIntervals.filter(item=>rows.has(item.rowId)&&projected.has(item.id));if(!updates.length)return null;const before=structuredClone(state);for(const item of updates){const value=projected.get(item.id);item.start=value.start;item.end=value.end;item.followNow=false;}return before;}
-  function syncTimelineRows(type,payload){ensureTimelineRows();if(type==='timeline-interval.patch'){const item=state.timelineIntervals.find(x=>x.id===payload.intervalId),row=item&&state.timelineRows.find(x=>x.id===item.rowId);if(row&&!row.queue&&!row.independentColors)for(const key of ['color'])if(payload.patch?.[key]!==undefined)row[key]=payload.patch[key];}if(type.includes('reorder')){const ids=payload.intervalIds||[payload.intervalId];for(const id of ids){const item=state.timelineIntervals.find(x=>x.id===id),row=item&&state.timelineRows.find(x=>x.id===item.rowId);if(row)row.rowOrder=item.rowOrder;}}for(const item of state.timelineIntervals){const row=state.timelineRows.find(x=>x.id===item.rowId);if(row){if(!row.queue&&!row.independentColors)item.color=row.color;item.rowOrder=row.rowOrder;}}if(type.includes('delete'))for(const row of state.timelineRows){if(!row.queue)continue;const previous=row.queue.ids[0];row.queue.ids=row.queue.ids.filter(id=>state.timelineIntervals.some(x=>x.id===id));if(previous!==row.queue.ids[0]){const next=state.timelineIntervals.find(x=>x.id===row.queue.ids[0]);if(next){next.start=new Date(Date.now()).toISOString();next.end=new Date(Date.now()+1).toISOString();next.followNow=true;next.rev++;}}}if(type.includes('delete'))state.timelineRows=state.timelineRows.filter(row=>row.queue||state.timelineIntervals.some(x=>x.rowId===row.id));}
+  function syncTimelineRows(type,payload){if(type.includes('delete'))pruneBlobGroups();ensureTimelineRows();if(type.startsWith('timeline-group.'))state.timelineRows=state.timelineRows.filter(row=>row.queue||state.timelineIntervals.some(x=>x.rowId===row.id));if(type==='timeline-interval.patch'){const item=state.timelineIntervals.find(x=>x.id===payload.intervalId),row=item&&state.timelineRows.find(x=>x.id===item.rowId);if(row&&!row.queue&&!row.independentColors)for(const key of ['color'])if(payload.patch?.[key]!==undefined)row[key]=payload.patch[key];}if(type.includes('reorder')){const ids=payload.intervalIds||[payload.intervalId];for(const id of ids){const item=state.timelineIntervals.find(x=>x.id===id),row=item&&state.timelineRows.find(x=>x.id===item.rowId);if(row)row.rowOrder=item.rowOrder;}}for(const item of state.timelineIntervals){const row=state.timelineRows.find(x=>x.id===item.rowId);if(row){if(!row.queue&&!row.independentColors)item.color=row.color;item.rowOrder=row.rowOrder;}}if(type.includes('delete'))for(const row of state.timelineRows){if(!row.queue)continue;const previous=row.queue.ids[0];row.queue.ids=row.queue.ids.filter(id=>state.timelineIntervals.some(x=>x.id===id));if(previous!==row.queue.ids[0]){const next=state.timelineIntervals.find(x=>x.id===row.queue.ids[0]);if(next){next.start=new Date(Date.now()).toISOString();next.end=new Date(Date.now()+1).toISOString();next.followNow=true;next.rev++;}}}if(type.includes('delete'))state.timelineRows=state.timelineRows.filter(row=>row.queue||state.timelineIntervals.some(x=>x.rowId===row.id));}
   function intervalRowPosition(beforeId,exclude){const rows=state.timelineIntervals.map((item,index)=>({item,order:Number.isFinite(item.rowOrder)?item.rowOrder:index})).filter(x=>x.item.id!==exclude).sort((a,b)=>a.order-b.order);const index=beforeId?rows.findIndex(x=>x.item.id===beforeId):rows.length;if(index<0)return null;if(!rows.length)return 0;if(index===0)return rows[0].order-1;if(index===rows.length)return rows.at(-1).order+1;return (rows[index-1].order+rows[index].order)/2;}
 
   function timelineHistory(){return state.timelineHistory||(state.timelineHistory={undo:[],redo:[]});}
@@ -759,7 +759,77 @@ const Store = (() => {
   function remoteIntent(payload){const value={projection:payload.projection,importId:payload.importId,mode:payload.mode||'independent'};if(value.mode==='follow'){value.receiver=payload.receiver;value.binding=payload.binding;}return fingerprint('remote.import',value);}
   function remoteCandidate(payload){if(!['independent','follow'].includes(payload.mode||'independent'))throw Error('Unsupported copy mode.');const candidate=ProximaRemoteDomain.prepareImport(payload.projection,payload.importId);if(payload.mode==='follow')candidate.follow=ProximaRemoteFollow.create(candidate,payload.projection,payload.receiver,payload.binding);return candidate;}
   function remoteTimelineSafe(updates){const affected=new Set(updates.filter(update=>update.kind==='timelineIntervals').flatMap(update=>[update.incoming?.rowId,state.timelineIntervals.find(item=>item.id===update.localId)?.rowId]));const sessions=state.timelineIntervals.filter(item=>affected.has(item.rowId)).map(item=>updates.find(update=>update.kind==='timelineIntervals'&&update.localId===item.id)?.incoming||item);return !sessions.some(a=>sessions.some(b=>a.id!==b.id&&a.rowId===b.rowId&&Date.parse(a.start)<(b.followNow?Infinity:Date.parse(b.end))&&Date.parse(b.start)<(a.followNow?Infinity:Date.parse(a.end))));}
+  // Groups retain independent intervals. Membership is authored; the displayed span is derived.
+  function blobGroupSelection(payload){
+    const index=new Map(state.timelineIntervals.map(x=>[x.id,x])),chosen=[...new Set(payload.intervalIds||[])],all=new Map(),visiting=new Set();
+    function visit(key){const item=index.get(key);if(!item)throw Error('INTERVAL_NOT_FOUND');if(visiting.has(key))throw Error('GROUP_CYCLE');if(all.has(key))return;visiting.add(key);all.set(key,item);if(item.groupChildren)for(const child of item.groupChildren)visit(child);visiting.delete(key);}
+    for(const key of chosen)visit(key);
+    if(!chosen.length)throw Error('INTERVAL_NOT_FOUND');
+    if(payload.revisions&&[...all.values()].some(x=>payload.revisions[x.id]!==x.rev))throw Error('HISTORY_CONFLICT');
+    const descendants=new Set();function below(key){for(const child of index.get(key)?.groupChildren||[]){if(descendants.has(child))continue;descendants.add(child);below(child);}}for(const key of chosen)below(key);
+    return {roots:chosen.filter(key=>!descendants.has(key)),all:[...all.values()],leaves:[...all.values()].filter(x=>!x.groupChildren),groups:[...all.values()].filter(x=>x.groupChildren)};
+  }
+  function pruneBlobGroups(remove=new Set()){
+    for(const group of state.timelineIntervals.filter(x=>x.groupChildren)){const children=group.groupChildren.filter(key=>!remove.has(key)&&state.timelineIntervals.some(x=>x.id===key));if(children.length!==group.groupChildren.length){group.groupChildren=children;group.rev++;}}
+    let empty;do{empty=state.timelineIntervals.filter(x=>x.groupChildren&&!x.groupChildren.length).map(x=>x.id);if(empty.length){state.timelineIntervals=state.timelineIntervals.filter(x=>!empty.includes(x.id));for(const group of state.timelineIntervals.filter(x=>x.groupChildren)){const children=group.groupChildren.filter(key=>!empty.includes(key));if(children.length!==group.groupChildren.length){group.groupChildren=children;group.rev++;}}}}while(empty.length);
+  }
   const COMMANDS = {
+    'timeline-group.ungroup'(payload){
+      const group=state.timelineIntervals.find(x=>x.id===payload.groupId&&x.groupChildren);if(!group)return refuse('INTERVAL_NOT_FOUND',{});
+      if(payload.revisions&&payload.revisions[group.id]!==group.rev)return refuse('HISTORY_CONFLICT',{});
+      const parent=state.timelineIntervals.find(x=>x.groupChildren?.includes(group.id));if(parent&&payload.revisions&&payload.revisions[parent.id]!==parent.rev)return refuse('HISTORY_CONFLICT',{});
+      return queueChange(()=>{if(parent){const index=parent.groupChildren.indexOf(group.id);parent.groupChildren.splice(index,1,...group.groupChildren);parent.rev++;parent.groupChildren.forEach((key,index)=>{const item=state.timelineIntervals.find(x=>x.id===key);if(item){item.rowOrder=index;item.rev++;const row=state.timelineRows.find(x=>x.id===item.rowId);if(row)row.rowOrder=index;}});}else{const roots=state.timelineIntervals.filter(x=>!state.timelineIntervals.some(g=>g.groupChildren?.includes(x.id))).sort((a,b)=>(a.rowOrder||0)-(b.rowOrder||0)),at=roots.indexOf(group);roots.splice(at,1,...group.groupChildren.map(key=>state.timelineIntervals.find(x=>x.id===key)).filter(Boolean));roots.forEach((item,index)=>{item.rowOrder=index;item.rev++;const row=state.timelineRows.find(x=>x.id===item.rowId);if(row)row.rowOrder=index;});}state.timelineIntervals=state.timelineIntervals.filter(x=>x!==group);pruneBlobGroups();return {ids:group.groupChildren};});
+    },
+    'timeline-group.add'(payload){
+      let selection;try{selection=blobGroupSelection(payload);}catch(error){return refuse(error.message,{});}
+      const target=state.timelineIntervals.find(x=>x.id===payload.groupId&&x.groupChildren);if(!target)return refuse('INTERVAL_NOT_FOUND',{});
+      if(selection.all.some(x=>x.id===target.id))return refuse('GROUP_CYCLE',{});
+      if(payload.revisions&&payload.revisions[target.id]!==target.rev)return refuse('HISTORY_CONFLICT',{});
+      const roots=selection.roots;if(roots.every(key=>target.groupChildren.includes(key)))return {ok:true,readOnlyResult:{groupId:target.id}};
+      return queueChange(()=>{for(const group of state.timelineIntervals.filter(x=>x.groupChildren&&x!==target)){const next=group.groupChildren.filter(key=>!roots.includes(key));if(next.length!==group.groupChildren.length){group.groupChildren=next;group.rev++;}}target.groupChildren=[...new Set([...target.groupChildren,...roots])];target.rev++;pruneBlobGroups();return {groupId:target.id};});
+    },
+    'timeline-group.reorder'(payload){
+      let selection;try{selection=blobGroupSelection(payload);}catch(error){return refuse(error.message,{});}
+      const roots=selection.roots,anchor=state.timelineIntervals.find(x=>x.id===payload.anchorId);if(!anchor||selection.all.some(x=>x.id===anchor.id))return refuse('INTERVAL_NOT_FOUND',{});
+      if(roots.some(key=>{const item=selection.all.find(x=>x.id===key);return !item.groupChildren&&queueForInterval(key)&&state.timelineIntervals.some(x=>x.rowId===item.rowId&&!roots.includes(x.id));}))return refuse('QUEUE_LINKED_EDGE',{});
+      const parent=state.timelineIntervals.find(x=>x.groupChildren?.includes(anchor.id));if(parent&&selection.all.some(x=>x.id===parent.id))return refuse('GROUP_CYCLE',{});
+      if(payload.revisions&&payload.revisions[anchor.id]!==anchor.rev)return refuse('HISTORY_CONFLICT',{});
+      return queueChange(()=>{
+        for(const key of roots){const item=state.timelineIntervals.find(x=>x.id===key);if(!item.groupChildren&&!queueForInterval(key)&&state.timelineIntervals.some(x=>x.rowId===item.rowId&&!roots.includes(x.id))){const rowId=id('row');state.timelineRows.push({id:rowId,name:item.name,color:item.color,rowOrder:item.rowOrder,independentColors:true});item.rowId=rowId;item.rev++;}}
+        for(const group of state.timelineIntervals.filter(x=>x.groupChildren)){const next=group.groupChildren.filter(key=>!roots.includes(key));if(next.length!==group.groupChildren.length){group.groupChildren=next;group.rev++;}}
+        if(parent){const index=parent.groupChildren.indexOf(anchor.id)+(payload.after?1:0);parent.groupChildren.splice(index,0,...roots);parent.rev++;}
+        const contained=new Set(state.timelineIntervals.flatMap(x=>x.groupChildren||[])),siblings=(parent?parent.groupChildren.map(key=>state.timelineIntervals.find(x=>x.id===key)):state.timelineIntervals.filter(x=>!contained.has(x.id)&&!roots.includes(x.id)).sort((a,b)=>(a.rowOrder||0)-(b.rowOrder||0)||Date.parse(a.start)-Date.parse(b.start))).filter(Boolean);
+        if(!parent){const index=siblings.findIndex(x=>x.id===anchor.id)+(payload.after?1:0);siblings.splice(index,0,...roots.map(key=>state.timelineIntervals.find(x=>x.id===key)));}
+        let order=Math.min(...siblings.map(x=>x.rowOrder||0))-1;for(const item of siblings){item.rowOrder=++order;item.rev++;const row=state.timelineRows.find(x=>x.id===item.rowId);if(row)row.rowOrder=item.rowOrder;}
+        pruneBlobGroups();return {ids:roots};
+      });
+    },
+    'timeline-group.create'(payload){
+      let selection;try{selection=blobGroupSelection(payload);}catch(error){return refuse(error.message,{});}
+      const {roots,all,leaves}=selection;if(roots.length<2||!leaves.length)return refuse('GROUP_SELECT_MORE',{});
+      const groups=roots.map(key=>all.find(x=>x.id===key)).filter(x=>x.groupChildren),target=groups.length===1?groups[0]:null;
+      const parents=roots.map(key=>state.timelineIntervals.find(x=>x.groupChildren?.includes(key))),commonParent=parents[0]&&parents.every(x=>x?.id===parents[0].id)?parents[0]:null;
+      if(payload.revisions&&parents.some(x=>x&&payload.revisions[x.id]!==x.rev))return refuse('HISTORY_CONFLICT',{});
+      return queueChange(()=>{
+        const members=target?[...new Set([...target.groupChildren,...roots.filter(key=>key!==target.id)])]:roots;
+        for(const group of state.timelineIntervals.filter(x=>x.groupChildren&&x!==target)){const children=group.groupChildren.filter(key=>!roots.includes(key)||key===target?.id);if(children.length!==group.groupChildren.length){group.groupChildren=children;group.rev++;}}
+        let group=target;if(group){group.groupChildren=members;group.rev++;}else{const key=id('blob-group'),rowId=id('row'),first=Math.min(...leaves.map(x=>Date.parse(x.start))),last=Math.max(...leaves.map(x=>x.followNow?Math.max(Date.now(),Date.parse(x.start)+1):Date.parse(x.end))),order=Math.min(...all.map(x=>x.rowOrder||0));group={id:key,rowId,name:'Group',color:'#758995',start:new Date(first).toISOString(),end:new Date(Math.max(first+1,last)).toISOString(),followNow:false,groupChildren:members,rowOrder:order,createdAt:new Date().toISOString(),rev:1};state.timelineRows.push({id:rowId,name:'Group',color:group.color,rowOrder:order,independentColors:true});state.timelineIntervals.push(group);}
+        if(!target&&commonParent){commonParent.groupChildren.push(group.id);commonParent.rev++;}pruneBlobGroups();return {groupId:group.id,createdNew:!target};
+      });
+    },
+    'timeline-group.delete'(payload){
+      let selection;try{selection=blobGroupSelection(payload);}catch(error){return refuse(error.message,{});}
+      const ids=new Set(selection.all.map(x=>x.id));return queueChange(()=>{state.timelineIntervals=state.timelineIntervals.filter(x=>!ids.has(x.id));pruneBlobGroups(ids);return {ids:[...ids]};});
+    },
+    'timeline-group.queue'(payload){
+      let selection;try{selection=blobGroupSelection(payload);}catch(error){return refuse(error.message,{});}
+      const members=selection.leaves;if(!members.length)return refuse('INTERVAL_NOT_FOUND',{});
+      const grouped=members.filter(x=>queueForInterval(x.id)||state.timelineRows.find(r=>r.id===x.rowId)?.queueReturn),rows=new Set(grouped.map(x=>queueForInterval(x.id)?.id||x.rowId));
+      const action=grouped.length===members.length&&rows.size===1?'restore':members.some(x=>queueForInterval(x.id))?'enqueue':'collapse';
+      const active=[...new Set(members.map(x=>queueForInterval(x.id)?.id).filter(Boolean))];if(action==='enqueue'&&active.length!==1)return refuse('QUEUE_LINKED_EDGE',{});
+      const inputs=action==='enqueue'?members.filter(x=>!queueForInterval(x.id)):members,checked=COMMANDS['timeline-queue.'+action]({rowId:active[0],intervalIds:inputs.map(x=>x.id),revisions:Object.fromEntries(inputs.map(x=>[x.id,x.rev])),colors:Object.fromEntries(members.map(x=>[x.id,x.color]))});if(!checked.ok)return checked;
+      return {ok:true,apply:()=>{const result=checked.apply(),groups=new Set(selection.groups.map(x=>x.id));state.timelineIntervals=state.timelineIntervals.filter(x=>!groups.has(x.id));pruneBlobGroups(new Set([...groups,...members.map(x=>x.id)]));return result;}};
+    },
     'remote.import-stage'(payload){
       let candidate;try{candidate=remoteCandidate(payload);}catch(error){return refuse('IMPORT_INVALID',{reason:error.message});}
       const intent=remoteIntent(payload),pending=state.remotePendingImports||[],receipts=state.remoteImports||[];
@@ -1281,6 +1351,7 @@ const Store = (() => {
     'timeline-interval.template'(payload,ctx) {
       const item=state.timelineIntervals.find(x=>x.id===payload.intervalId);if(!item)return refuse('INTERVAL_NOT_FOUND',{});
       const conflict=checkRev(ctx,'timeline-interval',item.id);if(conflict)return conflict;
+      if(item.groupChildren)return refuse('GROUP_HAS_CHILDREN',{});
       if(payload.template!==null&&payload.template!=='as-you-go')return refuse('PAYLOAD_INVALID',{});
       // Every blob's folder lives in the one synced As you Go root. A blob keeps its folder until
       // that folder is deleted; choosing As you Go again then gives it a fresh one (renew).
@@ -1289,6 +1360,9 @@ const Store = (() => {
       return {ok:true,apply:()=>{if(JSON.stringify(item.template??null)===JSON.stringify(next))return {changed:false,value:{...item}};const before=structuredClone(item);item.template=next;return {changed:true,entity:{kind:'timeline-interval',id:item.id},before,after:structuredClone(item),value:{...item}};}};
     },
     'timeline-interval.create'(payload) {
+      const parentGroup=payload.parentGroupId&&state.timelineIntervals.find(x=>x.id===payload.parentGroupId&&x.groupChildren);
+      if(payload.parentGroupId&&(!parentGroup||payload.parentGroupRev!==parentGroup.rev))return refuse('HISTORY_CONFLICT',{});
+      if(payload.rowId&&state.timelineIntervals.some(x=>x.groupChildren&&x.rowId===payload.rowId))return refuse('GROUP_DERIVED_RANGE',{});
       if(typeof payload.name!=='string'||!payload.name.trim())return refuse('NAME_REQUIRED',{});
       if(typeof payload.start!=='string'||typeof payload.end!=='string'||!/(Z|[+-]\d\d:\d\d)$/i.test(payload.start)||!/(Z|[+-]\d\d:\d\d)$/i.test(payload.end))return refuse('INTERVAL_TIME_INVALID',{});
       const start=Date.parse(payload.start),end=Date.parse(payload.end);
@@ -1297,11 +1371,12 @@ const Store = (() => {
       if(payload.rowId&&!state.timelineRows.some(x=>x.id===payload.rowId))return refuse('INTERVAL_NOT_FOUND',{});if(payload.rowId&&state.timelineRows.find(x=>x.id===payload.rowId)?.queue?.ids?.length)return refuse('QUEUE_LINKED_EDGE',{});
       if(payload.color!==undefined&&!/^#[0-9a-f]{6}$/i.test(payload.color))return refuse('PAYLOAD_INVALID',{});const item={...(payload.color?{color:payload.color}:{}),rowId:payload.rowId||null,rowOrder,followNow:payload.followNow===true,id:id('interval'),name:payload.name.trim().slice(0,200),start:new Date(start).toISOString(),end:new Date(end).toISOString(),rev:1,createdAt:new Date().toISOString()};
       item.rowId=item.rowId||item.id;const previousLive=payload.rowId?state.timelineIntervals.find(x=>x.rowId===item.rowId&&x.followNow&&Date.parse(x.start)<start):null;const now=Date.now();if(previousLive&&start<=now){item.followNow=true;item.end=new Date(Math.max(start+1,now)).toISOString();if(previousLive.deadline)item.deadline=previousLive.deadline;}if(overlapsSession(item,previousLive?.id))return refuse('INTERVAL_OVERLAP',{});
-      return {ok:true,apply:()=>{if(previousLive){previousLive.followNow=false;previousLive.end=new Date(Math.max(Date.parse(previousLive.start)+1,Math.min(start,now))).toISOString();previousLive.rev++;}state.timelineIntervals.push(item);return {value:{...item},entity:{kind:'timeline-interval',id:item.id},before:null,after:{...item},changed:true,created:true};}};
+      return {ok:true,apply:()=>{if(previousLive){previousLive.followNow=false;previousLive.end=new Date(Math.max(Date.parse(previousLive.start)+1,Math.min(start,now))).toISOString();previousLive.rev++;}state.timelineIntervals.push(item);if(parentGroup){parentGroup.groupChildren.push(item.id);parentGroup.rev++;}return {value:{...item},entity:{kind:'timeline-interval',id:item.id},before:null,after:{...item},changed:true,created:true};}};
     },
     'timeline-interval.patch'(payload,ctx) {
       const item=state.timelineIntervals.find(x=>x.id===payload.intervalId);if(!item)return refuse('INTERVAL_NOT_FOUND',{});
       const conflict=checkRev(ctx,'timeline-interval',item.id);if(conflict)return conflict;
+      if(item.groupChildren&&Object.keys(payload.patch||{}).some(key=>key!=='name'))return refuse('GROUP_DERIVED_RANGE',{});
       const patch=payload.patch||{},checkedQueue=patch.checked===true&&item.followNow?queueForInterval(item.id):null;if(checkedQueue&&checkedQueue.queue.ids[0]===item.id)return queueChange(()=>{item.checked=true;item.followNow=false;item.end=new Date(Math.max(Date.parse(item.start)+1,Date.now())).toISOString();item.rev++;checkedQueue.queue.ids.shift();const next=state.timelineIntervals.find(x=>x.id===checkedQueue.queue.ids[0]);if(next){next.start=item.end;next.end=new Date(Date.parse(item.end)+1).toISOString();next.followNow=true;next.rev++;}return {id:item.id};});if(queueForInterval(item.id)&&['start','end','followNow','deadline'].some(key=>key in patch))return refuse('QUEUE_LINKED_EDGE',{});const next={...item,...Object.fromEntries(Object.entries(patch).filter(([key])=>["name","start","end","followNow","color","deadline","checked"].includes(key)))};
       if(typeof next.start!=="string"||typeof next.end!=="string"||!/(Z|[+-]\d\d:\d\d)$/i.test(next.start)||!/(Z|[+-]\d\d:\d\d)$/i.test(next.end))return refuse("INTERVAL_TIME_INVALID",{});
       const start=Date.parse(next.start),end=Date.parse(next.end);
@@ -1529,10 +1604,10 @@ const Store = (() => {
     if(checked.readOnlyResult)return {ok:true,changed:false,value:checked.readOnlyResult,commandId};
     let outcome = null;
     const applied = await commit(() => {
-      const timelineBefore=(type.startsWith('timeline-interval.')||type.startsWith('timeline-queue.'))?timelineSnapshot():null;
+      const timelineBefore=(type.startsWith('timeline-interval.')||type.startsWith('timeline-queue.')||type.startsWith('timeline-group.'))?timelineSnapshot():null;
       const result = checked.apply();
       if(timelineBefore)syncTimelineRows(type,payload);
-      if(type.startsWith('timeline-queue.')&&result.changed){const history=timelineHistory();history.undo.push({});if(history.undo.length>200)history.undo.shift();history.redo=[];}
+      if((type.startsWith('timeline-queue.')||type.startsWith('timeline-group.'))&&result.changed){const history=timelineHistory();history.undo.push({});if(history.undo.length>200)history.undo.shift();history.redo=[];}
       if (!result.changed) {
         // Accepted, and there was nothing to do: no event, no revision, no new
         // sequence number. The command is still remembered, so a replay of it is

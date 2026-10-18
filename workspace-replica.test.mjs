@@ -126,6 +126,18 @@ test('file contents copy several at a time, and one failed copy does not stop th
   for(const id of ids)assert.equal(b.content.has(hash('content '+id)),id!=='f3',id);
   b.copyHook=null;await sync(b,a);assert.ok(b.content.has(failing),'the failed copy succeeds on the next sync');
 });
+test('observed lookup retains an unchanged snapshot and records an external save before returning',async()=>{
+  replicas.clear();const d=device('observed-lookup'),file=await link(d);
+  const initial=await d.replica.entry('w',file.workspaceFileId,{observe:true});
+  assert.equal(initial.binding.available,true);
+  const count=initial.history.versions.length;
+  d.working.set(initial.item.target,'external saved bytes');
+  const changed=await d.replica.entry('w',file.workspaceFileId,{observe:true});
+  assert.equal(changed.history.versions.length,count+1);
+  assert.equal(changed.binding.hash,hash('external saved bytes'));
+  const again=await d.replica.entry('w',file.workspaceFileId,{observe:true});
+  assert.equal(again.history.versions.length,count+1);
+});
 test('one file is looked up alone, by its file id or its entry id, exactly as the full workspace shows it',async()=>{
   replicas.clear();const d=device('lookup');const file=await link(d);
   const whole=plain((await d.replica.load('w')).state.shortcuts[0]),history=plain(await d.replica.history('w',file.workspaceFileId));

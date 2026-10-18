@@ -168,5 +168,9 @@
     await afterChange();dispatchEvent(new Event('proxima-sync:local-change'));
   }
 
-  root.ProximaSync=Object.freeze({ready,exchange,syncWith,conflicts,resolve});
+  async function status(peerId){
+    await ready;
+    return withWriteLock(async()=>{const store=await load();return {pendingRecords:core.changesSince(await read(),store.stamps,store.meta.peers[peerId]||{}).length};});
+  }
+  root.ProximaSync=Object.freeze({ready,exchange,syncWith,conflicts,resolve,status});
 })(globalThis);
