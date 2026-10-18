@@ -4,3 +4,4 @@
 .blob-workspace-pane.has-folder>header{display:none}.blob-workspace-pane>p[hidden]{display:none}.blob-workspace-pane.has-folder>p:not([hidden]){padding-top:8px}
 /* An off-screen blob's edge label carries its folder button just under the end of its name. */
 .exact-outside-name>.exact-blob-content{right:-6px;bottom:-14px;opacity:1}
+.blob-workspace-note{margin:0;padding:12px;font-size:13px;color:var(--dim,#a6b0bd)}.blob-workspace-note[hidden],.blob-workspace-pane iframe[hidden]{display:none}

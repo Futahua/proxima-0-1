@@ -38,7 +38,7 @@
    const renew=select.value==='as-you-go'&&!!item.template&&!propagated(item);
    const r=await Store.command({type:'timeline-interval.template',ifRev:item.rev,payload:{intervalId:item.id,template:select.value||null,...(renew?{renew:true}:{})}});
    if(!r.ok)throw Error('The blob changed before its template could be saved.');
-   await mount(selected,{force:true});refreshTimelines();
+   await mount(selected);refreshTimelines();
   }catch(e){status.textContent=e.message;}finally{select.disabled=false;}};
   setInterval(()=>{if(!pane.hidden&&frame)void report();},3000);
  }
@@ -49,30 +49,42 @@
   const conflicts=await root.ProximaWorkspaces.conflicts(ROOT);const area=pane.parts.conflicts;area.replaceChildren();area.hidden=!conflicts.length;
   for(const conflict of conflicts){const row=document.createElement('div'),title=document.createElement('strong');title.textContent=conflict.name+' — both versions kept';row.append(title);for(const version of conflict.versions||[]){if(version.kind!=='content')continue;const choose=document.createElement('button');choose.type='button';choose.textContent='Keep '+version.device+' · '+version.hash.slice(0,7);choose.onclick=async()=>{choose.disabled=true;try{await root.ProximaWorkspaces.restore(ROOT,conflict.entryId,version.id);await report();}catch(error){pane.parts.status.textContent=error.message;choose.disabled=false;}};row.append(choose);}area.append(row);}
  }catch(e){pane.parts.status.textContent=e.message;}}
- function closeFrame(){frame?.remove();frame=null;frameFolder=null;}
- async function mount(id,{force=false}={}){build();const item=Store.timelineIntervals().find(x=>x.id===id);if(!item)throw Error('This blob no longer exists.');pane.hidden=false;selected=id;pane.parts.title.textContent=item.name;
+ // One As you Go page stays alive for every blob: opening another blob moves it to that folder
+ // instead of loading As you Go again, and a new page stays invisible until its first themed render.
+ let readyTimer=0;
+ function note(text){let el=pane.parts.body.querySelector('.blob-workspace-note');if(!el){el=document.createElement('p');el.className='blob-workspace-note';pane.parts.body.prepend(el);}el.textContent=text;el.hidden=!text;if(frame)frame.hidden=!!text;}
+ function revealFrame(){clearTimeout(readyTimer);if(frame)frame.style.visibility='';}
+ async function createFrame(folderId,title){
+  const phone=new URL(location.href).searchParams.has('papers-phone'),entry=phone?{url:new URL('../ayg/workspace-20260730b.html',location.href).href}:(await root.ProximaWorkspaces.request('papers:project:workspace-template')).template;if(!entry?.url)throw Error('As you Go is unavailable on this device.');
+  const url=new URL(entry.url);url.searchParams.set('papers-blob-workspace',ROOT);url.searchParams.set('as-you-go-folder',folderId);url.searchParams.set('papers-blob-parent-origin',location.origin==='null'?location.protocol+'//'+location.host:location.origin);url.searchParams.set('papers-embedded-surface','proxima-blob');url.searchParams.set('papers-inline-device','1');if(phone)url.searchParams.set('papers-phone','1');origin=url.origin==='null'?url.protocol+'//'+url.host:url.origin;
+  frame=document.createElement('iframe');frame.title=title+' · As you Go';frame.style.visibility='hidden';frame.src=url.href;frameFolder=folderId;pane.parts.body.append(frame);
+  // Never leave the pane blank if the page cannot say it is ready.
+  readyTimer=setTimeout(revealFrame,8000);
+ }
+ async function mount(id){build();const item=Store.timelineIntervals().find(x=>x.id===id);if(!item)throw Error('This blob no longer exists.');pane.hidden=false;selected=id;pane.parts.title.textContent=item.name;
   if(isV2(item)&&!folders.has(item.template.folderId))await readFolders();
   if(!propagated(item)){
-   pane.classList.remove('has-folder');pane.parts.status.hidden=false;
-   pane.parts.select.value='';await flush().catch(()=>{});closeFrame();
-   pane.parts.body.textContent=isV2(item)?'This blob’s folder was deleted. Choose As you Go to give it a new one.':'Choose As you Go to give this blob its own folder.';pane.parts.status.textContent='';pane.parts.conflicts.hidden=true;return;
+   pane.classList.remove('has-folder');pane.parts.status.hidden=false;pane.parts.select.value='';
+   note(isV2(item)?'This blob’s folder was deleted. Choose As you Go to give it a new one.':'Choose As you Go to give this blob its own folder.');pane.parts.status.textContent='';pane.parts.conflicts.hidden=true;return;
   }
   // With a folder open the pane has no header: As you Go's own strip carries the close button.
-  pane.parts.select.value='as-you-go';pane.classList.add('has-folder');
+  pane.parts.select.value='as-you-go';pane.classList.add('has-folder');note('');
   const folderId=item.template.folderId;
   // Opening (or choosing) creates the folder if it is not here yet, and keeps its name the blob's.
   const folder=await root.ProximaWorkspaces.ensureFolder(ROOT,folderId,item.name);folders.set(folderId,folder);
   if(folder.binned)return mount(id);
   // Every opening enters the blob's own folder, wherever the pane was left before.
-  if(!force&&frame&&frameFolder===folderId)return;
-  await flush().catch(()=>{});closeFrame();
-  const phone=new URL(location.href).searchParams.has('papers-phone'),entry=phone?{url:new URL('../ayg/workspace-20260730b.html',location.href).href}:(await root.ProximaWorkspaces.request('papers:project:workspace-template')).template;if(!entry?.url)throw Error('As you Go is unavailable on this device.');
-  const url=new URL(entry.url);url.searchParams.set('papers-blob-workspace',ROOT);url.searchParams.set('as-you-go-folder',folderId);url.searchParams.set('papers-blob-parent-origin',location.origin==='null'?location.protocol+'//'+location.host:location.origin);url.searchParams.set('papers-embedded-surface','proxima-blob');url.searchParams.set('papers-inline-device','1');if(phone)url.searchParams.set('papers-phone','1');origin=url.origin==='null'?url.protocol+'//'+url.host:url.origin;
-  frame=document.createElement('iframe');frame.title=item.name+' · As you Go';frame.src=url.href;frameFolder=folderId;pane.parts.body.replaceChildren(frame);await report();refreshTimelines();
+  if(frame){if(frameFolder!==folderId){frame.contentWindow.postMessage({type:'proxima:workspace:open-folder',workspaceId:ROOT,folderId},origin);frameFolder=folderId;}frame.title=item.name+' · As you Go';}
+  else await createFrame(folderId,item.name);
+  await report();refreshTimelines();
  }
+ // Load the page ahead of the first opening, so that opening is quick.
+ function prewarm(){if(frame)return;const item=Store.timelineIntervals().find(propagated);if(!item)return;build();if(!frame)void createFrame(item.template.folderId,item.name).catch(()=>{});}
+ setTimeout(()=>{if('requestIdleCallback' in root)requestIdleCallback(prewarm,{timeout:4000});else prewarm();},2500);
  function open(id){chain=chain.catch(()=>{}).then(()=>mount(id)).catch(e=>{build();pane.hidden=false;pane.parts.status.textContent=e.message;});return chain;}
  addEventListener('message',event=>{if(!frame||event.source!==frame.contentWindow||event.origin!==origin||event.data?.workspaceId!==ROOT)return;const v=event.data;
   if(v.type==='proxima:workspace:close'){pane.hidden=true;return;}
+  if(v.type==='proxima:workspace:ready'){revealFrame();return;}
   if(v.type==='proxima:workspace:flushed'){const t=flushes.get(v.requestId);if(t){flushes.delete(v.requestId);clearTimeout(t.timer);v.ok?t.resolve():t.reject(Error(v.error));}return;}
   if(v.type!=='proxima:workspace:request'||typeof v.requestId!=='string'||!Array.isArray(v.args))return;
   const source=event.source,target=origin;Promise.resolve(root.ProximaWorkspaces.frameCall(ROOT,v.method,v.args)).then(result=>source.postMessage({type:'proxima:workspace:result',requestId:v.requestId,workspaceId:ROOT,ok:true,result},target),error=>source.postMessage({type:'proxima:workspace:result',requestId:v.requestId,workspaceId:ROOT,ok:false,error:error.message},target));
