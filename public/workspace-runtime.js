@@ -93,8 +93,11 @@
       if(item.workspaceAvailability==='pending')throw Error('This file is waiting to download to this device.');
       return call(method==='launch'?'open':'reveal',{path:item.target});
     }
-    if(method==='resolve-dropped')return (await request('papers:project:resolve-dropped-targets',{files:args[0]})).targets;
-    if(method==='resolve-web-icon'){const {type,requestId,ok,...result}=await request('papers:project:resolve-web-link-icon',{url:String(args[0]||'')});return result;}
+    // Dropped File objects lose their disk paths crossing from the pane into this page, and Papers then
+    // never answers; give up after 5 seconds so a drop reports instead of waiting silently.
+    if(method==='resolve-dropped')return Promise.race([request('papers:project:resolve-dropped-targets',{files:args[0]}).then(r=>r.targets),new Promise(resolve=>setTimeout(()=>resolve([]),5000))]);
+    // A slow page must not hold up saving the link: after 8 seconds it is saved under its host name.
+    if(method==='resolve-web-icon')return Promise.race([request('papers:project:resolve-web-link-icon',{url:String(args[0]||'')}).then(({type,requestId,ok,...result})=>result),new Promise(resolve=>setTimeout(()=>resolve({}),8000))]);
     if(method==='pick-target')return (await request('papers:project:as-you-go-pick-target',{kind:args[0]})).target;
     if(method==='pick-phone')return (await request('papers:phone:pick-files')).picked;
     if(method==='file'){
