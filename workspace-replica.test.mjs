@@ -26,7 +26,7 @@ function device(id,previous=null){
     if(p.operation==='delete'){d.working.delete(path);d.bindings.set(key,{hash:null,versionId:p.versionId,name:b?.name||p.name});return {ok:true};}
     throw Error('Unknown file fixture operation '+p.operation);
   };
-  d.replica=context.ProximaWorkspaceReplica.create({uuid:randomUUID,storage:{load:async()=>({state:structuredClone(d.journal),revision:d.revision}),save:async(value,revision)=>{if(revision!==d.revision)return {ok:false,code:'STALE_REVISION'};d.journal=structuredClone(value);d.revision++;return {ok:true};}},files:d.files,copy:async(paths,destination)=>{
+  d.replica=context.ProximaWorkspaceReplica.create({uuid:randomUUID,storage:{load:async()=>({state:structuredClone(d.journal),revision:d.revision}),save:async(value,revision)=>{if(revision!==d.revision)return {ok:false,code:'STALE_REVISION'};d.journal=structuredClone(value);d.revision++;return {ok:true};}},files:d.files,copy:async(paths,destination)=>{if(d.copyHook)await d.copyHook(paths,destination);
     for(const source of paths){const remote=/^\\\\papers~([^\\]+)\\([^\\]+)-content\\([a-f0-9]{64})$/.exec(source);
       if(remote){const peer=replicas.get(remote[1]);d.content.set(remote[3],peer.content.get(remote[3]));continue;}
       const target=/^\\\\papers~([^\\]+)\\([^\\]+)-content$/.exec(destination),h=source.split('/').at(-1);if(!target||!d.content.has(h))throw Error('Invalid fixture copy');replicas.get(target[1]).content.set(h,d.content.get(h));
@@ -110,4 +110,17 @@ test('a device that only reaches another through a relay still learns that it ca
   await sync(laptop,hub);
   const state=await laptop.replica.status('w',others);
   assert.equal(state.kind,'synced',JSON.stringify(state));
+});
+
+test('file contents copy several at a time, and one failed copy does not stop the others',async()=>{
+  const a=device('pc-many'),b=device('ph-many');const ids=['f1','f2','f3','f4','f5'];
+  const doc={schemaVersion:1,groups:[],shortcuts:[]};
+  for(const id of ids){a.originals.set(id,'content '+id);const file=await a.replica.importFile('w',id,id+'.txt',id);doc.shortcuts.push({id:'s-'+id,name:id+'.txt',target:file.target,workspaceFileId:file.workspaceFileId,placements:[{id:'p-'+id,parentId:'root',order:0}]});}
+  const loaded=await a.replica.load('w');assert.equal((await a.replica.save('w',doc,loaded.revision)).ok,true);
+  let active=0,most=0;const failing=hash('content f3');
+  b.copyHook=async paths=>{active++;most=Math.max(most,active);await new Promise(r=>setTimeout(r,20));active--;if(paths[0].endsWith(failing))throw Error('cable unplugged');};
+  await assert.rejects(sync(b,a),/cable unplugged/);
+  assert.ok(most>1&&most<=3,'copies overlapped, at most three at once: '+most);
+  for(const id of ids)assert.equal(b.content.has(hash('content '+id)),id!=='f3',id);
+  b.copyHook=null;await sync(b,a);assert.ok(b.content.has(failing),'the failed copy succeeds on the next sync');
 });

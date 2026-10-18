@@ -181,6 +181,11 @@
       });
       await reconcile();reply.pending=(await transaction(journal=>publications(journal))).length;return reply;
     }
+    async function runLimited(jobs,limit){
+      const failures=[];let next=0;
+      await Promise.all(Array.from({length:Math.min(limit,jobs.length)},async()=>{while(next<jobs.length){const job=jobs[next++];try{await job();}catch(error){failures.push(error);}}}));
+      return failures;
+    }
     async function syncWith(peer,send){
       await reconcile();const message=await transaction(async(journal,stamps)=>({workspaceProtocol:1,vv:structuredClone(journal.vv),acks:structuredClone(journal.peers),changes:S.changesSince(journal.state,stamps,journal.peers[peer.id]?.vv||{})}));
       const reply=await send(message);if(reply?.workspaceProtocol!==1)throw Error('Update the other device to sync blob workspaces.');
@@ -188,8 +193,12 @@
       const ownRoot=await files({operation:'content-root'});
       const localNeeded=await transaction(needed);
       const remoteRoot='\\\\papers~'+peer.id+'\\'+reply.contentRoot;
-      for(const item of localNeeded)if(!(reply.needed||[]).some(missing=>missing.hash===item.hash))await copy([remoteRoot+'\\'+item.hash],ownRoot.path);
-      for(const item of reply.needed||[]){const source=await files({operation:'content-check',hash:item.hash});if(source.available)await copy([source.path],remoteRoot);}
+      // File contents copy up to three at a time in each direction, so one large file does not hold
+      // up small ones in other folders. A failed copy does not stop the others; it is reported after.
+      const pulls=localNeeded.filter(item=>!(reply.needed||[]).some(missing=>missing.hash===item.hash)).map(item=>()=>copy([remoteRoot+'\\'+item.hash],ownRoot.path));
+      const pushes=(reply.needed||[]).map(item=>async()=>{const source=await files({operation:'content-check',hash:item.hash});if(source.available)await copy([source.path],remoteRoot);});
+      const failures=(await Promise.all([runLimited(pulls,3),runLimited(pushes,3)])).flat();
+      if(failures.length)throw failures[0];
       const confirmed=await send({workspaceProtocol:1,vv:reply.vv,changes:[],acks:await transaction(async journal=>structuredClone(journal.peers))});
       await transaction(async journal=>{journal.peers[peer.id]={name:peer.name,node:confirmed.node,vv:confirmed.vv,at:now(),waiting:(confirmed.needed?.length||0)+(confirmed.pending||0)};mergeAcks(journal,confirmed.acks);});
       await reconcile();return {ok:true};
