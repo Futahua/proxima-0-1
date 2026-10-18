@@ -51,13 +51,16 @@
  }catch(e){pane.parts.status.textContent=e.message;}}
  // One As you Go page stays alive for every blob: opening another blob moves it to that folder
  // instead of loading As you Go again, and a new page stays invisible until its first themed render.
- let readyTimer=0;
+ let readyTimer=0,frameReady=false,wantedFolder=null;
  function note(text){let el=pane.parts.body.querySelector('.blob-workspace-note');if(!el){el=document.createElement('p');el.className='blob-workspace-note';pane.parts.body.prepend(el);}el.textContent=text;el.hidden=!text;if(frame)frame.hidden=!!text;}
  function revealFrame(){clearTimeout(readyTimer);if(frame)frame.style.visibility='';}
+ // The page hears folder requests only once it is ready; a request made earlier (opening a blob
+ // while the page is still preloading another folder) waits here and is sent on 'ready'.
+ function goToWanted(){if(!frame||!frameReady||!wantedFolder)return;frame.contentWindow.postMessage({type:'proxima:workspace:open-folder',workspaceId:ROOT,folderId:wantedFolder},origin);frameFolder=wantedFolder;}
  async function createFrame(folderId,title){
   const phone=new URL(location.href).searchParams.has('papers-phone'),entry=phone?{url:new URL('../ayg/workspace-20260730b.html',location.href).href}:(await root.ProximaWorkspaces.request('papers:project:workspace-template')).template;if(!entry?.url)throw Error('As you Go is unavailable on this device.');
   const url=new URL(entry.url);url.searchParams.set('papers-blob-workspace',ROOT);url.searchParams.set('as-you-go-folder',folderId);url.searchParams.set('papers-blob-parent-origin',location.origin==='null'?location.protocol+'//'+location.host:location.origin);url.searchParams.set('papers-embedded-surface','proxima-blob');url.searchParams.set('papers-inline-device','1');if(phone)url.searchParams.set('papers-phone','1');origin=url.origin==='null'?url.protocol+'//'+url.host:url.origin;
-  frame=document.createElement('iframe');frame.title=title+' · As you Go';frame.style.visibility='hidden';frame.src=url.href;frameFolder=folderId;pane.parts.body.append(frame);
+  frameReady=false;frame=document.createElement('iframe');frame.title=title+' · As you Go';frame.style.visibility='hidden';frame.src=url.href;frameFolder=folderId;pane.parts.body.append(frame);
   // Never leave the pane blank if the page cannot say it is ready.
   readyTimer=setTimeout(revealFrame,8000);
  }
@@ -74,7 +77,8 @@
   const folder=await root.ProximaWorkspaces.ensureFolder(ROOT,folderId,item.name);folders.set(folderId,folder);
   if(folder.binned)return mount(id);
   // Every opening enters the blob's own folder, wherever the pane was left before.
-  if(frame){if(frameFolder!==folderId){frame.contentWindow.postMessage({type:'proxima:workspace:open-folder',workspaceId:ROOT,folderId},origin);frameFolder=folderId;}frame.title=item.name+' · As you Go';}
+  wantedFolder=folderId;
+  if(frame){frame.title=item.name+' · As you Go';goToWanted();}
   else await createFrame(folderId,item.name);
   await report();refreshTimelines();
  }
@@ -84,7 +88,7 @@
  function open(id){chain=chain.catch(()=>{}).then(()=>mount(id)).catch(e=>{build();pane.hidden=false;pane.parts.status.textContent=e.message;});return chain;}
  addEventListener('message',event=>{if(!frame||event.source!==frame.contentWindow||event.origin!==origin||event.data?.workspaceId!==ROOT)return;const v=event.data;
   if(v.type==='proxima:workspace:close'){pane.hidden=true;return;}
-  if(v.type==='proxima:workspace:ready'){revealFrame();return;}
+  if(v.type==='proxima:workspace:ready'){frameReady=true;goToWanted();revealFrame();return;}
   if(v.type==='proxima:workspace:flushed'){const t=flushes.get(v.requestId);if(t){flushes.delete(v.requestId);clearTimeout(t.timer);v.ok?t.resolve():t.reject(Error(v.error));}return;}
   if(v.type!=='proxima:workspace:request'||typeof v.requestId!=='string'||!Array.isArray(v.args))return;
   const source=event.source,target=origin;Promise.resolve(root.ProximaWorkspaces.frameCall(ROOT,v.method,v.args)).then(result=>source.postMessage({type:'proxima:workspace:result',requestId:v.requestId,workspaceId:ROOT,ok:true,result},target),error=>source.postMessage({type:'proxima:workspace:result',requestId:v.requestId,workspaceId:ROOT,ok:false,error:error.message},target));
@@ -103,6 +107,6 @@
  }
  addEventListener('proxima:blob-open',event=>void open(event.detail.id));
  document.addEventListener('dblclick',event=>{if(event.target.closest('input,button,.exact-resize-edge,.exact-queue-boundary'))return;const node=event.target.closest('.exact-selectable,.exact-outside-name');if(!propagated(node?.interval))return;event.preventDefault();event.stopImmediatePropagation();void open(node.interval.id);},true);
- root.ProximaBlobWorkspaces=Object.freeze({open,flush,button});
+ root.ProximaBlobWorkspaces=Object.freeze({open,flush,button,prewarm});
  const previousFlush=root.__papersFlushBeforeClose;root.__papersFlushBeforeClose=async()=>{await flush();await previousFlush?.();await root.ProximaWorkspaces.flush();return {ok:true};};
 })(globalThis);
