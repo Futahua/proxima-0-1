@@ -3,7 +3,9 @@
  * no device-name button and no copy button (creator, 2026-10-14).
  *
  * Every device keeps its own full Proxima and works offline. A couple of seconds after an edit and
- * every 30 seconds, this device exchanges what the other has not seen with each device it can reach;
+ * every 10 seconds (20 on the phone), this device exchanges calendar changes the other has not seen
+ * with every device it can reach, all at once, so a slow or unreachable device delays no one (an edit
+ * made on BOP's web page arrives within seconds). Blob folder files sync in their own 30-second loop;
  * both sides merge field by field (the later edit wins) and repair. A device the last exchange could
  * not reach (offline, or Proxima not open there) is retried after 1, 2, 4 … 30 minutes. Merges that
  * had to decide something are reported in a short note.
@@ -19,7 +21,8 @@
   if(new URL(location.href).searchParams.get('papers-device'))return; // a view of another device's Proxima
   const api=root.__proximaDeviceCopy,sync=root.ProximaSync;
   if(!api||!sync)return;
-  const SYNC_EVERY=30000,AFTER_EDIT=2000;
+  const PHONE=new URL(location.href).searchParams.has('papers-phone');
+  const CALENDAR_EVERY=PHONE?20000:10000,FILES_EVERY=30000,AFTER_EDIT=2000;
 
   // The device-name button and the old copy button have no purpose with one Proxima.
   const style=document.createElement('style');
@@ -34,7 +37,6 @@
     try{
       const {self}=await devices();
       const result=await sync.syncWith(device.id,message=>api.exchange(device,message),{self:self.name,peer:device.name});
-      if(root.ProximaWorkspaces)await root.ProximaWorkspaces.syncWith(device,message=>api.exchange(device,message));
       dispatchEvent(new Event('proxima-sync:conflicts')); // a merge can add conflicts without changing what shows
       status.set(device.id,{state:'ok',at:Date.now()});
       if(result.notes.length)api.toast('Synced with '+device.name+': '+result.notes.join(' '),9000);
@@ -43,15 +45,23 @@
       status.set(device.id,{state:'failed',at:Date.now(),error:error.message,wait,retryAt:Date.now()+wait});
     }
   }
+  const reachable=async()=>{const {others}=await devices();return others.filter(device=>!(status.get(device.id)?.retryAt>Date.now()));};
   async function syncAll(){
     if(running)return running;
-    running=(async()=>{try{const {others}=await devices();for(const device of [...others].sort((a,b)=>(/sloptop/i.test(b.name)?1:0)-(/sloptop/i.test(a.name)?1:0)))if(!(status.get(device.id)?.retryAt>Date.now()))await syncOne(device);}catch{}finally{running=null;caughtUp?.();}})();
+    running=(async()=>{try{await Promise.all((await reachable()).map(syncOne));}catch{}finally{running=null;caughtUp?.();}})();
     return running;
+  }
+  // Blob folder records and files: slower, and kept apart so they never hold up calendar edits.
+  let filesRunning=null;
+  function syncFiles(){
+    if(filesRunning||!root.ProximaWorkspaces)return filesRunning;
+    filesRunning=(async()=>{try{await Promise.all((await reachable()).filter(device=>status.get(device.id)?.state==='ok').map(device=>root.ProximaWorkspaces.syncWith(device,message=>api.exchange(device,message)).catch(()=>{})));}catch{}finally{filesRunning=null;}})();
+    return filesRunning;
   }
   function schedule(ms){clearTimeout(timer);timer=setTimeout(()=>{if(driving)void syncAll();},ms);}
   // One open Proxima page per device drives; another takes over when it closes.
   function drive(){
-    const start=()=>{driving=true;schedule(1500);setInterval(()=>void syncAll(),SYNC_EVERY);addEventListener('proxima-sync:local-change',()=>schedule(AFTER_EDIT));return new Promise(()=>{});};
+    const start=()=>{driving=true;schedule(1500);setInterval(()=>void syncAll(),CALENDAR_EVERY);setTimeout(()=>{void syncFiles();setInterval(()=>void syncFiles(),FILES_EVERY);},5000);addEventListener('proxima-sync:local-change',()=>schedule(AFTER_EDIT));return new Promise(()=>{});};
     if(root.navigator?.locks)navigator.locks.request('proxima-sync-driver',start);else void start();
   }
 
@@ -84,7 +94,7 @@
   addEventListener('message',event=>{if(event.source===parent&&event.data?.type==='papers:phone:owner-changed')void sync.ready.then(()=>{if(typeof Store!=='undefined')return Store.remoteProjection({ownerId:'computer',backpackId:'proxima'}).then(()=>{dispatchEvent(new Event('proxima:remote-imported'));const t=document.querySelector('.exact-timeline');if(t)root.ExactTimeline?.mount(t,null)?.refresh();});});});
 
   // For checks: the sync state and an immediate sync.
-  root.__proximaMirror={devices,status:()=>status,syncNow:syncAll};
+  root.__proximaMirror={devices,status:()=>status,syncNow:syncAll,syncFiles};
   // Automatic changes (a queue freezing when its time is up) wait until this device has caught up with
   // the others it can reach, so a device opened after a while does not redo, from its old copy, what
   // another device already did. At most 20 seconds when a device does not answer.

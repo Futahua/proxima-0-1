@@ -50,3 +50,18 @@ test('a contact received by a page that does not drive still clears the driving 
   assert.equal(network.attempts.length,before+1);
   assert.equal(driver.__proximaMirror.status().get('phone').state,'ok');
 });
+
+test('a device that never answers does not hold up syncing with the others',async()=>{
+  const finished=[];
+  const context=vm.createContext({
+    location:{href:'https://proxima.test/index.html'},URL,Map,Promise,Date,Error,Event,setTimeout,clearTimeout,setInterval:()=>0,
+    navigator:{locks:{request:(_n,start)=>start()}},
+    document:{createElement:()=>({}),head:{append(){}}},localStorage:{removeItem(){}},addEventListener(){},dispatchEvent(){},
+    __proximaDeviceCopy:{devices:async()=>({self:{name:'SlopTop'},others:[{id:'phone',name:'Poordroid'},{id:'bop',name:'BOP'}]}),exchange:async()=>({}),toast(){}},
+    ProximaSync:{ready:Promise.resolve(),exchange:async()=>({}),syncWith:async id=>{if(id==='phone')await new Promise(()=>{});finished.push(id);return {notes:[]};}},
+  });
+  context.globalThis=context;vm.runInContext(source,context);
+  await wait(1700); // the first round starts 1.5 s after startup
+  assert.deepEqual(finished,['bop']);
+  assert.equal(context.__proximaMirror.status().get('bop').state,'ok');
+});
