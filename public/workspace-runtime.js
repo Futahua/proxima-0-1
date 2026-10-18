@@ -25,6 +25,35 @@
   function reconcile(){return reconciling??=(replica.reconcile().then(issues=>{if(issues.length)errors.set('local',{message:issues[0].message});else errors.delete('local');return issues;}).finally(()=>{reconciling=null;}));}
   const errors=new Map();
   async function syncWith(peer,send){try{await replica.syncWith(peer,send);errors.delete(peer.id);}catch(error){errors.set(peer.id,{name:peer.name,message:error.message});throw error;}}
+  // Pictures in the synced root travel to every device inside its records and are only shown as
+  // small icons, so a large pasted image is stored at most 128 px. One that cannot be read is kept.
+  const shrunk=new Map();
+  async function shrinkImage(url){
+    if(url.length<24000)return url;
+    if(shrunk.has(url))return shrunk.get(url);
+    let out=url;
+    try{
+      // Decoded directly: the page's content policy may not allow fetching data: addresses.
+      const [head,body='']=url.split(','),type=(/^data:([^;,]+)/.exec(head)||[])[1]||'image/png',bytes=head.includes(';base64')?Uint8Array.from(atob(body),c=>c.charCodeAt(0)):new TextEncoder().encode(decodeURIComponent(body));
+      const bitmap=await createImageBitmap(new Blob([bytes],{type})),scale=Math.min(1,128/Math.max(bitmap.width,bitmap.height)),w=Math.max(1,Math.round(bitmap.width*scale)),h=Math.max(1,Math.round(bitmap.height*scale));
+      const canvas=typeof OffscreenCanvas==='function'?new OffscreenCanvas(w,h):Object.assign(root.document.createElement('canvas'),{width:w,height:h});
+      canvas.getContext('2d').drawImage(bitmap,0,0,w,h);bitmap.close?.();
+      const small=canvas.convertToBlob?await canvas.convertToBlob({type:'image/webp',quality:.85}):await new Promise(resolve=>canvas.toBlob(resolve,'image/webp',.85));
+      const encoded=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(small);});
+      if(typeof encoded==='string'&&encoded.length<url.length)out=encoded;
+    }catch{/* keep the original */}
+    shrunk.set(url,out);return out;
+  }
+  async function shrinkPictures(doc){
+    const visit=async value=>{
+      if(typeof value==='string')return value.startsWith('data:image/')?shrinkImage(value):value;
+      if(Array.isArray(value)){for(let i=0;i<value.length;i++)value[i]=await visit(value[i]);return value;}
+      if(value&&typeof value==='object')for(const key of Object.keys(value))value[key]=await visit(value[key]);
+      return value;
+    };
+    for(const item of [...(doc.groups||[]),...(doc.shortcuts||[])])if(item.icon)item.icon=await visit(item.icon);
+    return doc;
+  }
   async function prepareDocument(workspaceId,raw){
     const document=typeof raw==='string'?JSON.parse(raw):structuredClone(raw);
     const previous=(await replica.load(workspaceId)).state;
@@ -79,6 +108,7 @@
     if(method==='save'){
       const current=await replica.load(workspaceId);if(current.revision!==args[1])return {ok:false,code:'STALE_REVISION'};
       const document=args[2]?.automatic?(typeof args[0]==='string'?JSON.parse(args[0]):structuredClone(args[0])):await prepareDocument(workspaceId,args[0]);
+      await shrinkPictures(document);
       // Importing files changes only the version collection. Read its new
       // checked revision before committing this same serialized local action.
       const baseline=await replica.load(workspaceId);if(baseline.entryRevision!==current.entryRevision)return {ok:false,code:'STALE_REVISION'};

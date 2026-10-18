@@ -74,13 +74,16 @@
   pane.parts.select.value='as-you-go';pane.classList.add('has-folder');note('');
   const folderId=item.template.folderId;
   // Opening (or choosing) creates the folder if it is not here yet, and keeps its name the blob's.
-  const folder=await root.ProximaWorkspaces.ensureFolder(ROOT,folderId,item.name);folders.set(folderId,folder);
-  if(folder.binned)return mount(id);
+  // An existing folder opens at once; checking its name waits for no one (on the phone the shared
+  // record queue can be busy with file work for a long time).
+  const known=folders.get(folderId);
+  if(known?.exists){void root.ProximaWorkspaces.ensureFolder(ROOT,folderId,item.name).then(folder=>{folders.set(folderId,folder);if(folder.binned&&selected===id)void open(id);}).catch(()=>{});}
+  else{const folder=await root.ProximaWorkspaces.ensureFolder(ROOT,folderId,item.name);folders.set(folderId,folder);if(folder.binned)return mount(id);}
   // Every opening enters the blob's own folder, wherever the pane was left before.
   wantedFolder=folderId;
   if(frame){frame.title=item.name+' · As you Go';goToWanted();}
   else await createFrame(folderId,item.name);
-  await report();refreshTimelines();
+  void report();refreshTimelines();
  }
  // Load the page ahead of the first opening, so that opening is quick.
  function prewarm(){if(frame)return;const item=Store.timelineIntervals().find(propagated);if(!item)return;build();if(!frame)void createFrame(item.template.folderId,item.name).catch(()=>{});}
