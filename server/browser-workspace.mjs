@@ -8,7 +8,11 @@ export function createBrowserWorkspace(engine,{store,uploads,receipts,atomic}){
  const virtual=item=>'P:\\Proxima\\'+item.workspaceFileId+'\\'+(item.workspaceFilename||item.name).replace(/[\\/]/g,'_');
  function browser(document){const doc=structuredClone(document);for(const item of doc.shortcuts||[])if(item.workspaceFileId){item.target=virtual(item);item.fileTarget={...item.fileTarget,path:item.target,id:item.workspaceFileId};}return doc;}
  async function load(ws){const result=await engine.replica.load(ws);return {...result,state:browser(result.state)};}
- async function found(ws,detail){const doc=(await engine.replica.load(ws)).state,item=doc.shortcuts.find(x=>x.workspaceFileId&&(detail.targetId===x.workspaceFileId||detail.path===virtual(x)||detail.id===x.id));if(!item)throw fail('This file is not in the workspace.');const history=await engine.replica.history(ws,item.workspaceFileId),head=history.heads.length===1?history.heads[0]:null;return {item,history,head,target:{targetId:item.workspaceFileId,id:item.workspaceFileId,path:virtual(item),name:item.name,kind:'file',revision:history.versions.length+1,status:history.deleted?'deleted':item.workspaceAvailability==='local'&&!history.conflict?'present':'unavailable'}};}
+ // One file is looked up alone (its id is in its virtual path); only an unknown path reads the whole workspace.
+ async function found(ws,detail){const id=detail.targetId||/^P:\\Proxima\\([^\\]+)\\/.exec(detail.path||'')?.[1]||detail.id,one=id?await engine.replica.entry(ws,id):null;let item,history;
+  if(one&&(!detail.path||detail.path===virtual(one.item))){item=one.item;history=one.history;}
+  else{const doc=(await engine.replica.load(ws)).state;item=doc.shortcuts.find(x=>x.workspaceFileId&&(detail.targetId===x.workspaceFileId||detail.path===virtual(x)||detail.id===x.id));if(!item)throw fail('This file is not in the workspace.');history=await engine.replica.history(ws,item.workspaceFileId);}
+  const head=history.heads.length===1?history.heads[0]:null;return {item,history,head,target:{targetId:item.workspaceFileId,id:item.workspaceFileId,path:virtual(item),name:item.name,kind:'file',revision:history.versions.length+1,status:history.deleted?'deleted':item.workspaceAvailability==='local'&&!history.conflict?'present':'unavailable'}};}
  async function restoreLatest(ws,id){const history=await engine.replica.history(ws,id),byId=new Map(history.versions.map(x=>[x.id,x])),queue=history.heads.flatMap(x=>x.parents);let version;while(queue.length&&!version){const v=byId.get(queue.shift());if(v?.kind==='content')version=v;else if(v)queue.push(...v.parents);}if(!version)throw fail('No recoverable content version is available.');await engine.replica.restore(ws,id,version.id);}
  async function save(ws,args){
   const current=await engine.replica.load(ws);if(current.revision!==args[1])return {ok:false,code:'STALE_REVISION'};
@@ -66,7 +70,7 @@ export function createBrowserWorkspace(engine,{store,uploads,receipts,atomic}){
   if(method==='resolveMetadata')return engine.replica.resolveMetadata(ws,...args);
   if(method==='restore')return engine.replica.restore(ws,...args);
   if(method==='file')return file(ws,args[0],args[1]);
-  if(method==='entry'){const doc=(await engine.replica.load(ws)).state,item=doc.shortcuts.find(x=>x.id===args[0].id);if(item&&!item.workspaceFileId&&/^https?:\/\//i.test(item.target))return item;return browser({shortcuts:[(await found(ws,args[0])).item]}).shortcuts[0];}
+  if(method==='entry'){const one=await engine.replica.entry(ws,args[0].id);if(one)return browser({shortcuts:[(await found(ws,{targetId:one.item.workspaceFileId})).item]}).shortcuts[0];const doc=(await engine.replica.load(ws)).state,item=doc.shortcuts.find(x=>x.id===args[0].id);if(item&&!item.workspaceFileId&&/^https?:\/\//i.test(item.target))return item;return browser({shortcuts:[(await found(ws,args[0])).item]}).shortcuts[0];}
   throw fail('Unknown workspace action.');
  }
  return {call};

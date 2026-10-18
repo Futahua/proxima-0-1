@@ -20,6 +20,8 @@
    const doc=typeof args[0]==='string'?JSON.parse(args[0]):structuredClone(args[0]);for(const item of doc.shortcuts||[])if(local.has(item.target))item.target=await upload(item.target);
    const result=await api('api/workspace/frame',{workspaceId:ws,method,args:[doc,args[1],args[2]]});note(result.ok?'Saved on BOP':'The folder changed; checking its latest version…');return result;
   }
+  // Other devices' files need the installed Papers app; answer here instead of asking BOP every poll.
+  if(method==='file'&&args[0]==='remote-files')return {ok:false,code:'BROWSER_UNAVAILABLE',message:'Other devices are reachable from the installed Papers app.'};
   if(method==='file'&&['open','reveal'].includes(args[0]))return launch(await api('api/workspace/frame',{workspaceId:ws,method:'entry',args:[args[1]]}));
   const result=await api('api/workspace/frame',{workspaceId:ws,method,args});
   if(method==='file'&&result.preview?.entryId)result.preview.url=content(result.preview.entryId);
