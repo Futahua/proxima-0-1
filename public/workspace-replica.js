@@ -127,8 +127,12 @@
       return folderOf(journal,workspaceId,folderId);
     });}
     async function entries(){return transaction(async journal=>structuredClone(journal.state.workspaceEntries.filter(record=>record.kind==='shortcut'&&record.workspaceFileId)));}
+    let tidiedAt=0;
     async function reconcile(){
       const errors=[];
+      // Clear duplicate content copies left when two devices pushed the same file at once (at most
+      // once a minute; a device whose Papers predates this simply skips it).
+      if(now()-tidiedAt>60000){tidiedAt=now();await files({operation:'content-tidy'}).catch(()=>{});}
       for(const entry of await entries())try{
         const filename=entry.workspaceFilename||entry.name;
         const binding=await files({operation:'path',workspaceId:entry.workspaceId,entryId:entry.workspaceFileId,name:filename});
