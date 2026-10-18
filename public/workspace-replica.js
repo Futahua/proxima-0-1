@@ -164,7 +164,11 @@
     async function restore(workspaceId,entryId,versionId){
       const newId=uuid();await transaction(async(journal,stamps)=>{const version=journal.state.workspaceVersions.find(v=>v.id===versionId&&v.workspaceId===workspaceId&&v.entryId===entryId&&v.kind==='content');if(!version)throw Error('That recoverable version is unavailable.');author(journal,stamps,W.resolve(journal.state,{workspaceId,entryId,id:newId,hash:version.hash,size:version.size}));});await reconcile();return {ok:true};
     }
-    async function needed(journal){const out=[];for(const value of journal.state.workspaceVersions)if(value.kind==='content'&&!out.some(x=>x.hash===value.hash)&&!(await files({operation:'content-check',hash:value.hash})).available)out.push({hash:value.hash,size:value.size});return out;}
+    // Content is addressed by its hash, so content seen here a moment ago is still here: asking the
+    // device again for every version on every status check kept the phone's record queue busy.
+    const present=new Map();
+    async function has(hash){const seen=present.get(hash);if(seen&&now()-seen<60000)return true;const available=(await files({operation:'content-check',hash})).available;if(available)present.set(hash,now());else present.delete(hash);return available;}
+    async function needed(journal){const out=[];for(const value of journal.state.workspaceVersions)if(value.kind==='content'&&!out.some(x=>x.hash===value.hash)&&!(await has(value.hash)))out.push({hash:value.hash,size:value.size});return out;}
     async function publications(journal,workspaceId=null){const out=[];for(const entry of journal.state.workspaceEntries){if(entry.kind!=='shortcut'||!entry.workspaceFileId||workspaceId&&entry.workspaceId!==workspaceId)continue;const inspection=W.inspect(journal.state,entry.workspaceId,entry.workspaceFileId);if(inspection.conflict||inspection.heads.length!==1)continue;const binding=await files({operation:'path',workspaceId:entry.workspaceId,entryId:entry.workspaceFileId,name:entry.workspaceFilename||entry.name});if(binding.versionId!==inspection.heads[0].id)out.push(entry.id);}return out;}
     // What each device has confirmed, as known here. Exchanges carry it on, so a device that cannot
     // reach another directly (the phone only over SlopTop's cable) still learns that it caught up.
@@ -211,12 +215,17 @@
       await transaction(async journal=>{journal.peers[peer.id]={name:peer.name,node:confirmed.node,vv:confirmed.vv,at:now(),waiting:(confirmed.needed?.length||0)+(confirmed.pending||0)};mergeAcks(journal,confirmed.acks);});
       await reconcile();return {ok:true};
     }
-    async function status(workspaceId,devices=[]){return transaction(async(journal,stamps)=>{
-      const versions=journal.state.workspaceVersions.filter(v=>v.workspaceId===workspaceId),conflict=versions.some(v=>W.inspect(journal.state,workspaceId,v.entryId).conflict)||S.conflictsOf(journal.state,stamps).some(c=>c.key.startsWith('workspaceEntries/'+workspaceId+':'));
-      const missing=(await needed(journal)).filter(item=>versions.some(v=>v.hash===item.hash));
-      const waiting=devices.filter(peer=>!journal.peers[peer.id]||journal.peers[peer.id].waiting||Object.entries(journal.vv).some(([id,n])=>(journal.peers[peer.id].vv[id]||0)<n)).map(peer=>peer.name);
+    // Status only reads: it takes a snapshot in the queue and asks the device about files outside it,
+    // so a status check never holds up opening, saving or syncing.
+    async function status(workspaceId,devices=[]){
+      const {journal,conflict,waiting}=await transaction(async(journal,stamps)=>{
+        const versions=journal.state.workspaceVersions.filter(v=>v.workspaceId===workspaceId),conflict=versions.some(v=>W.inspect(journal.state,workspaceId,v.entryId).conflict)||S.conflictsOf(journal.state,stamps).some(c=>c.key.startsWith('workspaceEntries/'+workspaceId+':'));
+        const waiting=devices.filter(peer=>!journal.peers[peer.id]||journal.peers[peer.id].waiting||Object.entries(journal.vv).some(([id,n])=>(journal.peers[peer.id].vv[id]||0)<n)).map(peer=>peer.name);
+        return {journal:structuredClone(journal),conflict,waiting};
+      });
+      const versions=journal.state.workspaceVersions.filter(v=>v.workspaceId===workspaceId),missing=(await needed(journal)).filter(item=>versions.some(v=>v.hash===item.hash));
       return W.status({localDurable:true,available:!missing.length,pendingPublication:!missing.length&&(await publications(journal,workspaceId)).length>0,conflict,requiredDevices:devices.map(peer=>peer.name),acknowledgedDevices:devices.filter(peer=>!waiting.includes(peer.name)).map(peer=>peer.name)});
-    });}
+    }
     async function history(workspaceId,entryId){return transaction(async journal=>({versions:structuredClone(journal.state.workspaceVersions.filter(v=>v.workspaceId===workspaceId&&v.entryId===entryId)),...W.inspect(journal.state,workspaceId,entryId)}));}
     async function conflicts(workspaceId){return transaction(async(journal,stamps)=>[...S.conflictsOf(journal.state,stamps).filter(c=>c.key.startsWith('workspaceEntries/'+workspaceId+':')).map(c=>({...c,type:'metadata',name:journal.state.workspaceEntries.find(e=>'workspaceEntries/'+e.id===c.key)?.name||c.field||'Workspace entry'})),...journal.state.workspaceEntries.filter(e=>e.kind==='shortcut'&&e.workspaceId===workspaceId&&e.workspaceFileId).flatMap(entry=>{const state=W.inspect(journal.state,workspaceId,entry.workspaceFileId);return state.conflict?[{entryId:entry.workspaceFileId,name:entry.name,versions:state.heads.map(v=>({...v,device:stamps.get('workspaceVersions/'+v.id+'#kind')?.o===journal.node?'This device':Object.values(journal.peers).find(peer=>peer.node===stamps.get('workspaceVersions/'+v.id+'#kind')?.o)?.name||'Another device'}))}]:[];})]);}
     async function resolveMetadata(workspaceId,conflict,value){return transaction(async(journal,stamps)=>{

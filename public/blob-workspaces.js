@@ -40,10 +40,13 @@
    if(!r.ok)throw Error('The blob changed before its template could be saved.');
    await mount(selected);refreshTimelines();
   }catch(e){status.textContent=e.message;}finally{select.disabled=false;}};
-  setInterval(()=>{if(!pane.hidden&&frame)void report();},3000);
+  setInterval(()=>{if(!pane.hidden&&frame&&!reporting)void report();},3000);
  }
  async function flush(){if(!frame)return;const requestId=crypto.randomUUID();return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{flushes.delete(requestId);reject(Error('The file pane has not confirmed saving yet.'));},15000);flushes.set(requestId,{resolve,reject,timer});frame.contentWindow.postMessage({type:'proxima:workspace:flush',workspaceId:ROOT,requestId},origin);});}
- async function report(){try{const peers=(await root.__proximaDeviceCopy?.devices())?.others||[],state=await root.ProximaWorkspaces.status(ROOT,peers),errors=[...root.ProximaWorkspaces.errors.values()];pane.parts.status.textContent=state.label+(errors.length?' · '+errors[0].message:'');pane.parts.status.dataset.state=errors.length?'error':state.kind;
+ // One status check at a time: on the phone a check can take longer than the interval.
+ let reporting=null;
+ function report(){return reporting||(reporting=reportNow().finally(()=>{reporting=null;}));}
+ async function reportNow(){try{const peers=(await root.__proximaDeviceCopy?.devices())?.others||[],state=await root.ProximaWorkspaces.status(ROOT,peers),errors=[...root.ProximaWorkspaces.errors.values()];pane.parts.status.textContent=state.label+(errors.length?' · '+errors[0].message:'');pane.parts.status.dataset.state=errors.length?'error':state.kind;
   // Nothing shows while everything is synced; waiting, conflicts and errors always do.
   pane.parts.status.hidden=!errors.length&&['synced','local'].includes(state.kind);
   const conflicts=await root.ProximaWorkspaces.conflicts(ROOT);const area=pane.parts.conflicts;area.replaceChildren();area.hidden=!conflicts.length;
@@ -56,7 +59,9 @@
  function revealFrame(){clearTimeout(readyTimer);if(frame)frame.style.visibility='';}
  // The page hears folder requests only once it is ready; a request made earlier (opening a blob
  // while the page is still preloading another folder) waits here and is sent on 'ready'.
- function goToWanted(){if(!frame||!frameReady||!wantedFolder)return;frame.contentWindow.postMessage({type:'proxima:workspace:open-folder',workspaceId:ROOT,folderId:wantedFolder},origin);frameFolder=wantedFolder;}
+ function goToWanted(){if(!frame||!wantedFolder)return;
+  // Sent before 'ready' too: a page still starting keeps it and opens that folder first.
+  if(!frameReady){try{frame.contentWindow.postMessage({type:'proxima:workspace:open-folder',workspaceId:ROOT,folderId:wantedFolder},origin);}catch{}return;}frame.contentWindow.postMessage({type:'proxima:workspace:open-folder',workspaceId:ROOT,folderId:wantedFolder},origin);frameFolder=wantedFolder;}
  async function createFrame(folderId,title){
   const phone=new URL(location.href).searchParams.has('papers-phone'),entry=phone?{url:new URL('../ayg/workspace-20260730b.html',location.href).href}:(await root.ProximaWorkspaces.request('papers:project:workspace-template')).template;if(!entry?.url)throw Error('As you Go is unavailable on this device.');
   const url=new URL(entry.url);url.searchParams.set('papers-blob-workspace',ROOT);url.searchParams.set('as-you-go-folder',folderId);url.searchParams.set('papers-blob-parent-origin',location.origin==='null'?location.protocol+'//'+location.host:location.origin);url.searchParams.set('papers-embedded-surface','proxima-blob');url.searchParams.set('papers-inline-device','1');if(phone)url.searchParams.set('papers-phone','1');origin=url.origin==='null'?url.protocol+'//'+url.host:url.origin;
@@ -91,7 +96,9 @@
  function open(id){chain=chain.catch(()=>{}).then(()=>mount(id)).catch(e=>{build();pane.hidden=false;pane.parts.status.textContent=e.message;});return chain;}
  addEventListener('message',event=>{if(!frame||event.source!==frame.contentWindow||event.origin!==origin||event.data?.workspaceId!==ROOT)return;const v=event.data;
   if(v.type==='proxima:workspace:close'){pane.hidden=true;return;}
-  if(v.type==='proxima:workspace:ready'){frameReady=true;goToWanted();revealFrame();return;}
+  // Show the page only once it shows the folder asked for, so the preloaded folder never flashes first.
+  if(v.type==='proxima:workspace:ready'){frameReady=true;if(!v.folderId||v.folderId===wantedFolder||!wantedFolder){revealFrame();return;}goToWanted();clearTimeout(readyTimer);readyTimer=setTimeout(revealFrame,2000);return;}
+  if(v.type==='proxima:workspace:folder-opened'){if(v.folderId===wantedFolder)revealFrame();return;}
   if(v.type==='proxima:workspace:flushed'){const t=flushes.get(v.requestId);if(t){flushes.delete(v.requestId);clearTimeout(t.timer);v.ok?t.resolve():t.reject(Error(v.error));}return;}
   if(v.type!=='proxima:workspace:request'||typeof v.requestId!=='string'||!Array.isArray(v.args))return;
   const source=event.source,target=origin;Promise.resolve(root.ProximaWorkspaces.frameCall(ROOT,v.method,v.args)).then(result=>source.postMessage({type:'proxima:workspace:result',requestId:v.requestId,workspaceId:ROOT,ok:true,result},target),error=>source.postMessage({type:'proxima:workspace:result',requestId:v.requestId,workspaceId:ROOT,ok:false,error:error.message},target));
