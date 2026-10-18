@@ -80,13 +80,19 @@
     document.shortcuts=[...document.shortcuts.filter(item=>!removed.has(item.id)),...additions];
     return document;
   }
-  async function target(workspaceId,detail){
+  // A file known by its id is looked up alone; only a bare path needs the whole workspace.
+  async function find(workspaceId,detail){
+    if(detail.targetId){const found=await replica.entry(workspaceId,detail.targetId);if(found)return found;}
     const doc=(await replica.load(workspaceId)).state;
     const item=doc.shortcuts.find(item=>item.workspaceFileId&&(detail.targetId===item.workspaceFileId||detail.path===item.target));
-    if(!item)throw Error('This file has not been imported into this workspace.');
-    const available=await files({operation:'path',workspaceId,entryId:item.workspaceFileId,name:item.workspaceFilename||item.name});
-    if(available.available)await replica.capture(workspaceId,item.workspaceFileId,item.workspaceFilename||item.name);
-    const history=await replica.history(workspaceId,item.workspaceFileId);
+    return item?{item,history:await replica.history(workspaceId,item.workspaceFileId)}:null;
+  }
+  async function target(workspaceId,detail){
+    let found=await find(workspaceId,detail);
+    if(!found)throw Error('This file has not been imported into this workspace.');
+    const available=await files({operation:'path',workspaceId,entryId:found.item.workspaceFileId,name:found.item.workspaceFilename||found.item.name});
+    if(available.available&&await replica.capture(workspaceId,found.item.workspaceFileId,found.item.workspaceFilename||found.item.name))found=await find(workspaceId,{targetId:found.item.workspaceFileId});
+    const {item,history}=found;
     return {item,target:{targetId:item.workspaceFileId,id:item.workspaceFileId,path:item.target,name:item.name,kind:'file',revision:history.versions.length+1,status:available.available&&item.workspaceAvailability==='local'?'present':history.deleted?'deleted':'unavailable'}};
   }
   // The newest content version before a deletion: what a restore from the Bin brings back.
@@ -119,7 +125,7 @@
     }
     if(method==='flush'){await replica.flush();return {ok:true};}
     if(method==='launch'||method==='reveal'){
-      const doc=(await replica.load(workspaceId)).state,item=doc.shortcuts.find(item=>item.id===args[0]);if(!item)throw Error('That workspace entry is unavailable.');
+      const item=(await replica.entry(workspaceId,args[0]))?.item||(await replica.load(workspaceId)).state.shortcuts.find(item=>item.id===args[0]);if(!item)throw Error('That workspace entry is unavailable.');
       if(item.workspaceAvailability==='pending')throw Error('This file is waiting to download to this device.');
       return call(method==='launch'?'open':'reveal',{path:item.target});
     }

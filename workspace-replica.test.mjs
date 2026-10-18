@@ -126,3 +126,12 @@ test('file contents copy several at a time, and one failed copy does not stop th
   for(const id of ids)assert.equal(b.content.has(hash('content '+id)),id!=='f3',id);
   b.copyHook=null;await sync(b,a);assert.ok(b.content.has(failing),'the failed copy succeeds on the next sync');
 });
+test('one file is looked up alone, by its file id or its entry id, exactly as the full workspace shows it',async()=>{
+  replicas.clear();const d=device('lookup');const file=await link(d);
+  const whole=plain((await d.replica.load('w')).state.shortcuts[0]),history=plain(await d.replica.history('w',file.workspaceFileId));
+  for(const id of [file.workspaceFileId,'shortcut-one']){
+    const found=await d.replica.entry('w',id);
+    assert.deepEqual(plain(found.item),whole);assert.deepEqual(plain(found.history),history);
+  }
+  assert.equal(await d.replica.entry('w','missing'),null);
+});

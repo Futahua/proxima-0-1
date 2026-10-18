@@ -38,6 +38,26 @@
       for(const field of ['graphPositions','graphRestPositions','itemSets','iconSize'])if(document.view?.[field]!==undefined)records.push({id:recordKey(workspaceId,'view',field),recordId:field,workspaceId,kind:'view',value:structuredClone(document.view[field])});
       return records;
     }
+    async function bind(journal,workspaceId,item){
+      const binding=await files({operation:'path',workspaceId,entryId:item.workspaceFileId,name:item.workspaceFilename||item.name});item.target=binding.path;
+      const inspection=W.inspect(journal.state,workspaceId,item.workspaceFileId);
+      item.workspaceAvailability=binding.available&&(inspection.conflict||inspection.heads.some(v=>v.id===binding.versionId&&v.kind==='content'))?'local':'pending';item.workspaceConflict=inspection.conflict;
+      // The same recoverable deletion appears in every replica's ordinary AYG Bin.
+      if(inspection.deleted)for(const placement of item.placements)placement.bin??={parentId:placement.parentId,order:placement.order??0,binnedAt:'1970-01-01T00:00:00.000Z'};
+      return binding;
+    }
+    // One file, without building the whole workspace: opening or checking a file asks the device
+    // about that file only. Matches the file's id or its entry's id.
+    async function entry(workspaceId,id){
+      const snapshot=await transaction(async journal=>{
+        const records=journal.state.workspaceEntries.filter(value=>value.workspaceId===workspaceId),value=records.find(e=>e.kind==='shortcut'&&e.workspaceFileId&&(e.workspaceFileId===id||e.recordId===id));if(!value)return null;
+        const {workspaceId:_w,kind,id:_id,recordId,...item}=structuredClone(value);item.id=recordId;
+        item.placements=records.filter(p=>p.kind==='placement'&&p.shortcutId===recordId).map(({workspaceId,kind,id,recordId,shortcutId,...p})=>({...p,id:recordId}));
+        return {item,journal:{state:{workspaceVersions:journal.state.workspaceVersions.filter(v=>v.workspaceId===workspaceId&&v.entryId===value.workspaceFileId)}}};
+      });
+      if(!snapshot)return null;const {item,journal}=snapshot;await bind(journal,workspaceId,item);
+      return {item,history:{versions:journal.state.workspaceVersions,...W.inspect(journal.state,workspaceId,item.workspaceFileId)}};
+    }
     async function document(journal,workspaceId){
       const records=(journal.state.workspaceEntries||[]).filter(value=>value.workspaceId===workspaceId),groups=[],shortcuts=[];
       for(const value of records){
@@ -45,15 +65,11 @@
         const {workspaceId:_w,kind,id,recordId,...item}=structuredClone(value);item.id=recordId;
         if(kind==='group'){groups.push(item);continue;}
         item.placements=records.filter(p=>p.kind==='placement'&&p.shortcutId===recordId).map(({workspaceId,kind,id,recordId,shortcutId,...p})=>({...p,id:recordId}));
-        if(item.workspaceFileId){
-          const binding=await files({operation:'path',workspaceId,entryId:item.workspaceFileId,name:item.workspaceFilename||item.name});item.target=binding.path;
-          const inspection=W.inspect(journal.state,workspaceId,item.workspaceFileId);
-          item.workspaceAvailability=binding.available&&(inspection.conflict||inspection.heads.some(v=>v.id===binding.versionId&&v.kind==='content'))?'local':'pending';item.workspaceConflict=inspection.conflict;
-          // The same recoverable deletion appears in every replica's ordinary AYG Bin.
-          if(inspection.deleted)for(const placement of item.placements)placement.bin??={parentId:placement.parentId,order:placement.order??0,binnedAt:'1970-01-01T00:00:00.000Z'};
-        }
         shortcuts.push(item);
       }
+      // One device call per file: asked together, not one after another (a folder of forty files took
+      // seconds on the phone).
+      await Promise.all(shortcuts.filter(item=>item.workspaceFileId).map(item=>bind(journal,workspaceId,item)));
       const view={...(journal.views[workspaceId]||{preferences:{theme:'dark',workspaceNavigatorMode:'list'}})};for(const record of records)if(record.kind==='view')view[record.recordId]=structuredClone(record.value);
       // Keep a concurrent cycle or orphan visible without rewriting human records.
       const byId=new Map(groups.map(g=>[g.id,g]));
@@ -104,7 +120,7 @@
     async function capture(workspaceId,entryId,name){
       const observed=await files({operation:'capture',workspaceId,entryId,name});if(observed.hash===observed.baseHash)return;
       const proposed=uuid(),versionId=await transaction(async(journal,stamps)=>{const parents=observed.baseVersion?[observed.baseVersion]:[],known=journal.state.workspaceVersions.find(v=>v.workspaceId===workspaceId&&v.entryId===entryId&&v.hash===observed.hash&&JSON.stringify(v.parents)===JSON.stringify(parents));if(known)return known.id;author(journal,stamps,W.appendVersion(journal.state,{id:proposed,workspaceId,entryId,parents,kind:'content',hash:observed.hash,size:observed.size}),'observed');return proposed;});
-      await files({operation:'publish',workspaceId,entryId,name,hash:observed.hash,versionId});
+      await files({operation:'publish',workspaceId,entryId,name,hash:observed.hash,versionId});return versionId;
     }
     // A blob's folder in the synced root. Missing means not created or not yet synced here;
     // binned (or inside a binned folder) means deleted, which leaves the blob without a template.
@@ -240,7 +256,7 @@
       }else for(const field of Object.keys(record))stamps.set(conflict.key+'#'+field,nextStamp(journal));
       return {ok:true};
     });}
-    return Object.freeze({load,save,importFile,capture,reconcile,exchange,syncWith,remove,restore,status,history,conflicts,resolveMetadata,folder,folders,ensureFolder,flush:()=>tail});
+    return Object.freeze({load,entry,save,importFile,capture,reconcile,exchange,syncWith,remove,restore,status,history,conflicts,resolveMetadata,folder,folders,ensureFolder,flush:()=>tail});
   }
   root.ProximaWorkspaceReplica=Object.freeze({create});
 })(globalThis);
