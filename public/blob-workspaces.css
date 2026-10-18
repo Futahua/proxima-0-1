@@ -2,3 +2,5 @@
 .blob-workspace-conflicts{max-height:32%;overflow:auto;padding:8px 12px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);font-size:11px}.blob-workspace-conflicts[hidden]{display:none}.blob-workspace-conflicts>div{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0}.blob-workspace-conflicts strong{flex-basis:100%}.blob-workspace-conflicts button{font:inherit;border:1px solid var(--line);background:transparent;color:inherit;border-radius:5px;padding:4px 6px}
 .exact-blob-content.has-picture{background-size:cover;background-position:center;background-repeat:no-repeat;width:22px;height:22px;bottom:-9px;border-radius:5px}
 .blob-workspace-pane.has-folder>header{display:none}.blob-workspace-pane>p[hidden]{display:none}.blob-workspace-pane.has-folder>p:not([hidden]){padding-top:8px}
+/* An off-screen blob's edge label carries its folder button just under the end of its name. */
+.exact-outside-name>.exact-blob-content{right:-6px;bottom:-14px;opacity:1}
