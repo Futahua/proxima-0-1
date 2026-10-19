@@ -6,19 +6,21 @@ import {embeddedPreview,embeddedPreviewExtensions} from './preview-extract.mjs';
 
 // Transport for the existing As you Go blob pane. Native paths never become
 // browser capabilities: every file effect resolves a managed workspace identity.
+// Bump when the way BOP makes or serves a derived preview changes: browsers keep each address forever.
+const RENDER='?r=2';
 export function createBrowserWorkspace(engine,{store,uploads,receipts,atomic,derived}){
  // A picture stored inside a Revit, AutoCAD or SketchUp file, made once per file version and kept by the
  // version's hash (the bytes behind a hash never change, so neither does its picture).
  const making=new Map();
- // A DWG drawn to PDF by the MLight CAD converter (C:\PapersServer\Tools\mlightcad beside the app folders),
+ // A DWG made into MLight CAD's offline drawing viewer (pan, zoom, layers, measuring) by its converter (C:\PapersServer\Tools\mlightcad beside the app folders),
  // one at a time, in the background; the first opening shows the embedded picture meanwhile.
  const converterRoot=process.env.PAPERS_MLIGHTCAD_ROOT||path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..','..','Tools','mlightcad');
- const cli=path.join(converterRoot,'node_modules','@mlightcad','cad-simple-viewer-cli','dist','cli.js'),script=path.join(converterRoot,'node_modules','@mlightcad','cad-simple-viewer-cli','examples','export-pdf.scr');
+ const cli=path.join(converterRoot,'node_modules','@mlightcad','cad-simple-viewer-cli','dist','cli.js'),script=path.join(converterRoot,'node_modules','@mlightcad','cad-simple-viewer-cli','examples','export-html.scr');
  let converting=Promise.resolve();const queued=new Set();
  const exists=file=>access(file).then(()=>true,()=>false);
- async function drawingPdf(hash,contentPath){
-  const target=path.join(derived,hash+'.drawing.pdf');
-  if(await exists(target))return 'drawing.pdf';
+ async function drawingViewer(hash,contentPath){
+  const target=path.join(derived,hash+'.drawing.html');
+  if(await exists(target))return 'drawing.html';
   const failedAt=await stat(path.join(derived,hash+'.drawing.failed')).then(s=>s.mtimeMs,()=>0);
   if(queued.has(hash)||Date.now()-failedAt<6*3600*1000||!await exists(cli))return null; // a failure is retried after 6 hours
   queued.add(hash);
@@ -27,9 +29,9 @@ export function createBrowserWorkspace(engine,{store,uploads,receipts,atomic,der
    try{
     await mkdir(work,{recursive:true});const input=path.join(work,'drawing.dwg');await copyFile(contentPath,input);
     await new Promise((resolve,reject)=>execFile(process.execPath,[cli,'-i',input,'-s',script,'-o',work,'--mode','read','--open-view-mode','extents'],{windowsHide:true,timeout:240000,maxBuffer:4*1024*1024,env:{...process.env,PLAYWRIGHT_BROWSERS_PATH:process.env.PLAYWRIGHT_BROWSERS_PATH||path.join(converterRoot,'..','ms-playwright')}},error=>error?reject(error):resolve()));
-    const pdf=(await readdir(work)).find(name=>name.toLowerCase().endsWith('.pdf'));if(!pdf)throw Error('no PDF');
-    await rename(path.join(work,pdf),target);
-   }catch(error){console.error('DWG to PDF failed for '+hash.slice(0,12)+': '+error.message);await writeFile(path.join(derived,hash+'.drawing.failed'),String(error.message)).catch(()=>{});}
+    const html=(await readdir(work)).find(name=>name.toLowerCase().endsWith('.html'));if(!html)throw Error('no viewer');
+    await rename(path.join(work,html),target);
+   }catch(error){console.error('DWG viewer failed for '+hash.slice(0,12)+': '+error.message);await writeFile(path.join(derived,hash+'.drawing.failed'),String(error.message)).catch(()=>{});}
    finally{queued.delete(hash);await rm(work,{recursive:true,force:true}).catch(()=>{});}
   });
   return null;
@@ -99,9 +101,9 @@ export function createBrowserWorkspace(engine,{store,uploads,receipts,atomic,der
    }
    if(embeddedPreviewExtensions.includes(ext)){
     const content=await engine.native.call('bp-7f977e43-e48d-44f7-9e02-df6bf7ee4349',{operation:'content-check',hash:f.head.hash});
-    if(content.available&&ext==='.dwg'){const pdf=await drawingPdf(f.head.hash,content.path).catch(()=>null);if(pdf)return {ok:true,entry,preview:{kind:'pdf',derived:f.head.hash+'/'+pdf,hash:f.head.hash,mime:'application/pdf'}};}
+    if(content.available&&ext==='.dwg'){const viewer=await drawingViewer(f.head.hash,content.path).catch(()=>null);if(viewer)return {ok:true,entry,preview:{kind:'cad-html',derived:f.head.hash+'/'+viewer+RENDER,hash:f.head.hash,mime:'text/html'}};}
     const thumb=content.available?await derivedThumbnail(f.head.hash,content.path,ext).catch(()=>null):null;
-    if(thumb)return {ok:true,entry,preview:{kind:'image',derived:f.head.hash+'/'+thumb.name,hash:f.head.hash,mime:thumb.mime}};
+    if(thumb)return {ok:true,entry,preview:{kind:'image',derived:f.head.hash+'/'+thumb.name+RENDER,hash:f.head.hash,mime:thumb.mime}};
    }
    const kind=/\.(png|jpe?g|gif|webp|bmp|avif)$/.test(ext)?'image':ext==='.pdf'?'pdf':/\.(mp3|wav|ogg|m4a)$/.test(ext)?'audio':/\.(mp4|webm|mov)$/.test(ext)?'video':'binary';
    return {ok:true,entry,preview:{kind,entryId:f.item.workspaceFileId,workspaceId:ws,hash:f.head.hash}};
