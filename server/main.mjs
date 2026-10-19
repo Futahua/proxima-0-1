@@ -1,3 +1,4 @@
+import {spawn} from 'node:child_process';
 import {readFile,mkdir,open,unlink,writeFile} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {createRequire} from 'node:module';
@@ -87,4 +88,12 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
   const server=await serve(process.argv[2]);
   let closing=false;const shutdown=()=>{if(closing)return;closing=true;server.close().then(()=>process.exit(0),()=>process.exit(1));};
   process.on('SIGTERM',shutdown);process.on('SIGINT',shutdown);
+  // An always-on replica: while it runs, Windows is told the system is in use, so idle sleep cannot take
+  // it offline (BOP slept at 04:33 on 2026-10-19 although every sleep timer said never).
+  if(process.platform==='win32'&&process.env.PAPERS_ALLOW_SLEEP!=='1'){
+    const keepAwake=()=>{const ps=spawn('powershell.exe',['-NoProfile','-NonInteractive','-WindowStyle','Hidden','-Command',
+      "Add-Type -Namespace Papers -Name Power -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint f);';[Papers.Power]::SetThreadExecutionState([uint32]2147483649)|Out-Null;while($true){Start-Sleep 3600}"],{stdio:'ignore',windowsHide:true});
+      ps.on('exit',()=>{if(!closing)setTimeout(keepAwake,60000);});process.on('exit',()=>{try{ps.kill();}catch{}});};
+    keepAwake();console.log('Keeping the system awake while the replica runs.');
+  }
 }
