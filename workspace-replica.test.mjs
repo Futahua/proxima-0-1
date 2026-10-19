@@ -158,3 +158,10 @@ test('storage that hands over the journal text: changes still save and report, r
   const loaded=await replica.load('w');const state={schemaVersion:1,groups:[],shortcuts:[{id:'s1',name:'a.txt',target:loaded.state.shortcuts[0]?.target||'x',workspaceFileId:'file-a',placements:[{id:'p1',parentId:'root',order:0}]}]};
   assert.equal((await replica.save('w',state,loaded.revision)).ok,true);assert.ok(saves>afterImport);assert.equal(events.at(-1).records,true);
 });
+test('live content drops a killed file on every device while its bytes stay in history',async()=>{
+  const a=device('pc'),b=device('phone');await link(a);await sync(a,b);
+  const before=plain(await b.replica.liveContent());assert.equal(before.files,1);assert.ok(before.bytes>0);
+  await a.replica.remove('w','file-one');await sync(a,b);
+  for(const d of [a,b])assert.deepEqual(plain(await d.replica.liveContent()),{files:0,bytes:0});
+  assert.equal(a.content.size>0,true);
+});

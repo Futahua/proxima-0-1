@@ -56,9 +56,9 @@
         try{
           if(device.unlisted)throw Error('Not connected to this device.');
           if(!device.local&&!navigator.onLine)throw Error('This viewing device is offline.');
-          const report=device.local?{storage:await globalThis.ProximaWorkspaces.call('workspace-files',{operation:'storage-status'}),cachePolicy:await globalThis.ProximaWorkspaces.cachePolicy()}:(await api.exchange(device,{workspaceProtocol:1,storageProbe:true,vv:{},changes:[]}));
+          const report=device.local?{storage:await globalThis.ProximaWorkspaces.call('workspace-files',{operation:'storage-status'}),cachePolicy:await globalThis.ProximaWorkspaces.cachePolicy(),live:await globalThis.ProximaWorkspaces.liveContent?.()}:(await api.exchange(device,{workspaceProtocol:1,storageProbe:true,vv:{},changes:[]}));
           const reading=report?.storage;policy=report?.cachePolicy||null;paint();
-          if(!reading||!Number.isFinite(reading.freeBytes))throw Error('Storage reporting unavailable on this version.');readings.set(device.id,reading);try{localStorage.setItem('proxima.device-storage-readings',JSON.stringify([...readings]));}catch{}
+          if(!reading||!Number.isFinite(reading.freeBytes))throw Error('Storage reporting unavailable on this version.');readings.set(device.id,report.live?{...reading,live:report.live}:reading);try{localStorage.setItem('proxima.device-storage-readings',JSON.stringify([...readings]));}catch{}
         }catch(error){state=error.message||'Unavailable';}
         const reading=readings.get(device.id);
         if(reading){
@@ -67,7 +67,8 @@
           free.textContent=size(available)+' free';bar.dataset.capacity=String(shown);
           for(const [kind,bytes] of [['synced',sync],['free',available]]){const part=document.createElement('span');part.className=kind;part.style.width=(shown?bytes/shown*100:0)+'%';part.title=size(bytes)+(kind==='synced'?' sync content':' free');bar.append(part);}
           bar.setAttribute('role','img');bar.setAttribute('aria-label',`${size(sync)} sync content and ${size(available)} free; shared scale across devices; other used space omitted`);
-          const content=document.createElement('span'),capacity=document.createElement('span');content.textContent=size(reading.syncBytes)+' sync · '+reading.syncFiles+' files';capacity.textContent='';detail.replaceChildren(content,capacity);
+          const content=document.createElement('span'),capacity=document.createElement('span');// Live files first; versions kept after a kill are shown as history, so killing a file changes the count.
+          const live=reading.live,history=live?Math.max(0,reading.syncBytes-live.bytes):0;content.textContent=live?live.files+' files · '+size(live.bytes)+(history>=0.005*1024**3?' · '+size(history)+' history':''):size(reading.syncBytes)+' sync · '+reading.syncFiles+' files';content.title=reading.syncFiles+' stored versions, '+size(reading.syncBytes)+' on this device';capacity.textContent='';detail.replaceChildren(content,capacity);
           const fresh=state==='Live reading';row.title=`${reading.volume} · ${fresh?'Read':'Last reading'} ${new Date(reading.at).toLocaleString()}${fresh?'':' · '+state}`;
           if(!fresh){free.classList.add('monitor-stale');capacity.textContent='Cached '+new Date(reading.at).toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});}
           scaleBars();

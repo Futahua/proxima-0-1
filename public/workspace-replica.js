@@ -162,6 +162,9 @@
       author(journal,stamps,{...journal.state,workspaceEntries:[...journal.state.workspaceEntries.filter(e=>e.id!==key),next]});
       return folderOf(journal,workspaceId,folderId);
     });}
+    // Files still in folders or the kill bin (latest version not a deletion). Emptied files stay in the
+    // byte history, so a storage count of all kept versions alone never drops after a kill.
+    async function liveContent(){return transaction(async journal=>{const kept=new Map();for(const e of journal.state.workspaceEntries){if(e.kind!=='shortcut'||!e.workspaceFileId)continue;let heads;try{heads=W.inspect(journal.state,e.workspaceId,e.workspaceFileId).heads;}catch{continue;}for(const h of heads)if(h.kind==='content'&&h.hash)kept.set(h.hash,h.size||0);}let bytes=0;for(const v of kept.values())bytes+=v;return {files:kept.size,bytes};});}
     async function entries(){return transaction(async journal=>structuredClone(journal.state.workspaceEntries.filter(record=>record.kind==='shortcut'&&record.workspaceFileId)));}
     function cacheOf(journal){return journal.cache??={enabled:false,evicted:{},arrivals:{},debt:0,wanted:{}};}
     async function cachePolicy(enabled,expected){
@@ -267,7 +270,7 @@
     async function exchange(message){
       if(message?.workspaceProtocol===1&&message.cacheControl){const control=message.cacheControl;return {workspaceProtocol:1,cachePolicy:await cachePolicy(control.enabled,control.expected)};}
       if(message?.workspaceProtocol===1&&message.cacheProof===true){if(!Array.isArray(message.hashes)||message.hashes.length>100)throw Error('Invalid content check.');const available=[];for(const hash of message.hashes)if(/^[a-f0-9]{64}$/.test(hash)&&(await files({operation:'content-check',hash})).available)available.push(hash);return {workspaceProtocol:1,available};}
-      if(message?.workspaceProtocol===1&&message.storageProbe===true)return {workspaceProtocol:1,storage:await files({operation:'storage-status'}),cachePolicy:allowCachePolicy?await cachePolicy():null};
+      if(message?.workspaceProtocol===1&&message.storageProbe===true)return {workspaceProtocol:1,storage:await files({operation:'storage-status'}),live:await liveContent(),cachePolicy:allowCachePolicy?await cachePolicy():null};
       if(message?.workspaceProtocol!==1||!message.vv||!Array.isArray(message.changes))throw Error('Unsupported workspace exchange.');
       const reply=await transaction(async(journal,stamps)=>{
         const result=W.merge(journal.state,stamps,message.changes);journal.state=result.state;journal.vv=S.joinVectors(journal.vv,message.vv);mergeAcks(journal,message.acks);
@@ -327,7 +330,7 @@
       }else for(const field of Object.keys(record))stamps.set(conflict.key+'#'+field,nextStamp(journal));
       return {ok:true};
     });}
-      return Object.freeze({load,entry,save,importFile,receiveFile,capture,reconcile,exchange,syncWith,remove,restore,status,history,conflicts,resolveMetadata,folder,folders,ensureFolder,cachePolicy,requestLocal,maintainCache:replaceDownloaded,flush:async()=>{await tail;await trimming;}});
+      return Object.freeze({load,entry,save,importFile,receiveFile,capture,reconcile,exchange,syncWith,remove,restore,status,history,conflicts,resolveMetadata,folder,folders,ensureFolder,cachePolicy,liveContent,requestLocal,maintainCache:replaceDownloaded,flush:async()=>{await tail;await trimming;}});
   }
   root.ProximaWorkspaceReplica=Object.freeze({create});
 })(globalThis);
