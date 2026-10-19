@@ -10,7 +10,7 @@ const out=path.join(here,'dist');await mkdir(out,{recursive:true});
 await build({stdin:{contents:`export {WorkspaceFiles} from './src/main/backpacks/workspaceFiles.ts';export {RemoteDeviceService} from './src/main/backpacks/remoteDeviceService.ts';export {Server as TusServer} from '@tus/server';export {FileStore} from '@tus/file-store';`,resolveDir:papers},outfile:path.join(out,'host.cjs'),bundle:true,platform:'node',format:'cjs',target:'node22',plugins:[{name:'omit-unused-electron',setup(b){b.onResolve({filter:/^electron$/},()=>({path:'electron',external:true,sideEffects:false}));}}]});
 for(const name of ['sync-core','workspace-domain','workspace-replica'])await copyFile(path.join(here,'../public',name+'.js'),path.join(out,name+'.js'));
 await copyFile(path.join(here,'main.mjs'),path.join(out,'main.mjs'));
-for(const name of ['calendar.mjs','portal.mjs','web-domain.mjs','browser-workspace.mjs'])await copyFile(path.join(here,name),path.join(out,name));
+for(const name of ['calendar.mjs','portal.mjs','web-domain.mjs','browser-workspace.mjs','preview-extract.mjs'])await copyFile(path.join(here,name),path.join(out,name));
 await cp(path.join(here,'../public'),path.join(out,'public'),{recursive:true});await cp(path.join(here,'web'),path.join(out,'web'),{recursive:true});
 // Reuse the installed phone's mouse/gesture controllers on iOS and Android web too.
 for(const name of ['phone-mouse.js','proxima-phone.js']){

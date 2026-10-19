@@ -24,7 +24,9 @@
   if(method==='file'&&args[0]==='remote-files')return {ok:false,code:'BROWSER_UNAVAILABLE',message:'Other devices are reachable from the installed Papers app.'};
   if(method==='file'&&['open','reveal'].includes(args[0]))return launch(await api('api/workspace/frame',{workspaceId:ws,method:'entry',args:[args[1]]}));
   const result=await api('api/workspace/frame',{workspaceId:ws,method,args});
-  if(method==='file'&&result.preview?.entryId)result.preview.url=content(result.preview.entryId);
+  // Addresses that name the file version can be kept by the browser for good (BOP marks them so).
+  if(method==='file'&&result.preview?.derived)result.preview.url=new URL('api/derived/'+result.preview.derived,base).href;
+  else if(method==='file'&&result.preview?.entryId)result.preview.url=content(result.preview.entryId)+(result.preview.hash?'?v='+result.preview.hash:'');
   return result;
  }
  window.ProximaBrowserHost={blobRequest,async request(type,detail={}){

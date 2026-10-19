@@ -1,9 +1,51 @@
 import path from 'node:path';
-import {open,readFile} from 'node:fs/promises';
+import {open,readFile,writeFile,rename,mkdir,copyFile,rm,readdir,access,stat} from 'node:fs/promises';
+import {execFile} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import {embeddedPreview,embeddedPreviewExtensions} from './preview-extract.mjs';
 
 // Transport for the existing As you Go blob pane. Native paths never become
 // browser capabilities: every file effect resolves a managed workspace identity.
-export function createBrowserWorkspace(engine,{store,uploads,receipts,atomic}){
+export function createBrowserWorkspace(engine,{store,uploads,receipts,atomic,derived}){
+ // A picture stored inside a Revit, AutoCAD or SketchUp file, made once per file version and kept by the
+ // version's hash (the bytes behind a hash never change, so neither does its picture).
+ const making=new Map();
+ // A DWG drawn to PDF by the MLight CAD converter (C:\PapersServer\Tools\mlightcad beside the app folders),
+ // one at a time, in the background; the first opening shows the embedded picture meanwhile.
+ const converterRoot=process.env.PAPERS_MLIGHTCAD_ROOT||path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..','..','Tools','mlightcad');
+ const cli=path.join(converterRoot,'node_modules','@mlightcad','cad-simple-viewer-cli','dist','cli.js'),script=path.join(converterRoot,'node_modules','@mlightcad','cad-simple-viewer-cli','examples','export-pdf.scr');
+ let converting=Promise.resolve();const queued=new Set();
+ const exists=file=>access(file).then(()=>true,()=>false);
+ async function drawingPdf(hash,contentPath){
+  const target=path.join(derived,hash+'.drawing.pdf');
+  if(await exists(target))return 'drawing.pdf';
+  const failedAt=await stat(path.join(derived,hash+'.drawing.failed')).then(s=>s.mtimeMs,()=>0);
+  if(queued.has(hash)||Date.now()-failedAt<6*3600*1000||!await exists(cli))return null; // a failure is retried after 6 hours
+  queued.add(hash);
+  converting=converting.then(async()=>{
+   const work=path.join(derived,'work-'+hash.slice(0,16));
+   try{
+    await mkdir(work,{recursive:true});const input=path.join(work,'drawing.dwg');await copyFile(contentPath,input);
+    await new Promise((resolve,reject)=>execFile(process.execPath,[cli,'-i',input,'-s',script,'-o',work,'--mode','read','--open-view-mode','extents'],{windowsHide:true,timeout:240000,maxBuffer:4*1024*1024,env:{...process.env,PLAYWRIGHT_BROWSERS_PATH:process.env.PLAYWRIGHT_BROWSERS_PATH||path.join(converterRoot,'..','ms-playwright')}},error=>error?reject(error):resolve()));
+    const pdf=(await readdir(work)).find(name=>name.toLowerCase().endsWith('.pdf'));if(!pdf)throw Error('no PDF');
+    await rename(path.join(work,pdf),target);
+   }catch(error){console.error('DWG to PDF failed for '+hash.slice(0,12)+': '+error.message);await writeFile(path.join(derived,hash+'.drawing.failed'),String(error.message)).catch(()=>{});}
+   finally{queued.delete(hash);await rm(work,{recursive:true,force:true}).catch(()=>{});}
+  });
+  return null;
+ }
+ async function derivedThumbnail(hash,contentPath,ext){
+  for(const suffix of ['png','bmp']){try{await open(path.join(derived,hash+'.thumb.'+suffix),'r').then(f=>f.close());return {name:'thumb.'+suffix,mime:'image/'+suffix};}catch{}}
+  try{await open(path.join(derived,hash+'.none'),'r').then(f=>f.close());return null;}catch{}
+  if(!making.has(hash))making.set(hash,(async()=>{
+   const file=await open(contentPath,'r');let result;try{const size=(await file.stat()).size;result=await embeddedPreview(ext,async(offset,length)=>{const b=Buffer.alloc(length);const {bytesRead}=await file.read(b,0,length,offset);return new Uint8Array(b.buffer,b.byteOffset,bytesRead);},size);}finally{await file.close();}
+   await mkdir(derived,{recursive:true});
+   if(!result){await writeFile(path.join(derived,hash+'.none'),'');return null;}
+   const suffix=result.mime==='image/png'?'png':'bmp',target=path.join(derived,hash+'.thumb.'+suffix),temp=target+'.'+process.pid+'.tmp';
+   await writeFile(temp,result.bytes);await rename(temp,target);return {name:'thumb.'+suffix,mime:result.mime};
+  })().finally(()=>making.delete(hash)));
+  return making.get(hash);
+ }
  const fail=message=>Object.assign(Error(message),{status:409});
  const virtual=item=>'P:\\Proxima\\'+item.workspaceFileId+'\\'+(item.workspaceFilename||item.name).replace(/[\\/]/g,'_');
  function browser(document){const doc=structuredClone(document);for(const item of doc.shortcuts||[])if(item.workspaceFileId){item.target=virtual(item);item.fileTarget={...item.fileTarget,path:item.target,id:item.workspaceFileId};}return doc;}
@@ -55,8 +97,14 @@ export function createBrowserWorkspace(engine,{store,uploads,receipts,atomic}){
     const content=await engine.native.call('bp-7f977e43-e48d-44f7-9e02-df6bf7ee4349',{operation:'content-check',hash:f.head.hash});if(!content.available)throw fail('This file has not reached BOP yet.');
     const handle=await open(content.path,'r'),buffer=Buffer.alloc(65536),offset=Number.isSafeInteger(detail.offset)&&detail.offset>=0?detail.offset:0;let read;try{read=await handle.read(buffer,0,buffer.length,offset);}finally{await handle.close();}const text=buffer.subarray(0,read.bytesRead).toString('utf8'),value={text,nextOffset:offset+read.bytesRead,eof:offset+read.bytesRead>=f.head.size};return operation==='preview-text-chunk'?{ok:true,...value}:{ok:true,entry,preview:{kind:'text',...value}};
    }
+   if(embeddedPreviewExtensions.includes(ext)){
+    const content=await engine.native.call('bp-7f977e43-e48d-44f7-9e02-df6bf7ee4349',{operation:'content-check',hash:f.head.hash});
+    if(content.available&&ext==='.dwg'){const pdf=await drawingPdf(f.head.hash,content.path).catch(()=>null);if(pdf)return {ok:true,entry,preview:{kind:'pdf',derived:f.head.hash+'/'+pdf,hash:f.head.hash,mime:'application/pdf'}};}
+    const thumb=content.available?await derivedThumbnail(f.head.hash,content.path,ext).catch(()=>null):null;
+    if(thumb)return {ok:true,entry,preview:{kind:'image',derived:f.head.hash+'/'+thumb.name,hash:f.head.hash,mime:thumb.mime}};
+   }
    const kind=/\.(png|jpe?g|gif|webp|bmp|avif)$/.test(ext)?'image':ext==='.pdf'?'pdf':/\.(mp3|wav|ogg|m4a)$/.test(ext)?'audio':/\.(mp4|webm|mov)$/.test(ext)?'video':'binary';
-   return {ok:true,entry,preview:{kind,entryId:f.item.workspaceFileId,workspaceId:ws}};
+   return {ok:true,entry,preview:{kind,entryId:f.item.workspaceFileId,workspaceId:ws,hash:f.head.hash}};
   }
   return {ok:false,code:'BROWSER_UNAVAILABLE',message:'This action needs the installed Papers app.'};
  }
