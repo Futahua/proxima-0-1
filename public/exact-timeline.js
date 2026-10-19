@@ -104,7 +104,7 @@
   function items(){
    const all=allItems(),index=new Map(all.map(x=>[x.id,x])),contained=new Set(all.flatMap(x=>x.groupChildren||[]));while(groupTrail.length&&!index.get(groupTrail.at(-1))?.groupChildren){groupTrail.pop();groupReturnViews.pop();}
    const focus=index.get(groupTrail.at(-1)),roots=(focus?focus.groupChildren.map(key=>index.get(key)).filter(Boolean):all.filter(x=>!contained.has(x.id))).sort((a,b)=>(a.rowOrder||0)-(b.rowOrder||0)||Date.parse(a.start)-Date.parse(b.start)),shown=[],seen=new Set();let order=0;
-   function show(item,depth=0){if(seen.has(item.id))return;seen.add(item.id);shown.push({...item,viewRowId:item.groupChildren||depth?item.id:item.rowId,viewOrder:order++,groupDepth:depth});if(item.groupChildren&&expandedGroups.has(item.id))for(const key of item.groupChildren){const child=index.get(key);if(child)show(child,depth+1);}}
+   function show(item,depth=0){if(seen.has(item.id))return;seen.add(item.id);shown.push({...item,viewRowId:item.groupChildren?item.id:depth?'in:'+(item.rowId||item.id):item.rowId,viewOrder:order++,groupDepth:depth});if(item.groupChildren&&expandedGroups.has(item.id))for(const key of item.groupChildren){const child=index.get(key);if(child)show(child,depth+1);}}
    const reachable=new Set();function mark(item){if(reachable.has(item.id))return;reachable.add(item.id);for(const key of item.groupChildren||[]){const child=index.get(key);if(child)mark(child);}}for(const item of roots)mark(item);if(!focus)for(const item of all)if(!reachable.has(item.id)){roots.push(item);mark(item);}for(const item of roots)show(item);return shown;
   }
   const laneId=item=>item.viewRowId||item.rowId||item.id;
