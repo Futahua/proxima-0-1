@@ -28,3 +28,6 @@
 .exact-group-crumb.is-current{color:var(--text,#e6e9ef);cursor:default}
 .exact-group-crumb.is-current:hover{background:transparent}
 .exact-group-crumb-sep{opacity:.6;padding:0 1px}
+.exact-interval.exact-blob-group>.exact-blob-content.exact-group-count{top:50%;bottom:auto;right:8px;transform:translateY(-50%);height:22px;min-width:22px;padding:0 6px;border:0;border-radius:11px;background:#0000002e;color:inherit;font-size:12px;font-weight:600;line-height:22px;box-shadow:none}
+.exact-interval.exact-blob-group>.exact-blob-content.exact-group-count:hover{background:#00000052}
+.exact-interval.exact-blob-group.is-group-open>.exact-blob-content.exact-group-count{background:#ffffff1f;color:var(--text,#e6e9ef)}
