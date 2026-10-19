@@ -79,7 +79,7 @@ export function createBrowserWorkspace(engine,{store,uploads,receipts,atomic,der
   const result=await engine.replica.save(ws,doc,baseline.revision,args[2]||{});if(!result.ok)return result;
   if(!args[2]?.automatic)for(const item of doc.shortcuts){if(item.workspaceFileId&&item.placements?.some(p=>!p.bin)&&(await engine.replica.history(ws,item.workspaceFileId)).deleted)await restoreLatest(ws,item.workspaceFileId);}
   await engine.replica.reconcile();for(const item of imported){await atomic(path.join(receipts,item.id+'.json'),{...item,workspaceId:ws,browserWorkspace:true});await store.remove(item.id).catch(()=>{});}
-  return {...result,revision:(await engine.replica.load(ws)).revision};
+  const saved=await load(ws);return {...result,revision:saved.revision,serialized:JSON.stringify(saved.state)};
  }
  async function file(ws,operation,detail={}){
   if(operation==='providers')return {ok:true,providers:{}};

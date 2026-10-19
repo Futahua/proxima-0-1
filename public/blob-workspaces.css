@@ -16,3 +16,4 @@
 .exact-blob-content.exact-group-count{opacity:1;min-width:24px;width:auto;padding:0 5px;font-size:11px;line-height:18px;font-variant-numeric:tabular-nums}
 .exact-blob-group .exact-resize-edge{display:none}
 .exact-group-drop-target{outline:2px solid #a4bf8f!important;outline-offset:3px}
+.blob-workspace-pane>div:has(iframe){position:relative}.blob-workspace-loading{position:absolute;inset:0;z-index:1;background:var(--panel,#242b33);padding:12px;font-size:12px;color:var(--dim,#a6b0bd)}.blob-workspace-loading[hidden]{display:none}
