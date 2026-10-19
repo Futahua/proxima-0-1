@@ -101,6 +101,10 @@
   const opening=waitForFolder(folderId);opening.catch(()=>{});try{await createFrame(folderId,item.name);}catch(error){cancelNavigation();throw error;}if(request!==openSequence)return;frame.style.pointerEvents='none';frame.title=item.name+' · As you Go';goToWanted();
   if(!await opening||request!==openSequence)return;void report();refreshTimelines();
  }
+ // Native preview windows (Windows preview handlers, Office) are placed in this page's coordinates; tell the
+ // page inside the frame where its frame sits, and when the pane is closed, whenever that changes.
+ let lastOffset='';
+ setInterval(()=>{if(!frame||!frameReady||!frame.contentWindow)return;const r=frame.getBoundingClientRect(),hidden=!!pane?.hidden||frame.hidden||!r.width,x=Math.round(r.left+frame.clientLeft),y=Math.round(r.top+frame.clientTop),key=x+','+y+','+hidden;if(key===lastOffset)return;lastOffset=key;try{frame.contentWindow.postMessage({type:'proxima:workspace:frame-offset',workspaceId:ROOT,x,y,hidden},origin);}catch{}},300);
  // Prepare the template, but create the live iframe only in the visible pane.
  // A frame born under display:none can remain on about:blank in Chromium.
  function prewarm(){if(frame||creatingFrame)return;const item=Store.timelineIntervals().find(propagated);if(!item)return;void prepareTemplate().catch(()=>{});}
@@ -109,7 +113,7 @@
  addEventListener('message',event=>{if(!frame||event.source!==frame.contentWindow||event.origin!==origin||event.data?.workspaceId!==ROOT)return;const v=event.data;
   if(v.type==='proxima:workspace:close'){pane.hidden=true;return;}
   // Show the page only once it shows the folder asked for, so the preloaded folder never flashes first.
-  if(v.type==='proxima:workspace:ready'){frameReady=true;frameNavigationProtocol=v.navigationProtocol||0;clearTimeout(readyTimer);frameFolder=v.folderId;if(navigation)goToWanted();return;}
+  if(v.type==='proxima:workspace:ready'){frameReady=true;lastOffset='';frameNavigationProtocol=v.navigationProtocol||0;clearTimeout(readyTimer);frameFolder=v.folderId;if(navigation)goToWanted();return;}
   if(v.type==='proxima:workspace:folder-opened'){confirmedFolder(v.folderId,v.requestId);return;}
   if(v.type==='proxima:workspace:flushed'){const t=flushes.get(v.requestId);if(t){flushes.delete(v.requestId);clearTimeout(t.timer);v.ok?t.resolve():t.reject(Error(v.error));}return;}
   if(v.type!=='proxima:workspace:request'||typeof v.requestId!=='string'||!Array.isArray(v.args))return;
