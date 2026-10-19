@@ -9,9 +9,11 @@
     async function transaction(work){return serial(async()=>{
       for(let attempt=0;attempt<6;attempt++){
         const loaded=await storage.load(),journal=loaded.state||fresh();if(journal.version!==1)throw Error('Unsupported workspace journal.');
-        const stamps=new Map(journal.stamps),before=JSON.stringify(journal),beforeRecords=JSON.stringify([journal.state,journal.stamps]),result=await work(journal,stamps);
-        journal.stamps=[...stamps];if(JSON.stringify(journal)===before)return result;
-        const saved=await storage.save(journal,loaded.revision);if(saved.ok){changed({records:beforeRecords!==JSON.stringify([journal.state,journal.stamps])});return result;}if(saved.code!=='STALE_REVISION')throw Error(saved.message||'Workspace save failed.');
+        // Storage may hand over the journal's text with it (the phone's cache): reuse it instead of converting
+        // the whole record again. Most steps change nothing, so the records comparison is only made on a save.
+        const stamps=new Map(journal.stamps),before=loaded.state&&typeof loaded.text==='string'?loaded.text:JSON.stringify(journal),result=await work(journal,stamps);
+        journal.stamps=[...stamps];const after=JSON.stringify(journal);if(after===before)return result;
+        const saved=await storage.save(journal,loaded.revision,after);if(saved.ok){const was=JSON.parse(before);changed({records:JSON.stringify([was.state,was.stamps])!==JSON.stringify([journal.state,journal.stamps])});return result;}if(saved.code!=='STALE_REVISION')throw Error(saved.message||'Workspace save failed.');
       }
       throw Error('The workspace changed repeatedly; your change was not saved.');
     });}

@@ -20,7 +20,23 @@
   const files=detail=>call('workspace-files',detail);
   const updates=typeof BroadcastChannel==='function'?new BroadcastChannel('proxima-workspace-updates'):null;
   updates?.addEventListener('message',event=>{dispatchEvent(new Event('proxima:workspace-changed'));if(event.data?.records)dispatchEvent(new Event('proxima-sync:local-change'));});
-  const replica=root.ProximaWorkspaceReplica.create({storage:{load:()=>files({operation:'journal-load'}),save:(state,revision)=>files({operation:'journal-save',state,revision})},files,copy:(paths,destination)=>call('copy',{paths,destination}),verifyDurable:async hashes=>{const api=root.__proximaDeviceCopy;if(!api)return [];const list=await api.devices(),bop=list.others.find(d=>d.id==='44091a08-55e1-46b8-8fa7-df60366779c2'||/^bop$/i.test(d.name));if(!bop)return [];return (await api.exchange(bop,{workspaceProtocol:1,cacheProof:true,hashes})).available||[];},changed:change=>{updates?.postMessage(change);dispatchEvent(new Event('proxima:workspace-changed'));if(change?.records)dispatchEvent(new Event('proxima-sync:local-change'));}});
+  // The last journal read or written, with its revision: Papers answers "unchanged" instead of sending the
+  // whole record again (230 KB on the phone, re-read for every queued step).
+  let journalCache=null;
+  async function loadJournal(){
+    const result=await files({operation:'journal-load',...(journalCache?{known:journalCache.revision}:{})});
+    // Kept as text: parsing it is several times cheaper than deep-copying the object, and every step gets
+    // its own copy to change.
+    if(result?.unchanged&&journalCache&&result.revision===journalCache.revision)return {state:JSON.parse(journalCache.text),revision:journalCache.revision,text:journalCache.text};
+    journalCache=result?.state?{revision:result.revision,text:JSON.stringify(result.state)}:null;
+    return journalCache?{...result,text:journalCache.text}:result;
+  }
+  async function saveJournal(state,revision,text){
+    const result=await files({operation:'journal-save',state,revision});
+    journalCache=result?.ok?{revision:result.revision,text:typeof text==='string'?text:JSON.stringify(state)}:null;
+    return result;
+  }
+  const replica=root.ProximaWorkspaceReplica.create({storage:{load:loadJournal,save:saveJournal},files,copy:(paths,destination)=>call('copy',{paths,destination}),verifyDurable:async hashes=>{const api=root.__proximaDeviceCopy;if(!api)return [];const list=await api.devices(),bop=list.others.find(d=>d.id==='44091a08-55e1-46b8-8fa7-df60366779c2'||/^bop$/i.test(d.name));if(!bop)return [];return (await api.exchange(bop,{workspaceProtocol:1,cacheProof:true,hashes})).available||[];},changed:change=>{updates?.postMessage(change);dispatchEvent(new Event('proxima:workspace-changed'));if(change?.records)dispatchEvent(new Event('proxima-sync:local-change'));}});
   let reconciling=null;
   function reconcile(){return reconciling??=(replica.reconcile().then(async issues=>{if(issues.length)errors.set('local',{message:issues[0].message});else errors.delete('local');await replica.maintainCache();return issues;}).finally(()=>{reconciling=null;}));}
   async function download(workspaceId,entryId){
@@ -178,6 +194,11 @@
     throw Error('That operation is not available in a blob file pane.');
   }
   root.ProximaWorkspaces=Object.freeze({...replica,exchange:replica.exchange,syncWith,frameCall,request,call,reconcile,errors});
-  const timer=setInterval(()=>void reconcile().catch(error=>errors.set('local',{message:error.message})),5000);
-  addEventListener('focus',()=>void reconcile().catch(()=>{}));addEventListener('pagehide',()=>clearInterval(timer),{once:true});
+  // Each reconcile re-reads the whole sync record, about 85 ms of frozen page on the phone, so the phone
+  // runs it every 30 s rather than 5, and never while the page is hidden; coming back to the page (from an
+  // editor, say) still reconciles at once, so external saves are caught.
+  const android=phone||/Android/i.test(navigator.userAgent); // the phone's hidden owner page too
+  const timer=setInterval(()=>{if(android&&document.hidden)return;void reconcile().catch(error=>errors.set('local',{message:error.message}));},android?30000:5000);
+  addEventListener('focus',()=>void reconcile().catch(()=>{}));
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)void reconcile().catch(()=>{});});addEventListener('pagehide',()=>clearInterval(timer),{once:true});
 })(globalThis);

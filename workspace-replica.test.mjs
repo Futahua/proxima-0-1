@@ -147,3 +147,14 @@ test('one file is looked up alone, by its file id or its entry id, exactly as th
   }
   assert.equal(await d.replica.entry('w','missing'),null);
 });
+
+test('storage that hands over the journal text: changes still save and report, read-only steps save nothing',async()=>{
+  let text=null,revision=0,saves=0;const events=[];
+  const storage={load:async()=>text===null?{state:null,revision:0}:{state:JSON.parse(text),revision,text},save:async(state,rev,after)=>{if(rev!==revision)return {ok:false,code:'STALE_REVISION'};saves++;text=typeof after==='string'?after:JSON.stringify(state);assert.equal(text,JSON.stringify(state));revision++;return {ok:true};}};
+  const d=device('text-storage');const replica=context.ProximaWorkspaceReplica.create({uuid:randomUUID,storage,files:d.files,copy:async()=>{},changed:e=>events.push(e)});
+  d.originals.set('original','bytes');await replica.importFile('w','original','a.txt','file-a');
+  const afterImport=saves;assert.ok(afterImport>0);
+  await replica.load('w');await replica.history('w','file-a');assert.equal(saves,afterImport,'reading saves nothing');
+  const loaded=await replica.load('w');const state={schemaVersion:1,groups:[],shortcuts:[{id:'s1',name:'a.txt',target:loaded.state.shortcuts[0]?.target||'x',workspaceFileId:'file-a',placements:[{id:'p1',parentId:'root',order:0}]}]};
+  assert.equal((await replica.save('w',state,loaded.revision)).ok,true);assert.ok(saves>afterImport);assert.equal(events.at(-1).records,true);
+});
