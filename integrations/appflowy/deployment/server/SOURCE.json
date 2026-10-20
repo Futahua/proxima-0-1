@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/AppFlowy-IO/AppFlowy-SelfHost-Commercial",
+  "commit": "366dc97d32c430fd3531511405af80c717063dcc",
+  "privateEndpoint": "https://bop.taild88607.ts.net:8443",
+  "cloudPort": 48243,
+  "accountScope": "one human owner across personal devices",
+  "publicProximaUnchanged": true
+}

@@ -4,19 +4,21 @@
  * leaves the blob without a template until As you Go is chosen again. */
 (function(root){
  'use strict';
- const ROOT='ayg-root';
+ const ROOT='ayg-root',pageQuery=new URL(location.href).searchParams,projectTab=pageQuery.get('blob-project');
+ const bindings=item=>item?.templates??(item?.template?[item.template]:[]);
+ let activeKind=pageQuery.get('blob-template')||null;
  let pane,frame,frameFolder=null,selected,origin,chain=Promise.resolve();const flushes=new Map();
  const folders=new Map(); // folderId -> {exists,binned,name,icon}, from the synced root
  const isV2=item=>item?.template?.kind==='as-you-go'&&item.template.version===2&&typeof item.template.folderId==='string';
  // A blob is propagated while its folder is not deleted. A folder not synced here yet still counts.
- function propagated(item){if(!isV2(item))return false;const f=folders.get(item.template.folderId);return !f?.binned;}
+ function propagated(item){return bindings(item).some(binding=>binding.kind==='appflowy'||binding.kind==='as-you-go'&&binding.version===2&&!folders.get(binding.folderId)?.binned);}
  function imageOf(icon){
   if(typeof icon==='string')return /^(data:image\/|https?:\/\/)/i.test(icon)?icon:null;
   if(icon&&typeof icon==='object')for(const value of Object.values(icon)){const found=imageOf(value);if(found)return found;}
   return null;
  }
  /** For the timeline's blob button: whether the blob has a folder, and the folder's picture. */
- function button(item){return propagated(item)?{propagated:true,icon:imageOf(folders.get(item.template.folderId)?.icon)}:{propagated:false,icon:null};}
+ function button(item){return propagated(item)?{propagated:true,icon:imageOf(folders.get(item.template?.folderId)?.icon)}:{propagated:false,icon:null};}
  function refreshTimelines(){document.querySelectorAll('.exact-timeline').forEach(node=>root.ExactTimeline?.mount(node,Store)?.refresh());}
  let reading=null;
  function readFolders(){return reading??=(async()=>{try{
@@ -30,20 +32,20 @@
  function build(){if(pane)return;
   pane=document.createElement('section');pane.className='blob-workspace-pane';pane.hidden=true;pane.setAttribute('aria-label','Blob contents');
   const head=document.createElement('header'),title=document.createElement('strong'),select=document.createElement('select'),close=document.createElement('button'),status=document.createElement('p'),body=document.createElement('div'),conflicts=document.createElement('aside');
-  for(const [value,label] of [['','No template'],['as-you-go','As you Go']]){const o=document.createElement('option');o.value=value;o.textContent=label;select.append(o);}select.setAttribute('aria-label','Blob template');close.textContent='×';close.setAttribute('aria-label','Close blob contents');status.setAttribute('role','status');
+  for(const [value,label] of [['','Add template…'],['as-you-go','As you Go'],['appflowy','AppFlowy'],['remove','Remove current template']]){const o=document.createElement('option');o.value=value;o.textContent=label;select.append(o);}select.setAttribute('aria-label','Blob template');close.textContent='×';close.setAttribute('aria-label','Close blob contents');status.setAttribute('role','status');
   const loading=document.createElement('div');loading.className='blob-workspace-loading';loading.textContent='Opening folder…';loading.hidden=true;body.append(loading);
-  head.append(title,select,close);conflicts.hidden=true;conflicts.className='blob-workspace-conflicts';pane.append(head,status,conflicts,body);pane.parts={title,select,status,body,conflicts,loading};document.body.append(pane);close.onclick=()=>{pane.hidden=true;};
+  const tabs=document.createElement('nav');tabs.className='blob-template-tabs';tabs.setAttribute('aria-label','Blob templates');head.append(tabs,select,close);conflicts.hidden=true;conflicts.className='blob-workspace-conflicts';pane.append(head,status,conflicts,body);pane.parts={title,select,status,body,conflicts,loading,tabs};document.body.append(pane);close.onclick=()=>{pane.hidden=true;};
   select.onchange=async()=>{select.disabled=true;try{
-   await flush();const item=Store.timelineIntervals().find(x=>x.id===selected);
+   if(!select.value)return;await flush();const item=Store.timelineIntervals().find(x=>x.id===selected);
    // A deleted folder (or a first-generation template) is replaced by a fresh folder.
-   const renew=select.value==='as-you-go'&&!!item.template&&!propagated(item);
-   const r=await Store.command({type:'timeline-interval.template',ifRev:item.rev,payload:{intervalId:item.id,template:select.value||null,...(renew?{renew:true}:{})}});
+   const renew=select.value==='as-you-go'&&!!item.template&&(!isV2(item)||folders.get(item.template.folderId)?.binned);
+   const r=await Store.command({type:'timeline-interval.template',ifRev:item.rev,payload:{intervalId:item.id,template:select.value==='remove'?null:select.value,removeKind:activeKind,...(renew?{renew:true}:{})}});
    if(!r.ok)throw Error('The blob changed before its template could be saved.');
-   await mount(selected);refreshTimelines();
-  }catch(e){status.textContent=e.message;}finally{select.disabled=false;}};
-  setInterval(()=>{if(!pane.hidden&&frame&&!reporting)void report();},3000);
+   activeKind=select.value;await mount(selected);refreshTimelines();
+  }catch(e){status.hidden=false;status.textContent=e.message;}finally{select.disabled=false;}};
+  setInterval(()=>{if(!pane.hidden&&frame&&activeKind==='as-you-go'&&!reporting)void report();},3000);
  }
- async function flush(){if(!frame)return;const requestId=crypto.randomUUID();return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{flushes.delete(requestId);reject(Error('The file pane has not confirmed saving yet.'));},15000);flushes.set(requestId,{resolve,reject,timer});frame.contentWindow.postMessage({type:'proxima:workspace:flush',workspaceId:ROOT,requestId},origin);});}
+ async function flush(){if(!frame||activeKind!=='as-you-go')return;const requestId=crypto.randomUUID();return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{flushes.delete(requestId);reject(Error('The file pane has not confirmed saving yet.'));},15000);flushes.set(requestId,{resolve,reject,timer});frame.contentWindow.postMessage({type:'proxima:workspace:flush',workspaceId:ROOT,requestId},origin);});}
  // One status check at a time: on the phone a check can take longer than the interval.
  let reporting=null;
  function report(){return reporting||(reporting=reportNow().finally(()=>{reporting=null;}));}
@@ -81,15 +83,17 @@
   readyTimer=setTimeout(()=>{if(!frameReady&&navigation){pane.parts.status.hidden=false;pane.parts.status.textContent='Opening folder…';}},8000);
   return frame;
  })().finally(()=>{creatingFrame=null;});return creatingFrame;}
- async function mount(id,request=openSequence){build();const item=Store.timelineIntervals().find(x=>x.id===id);if(!item)throw Error('This blob no longer exists.');pane.hidden=false;selected=id;pane.parts.title.textContent=item.name;
+ async function mount(id,request=openSequence){build();const item=Store.timelineIntervals().find(x=>x.id===id);if(!item)throw Error('This blob no longer exists.');pane.hidden=false;selected=id;pane.parts.title.textContent=item.name;renderTemplateTabs(item);
+  if(activeKind==='appflowy'&&bindings(item).some(b=>b.kind==='appflowy')){cancelNavigation();note('');if(frame)frame.hidden=true;pane.classList.add('has-folder');pane.parts.loading.hidden=true;pane.parts.status.hidden=true;pane.parts.conflicts.hidden=true;await openEditor(bindings(item).find(b=>b.kind==='appflowy'));return;}
+  void root.ProximaFullAppFlowy?.hide();
   if(isV2(item)&&!folders.has(item.template.folderId))await readFolders();
   if(request!==openSequence)return;
-  if(!propagated(item)){
+  if(!isV2(item)||folders.get(item.template.folderId)?.binned){
    pane.classList.remove('has-folder');pane.parts.status.hidden=false;pane.parts.select.value='';
    note(isV2(item)?'This blob’s folder was deleted. Choose As you Go to give it a new one.':'Choose As you Go to give this blob its own folder.');pane.parts.status.textContent='';pane.parts.conflicts.hidden=true;return;
   }
   // With a folder open the pane has no header: As you Go's own strip carries the close button.
-  pane.parts.select.value='as-you-go';pane.classList.add('has-folder');note('');
+  pane.parts.select.value='';pane.classList.add('has-folder');note('');
   const folderId=item.template.folderId;
   // Opening (or choosing) creates the folder if it is not here yet, and keeps its name the blob's.
   // An existing folder opens at once; checking its name waits for no one (on the phone the shared
@@ -126,13 +130,31 @@
    const result=await command.apply(Store,args),c=args[0];
    if(result?.ok&&c?.type==='timeline-interval.patch'&&typeof c.payload?.patch?.name==='string'){
     const item=Store.timelineIntervals().find(x=>x.id===c.payload.intervalId);
-    if(propagated(item)&&folders.get(item.template.folderId)?.exists)void root.ProximaWorkspaces.ensureFolder(ROOT,item.template.folderId,item.name).then(()=>readFolders()).catch(()=>{});
+    if(isV2(item)&&folders.get(item.template.folderId)?.exists)void root.ProximaWorkspaces.ensureFolder(ROOT,item.template.folderId,item.name).then(()=>readFolders()).catch(()=>{});
    }
    return result;
   };
  }
- addEventListener('proxima:blob-open',event=>void open(event.detail.id));
+ addEventListener('proxima:blob-open',event=>{void (event.detail.newTab?openProjectTab(event.detail.id):open(event.detail.id));});
  document.addEventListener('dblclick',event=>{if(event.target.closest('input,button,.exact-resize-edge,.exact-queue-boundary'))return;const node=event.target.closest('.exact-selectable,.exact-outside-name');if(!propagated(node?.interval))return;event.preventDefault();event.stopImmediatePropagation();void open(node.interval.id);},true);
- root.ProximaBlobWorkspaces=Object.freeze({open,flush,button,prewarm});
+ function renderTemplateTabs(item){
+  const list=bindings(item).filter(b=>b.kind!=='as-you-go'||!folders.get(b.folderId)?.binned);
+  if(!list.some(b=>b.kind===activeKind))activeKind=list[0]?.kind??null;
+  pane.parts.tabs.replaceChildren();for(const binding of list){const tab=document.createElement('button');tab.type='button';tab.textContent=binding.kind==='appflowy'?'AppFlowy':'As you Go';tab.setAttribute('aria-pressed',String(binding.kind===activeKind));tab.onclick=()=>{void flush().then(()=>{activeKind=binding.kind;return mount(item.id);}).catch(error=>{pane.parts.status.hidden=false;pane.parts.status.textContent=error.message;});};pane.parts.tabs.append(tab);}
+  for(const option of pane.parts.select.options)option.disabled=!!list.find(b=>b.kind===option.value);pane.parts.select.value='';
+ }
+ async function openProjectTab(id){
+  const item=Store.timelineIntervals().find(x=>x.id===id);if(!item)return;
+  const url=new URL(location.href);for(const key of ['papers-surface-key','papers-inline-device','papers-files-parent','papers-files-group'])url.searchParams.delete(key);
+  url.searchParams.set('blob-project',id);url.searchParams.set('blob-title',item.name);url.searchParams.delete('blob-template');
+  try{if(location.protocol==='papers-backpack:')await root.ProximaWorkspaces.request('papers:project:open-new-surface',{url:url.href,inlineGroupId:'sibling'});else window.open(url.href,'_blank','noopener');}
+  catch(error){build();pane.hidden=false;pane.parts.status.hidden=false;pane.parts.status.textContent=error.message;}
+ }
+ async function openEditor(binding){
+  if(!root.ProximaFullAppFlowy)throw Error('The full AppFlowy app is unavailable. Reload this page.');
+  return root.ProximaFullAppFlowy.open(binding,pane.parts.body,pane.parts.title.textContent,selected);
+ }
+ root.ProximaBlobWorkspaces=Object.freeze({open,openProjectTab,flush,button,prewarm});
+ if(projectTab){document.documentElement.classList.add('blob-project-page');const start=()=>{const item=Store.timelineIntervals().find(x=>x.id===projectTab);if(item){document.title=item.name;void open(projectTab);}else setTimeout(start,100);};setTimeout(start,0);}
  const previousFlush=root.__papersFlushBeforeClose;root.__papersFlushBeforeClose=async()=>{await flush();await previousFlush?.();await root.ProximaWorkspaces.flush();return {ok:true};};
 })(globalThis);

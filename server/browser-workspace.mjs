@@ -111,6 +111,9 @@ export function createBrowserWorkspace(engine,{store,uploads,receipts,atomic,der
   return {ok:false,code:'BROWSER_UNAVAILABLE',message:'This action needs the installed Papers app.'};
  }
  async function call(ws,method,args=[]){
+  if(method==='document-load')return engine.replica.readDocument(args[0]);
+  if(method==='document-save')return engine.replica.saveDocument(...args);
+  if(method==='document-resolve')return engine.replica.resolveMetadata('blob-documents',...args);
   if(method==='load')return load(ws);if(method==='save')return save(ws,args);
   if(method==='flush'){await engine.replica.flush();return {ok:true};}
   if(method==='folders')return engine.replica.folders(ws);

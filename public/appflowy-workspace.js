@@ -41,10 +41,15 @@
    else{const frame=document.createElement('iframe');frame.title='AppFlowy';frame.src=launchUrl;surface.replaceChildren(frame);}
   });
  }
+ // One move in flight at a time, always to the newest rectangle: a resize sends dozens of
+ // positions a second and queuing them all left the native window crawling behind.
+ let moving=false,movePending=false;
  function place(){
   if(!visible())return;
-  if(session)void call('browser-move',{sessionId:session,rect:rect()}).catch(()=>{});
-  else if(docked)void call('program-window-move',{template:TEMPLATE,rect:rect()}).catch(()=>{});
+  if(moving){movePending=true;return;}
+  moving=true;movePending=false;
+  const task=session?call('browser-move',{sessionId:session,rect:rect()}):docked?call('program-window-move',{template:TEMPLATE,rect:rect()}):null;
+  void Promise.resolve(task).catch(()=>{}).finally(()=>{moving=false;if(movePending)place();});
  }
  async function open(binding,body,name,intervalId){
   if(last?.documentId===binding.documentId&&(session||docked)&&visible()&&!surface.hidden){place();return;}

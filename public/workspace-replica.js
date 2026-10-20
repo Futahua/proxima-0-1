@@ -24,6 +24,22 @@
       journal.state=next;
     }
     const recordKey=(workspaceId,kind,id)=>workspaceId+':'+kind+':'+id;
+    // Structured template documents use this same causal journal, separate from
+    // the frequently exchanged calendar and from AYG's file placements.
+    function documentValue(journal,documentId){
+      const key=recordKey('blob-documents','document',documentId),record=journal.state.workspaceEntries.find(e=>e.id===key);
+      return {content:record?.content?.data??null,revision:record?.content?.revision??null,conflicts:S.conflictsOf(journal.state,new Map(journal.stamps)).filter(c=>c.key==='workspaceEntries/'+key)};
+    }
+    function validateDocumentId(documentId){if(typeof documentId!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(documentId))throw Error('Invalid document identity.');}
+    async function readDocument(documentId){validateDocumentId(documentId);return transaction(async journal=>structuredClone(documentValue(journal,documentId)));}
+    async function saveDocument(documentId,content,revision){
+      validateDocumentId(documentId);const text=JSON.stringify(content);if(!content||typeof content!=='object'||text.length>2*1024*1024)throw Error('This document is too large or invalid.');
+      const value=JSON.parse(text);
+      return transaction(async(journal,stamps)=>{const current=documentValue(journal,documentId);if(current.revision!==revision||current.conflicts.length)return {ok:false,code:'DOCUMENT_CHANGED',...structuredClone(current)};
+        const key=recordKey('blob-documents','document',documentId),record={id:key,recordId:documentId,workspaceId:'blob-documents',kind:'document',content:{data:value,revision:uuid()}};
+        if(JSON.stringify(current.content)!==text)author(journal,stamps,{...journal.state,workspaceEntries:[...journal.state.workspaceEntries.filter(e=>e.id!==key),record]});
+        return {ok:true,...structuredClone(documentValue(journal,documentId))};});
+    }
     function encode(workspaceId,document){
       const records=[];
       for(const [collection,kind] of [['groups','group'],['shortcuts','shortcut']])for(const raw of document[collection]||[]){
@@ -334,7 +350,7 @@
       }else for(const field of Object.keys(record))stamps.set(conflict.key+'#'+field,nextStamp(journal));
       return {ok:true};
     });}
-      return Object.freeze({load,entry,save,importFile,receiveFile,capture,reconcile,exchange,syncWith,remove,restore,status,history,conflicts,resolveMetadata,folder,folders,ensureFolder,cachePolicy,liveContent,requestLocal,maintainCache:replaceDownloaded,flush:async()=>{await tail;await trimming;}});
+      return Object.freeze({readDocument,saveDocument,load,entry,save,importFile,receiveFile,capture,reconcile,exchange,syncWith,remove,restore,status,history,conflicts,resolveMetadata,folder,folders,ensureFolder,cachePolicy,liveContent,requestLocal,maintainCache:replaceDownloaded,flush:async()=>{await tail;await trimming;}});
   }
   root.ProximaWorkspaceReplica=Object.freeze({create});
 })(globalThis);

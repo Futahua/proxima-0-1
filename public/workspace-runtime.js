@@ -138,6 +138,9 @@
     }
   }
   async function frameCall(workspaceId,method,args=[]){
+    if(method==='document-load')return replica.readDocument(args[0]);
+    if(method==='document-save')return replica.saveDocument(...args);
+    if(method==='document-resolve')return replica.resolveMetadata('blob-documents',...args);
     if(method==='load')return replica.load(workspaceId);
     if(method==='save'){
       const current=await replica.load(workspaceId);if(current.revision!==args[1])return {ok:false,code:'STALE_REVISION'};

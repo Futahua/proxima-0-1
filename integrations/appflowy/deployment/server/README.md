@@ -1,0 +1,657 @@
+# AppFlowy Self-Hosted Commercial
+
+This repository provides the Docker Compose configuration and deployment files needed to configure and run the **AppFlowy Self-Hosted server** on your own infrastructure.
+
+To get started, follow our comprehensive [Step-by-Step Self-Hosting Deployment Guide](https://appflowy.com/docs).
+
+We also provide a series of [self-hosting video tutorials on YouTube](https://www.youtube.com/playlist?list=PLqKX5matmbL6CYkAzzF0T_ecoV6JXe_Xv) covering deployment, configuration, and administration.
+
+Check out our [release notes](#Release-Notes) for the latest updates, improvements, and fixes.
+
+For audit configuration, event review, and CSV export in the Admin console, see the illustrated [Audit Logging guide](docs/AUDIT.md).
+
+For Google Drive and Google Calendar setup in Admin and account connections from web and desktop, see the illustrated [Connections guide](docs/CONNECTION.md).
+
+For optional server backups, set `APPFLOWY_BACKUP_PROFILE=backup` in `.env` and run
+`docker compose up -d` (Compose 2.30 or newer). Once Backup is ready, open **Tools → Backup**.
+See the [Backup guide](docs/BACKUP.md) and [Compose details](docs/docker-compose.md#backup).
+Existing installations must retain their Compose project name, override files, and
+`backup-ops/runtime/` restore selections. Upgrade Cloud, Worker, Search, GoTrue, Admin, and Backup
+as a compatible set; follow the [backup upgrade procedure](docs/docker-compose.md#upgrade-with-existing-backups)
+for the v0.19.2 storage migration. Swarm and Helm use their own deployment guides and activation
+adapters; the [Compose Backup acceptance lane](docs/deployment-ci.md#backup-acceptance) does not
+qualify those platforms.
+
+To browse and test your installation's business APIs in Swagger UI, see the [OpenAPI guide](docs/OPENAPI.md).
+
+## Deployment Options
+
+AppFlowy's production services are powered by our **commercial AppFlowy Cloud codebase**, which is actively developed and maintained by the AppFlowy team.
+
+It supports two deployment models:
+
+* **[AppFlowy Managed Cloud (SaaS)](https://appflowy.com/app):** AppFlowy instances hosted on AWS and fully deployed, operated, upgraded, and maintained by the AppFlowy team.
+* **AppFlowy Self-Hosted:** AppFlowy services deployed on your own infrastructure, giving your organization control over its data, authentication, storage, backups, and deployment environment. It is designed for teams and enterprises that require data sovereignty, private infrastructure, or greater control over their deployment.
+
+Both deployment models are powered by the same commercial AppFlowy Cloud codebase.
+
+## AppFlowy Self-Hosted Free Tier
+
+AppFlowy Self-Hosted includes a **Free Tier** for experienced IT professionals, developers, and self-hosting enthusiasts who want to evaluate and deploy AppFlowy on their own infrastructure.
+
+You can start with the Free Tier and upgrade the same deployment to a paid self-hosted plan as your requirements grow.
+
+The Free Tier includes:
+
+- One User Seat (per instance)
+- AppFlowy Web App access (via your hosted domain, e.g., https://appflowy.com)
+- Up to 3 Guest Editors who can be added to selected pages to collaborate in real-time with granular permissions (Can View / Comment / Edit)
+- Version history
+- Publish Pages functionality
+- Unlimited Workspaces
+
+For detailed pricing, plan limits, and feature comparisons, see:
+
+* [Self-Hosted Plans and Pricing](https://appflowy.com/docs/Self-hosted-Plans-and-Pricing)
+* The **Admin Panel** of your self-hosted deployment
+* The official [AppFlowy Pricing page](https://appflowy.com/pricing)
+
+## Commercial License
+
+This repository is distributed under the [AppFlowy Self-Hosted Commercial License](https://github.com/AppFlowy-IO/AppFlowy-SelfHost-Commercial/blob/main/SELF_HOST_LICENSE_AGREEMENT.md). Please review the license terms before deploying or redistributing the software.
+
+Commercial self-hosting helps fund the continued development, maintenance, and security of AppFlowy and its open-source projects.
+
+---
+
+## Release Notes
+
+### 🚀 v0.19.7 (Latest)
+
+#### New Features
+
+- **Atomic creation APIs** — Added server APIs that saved new pages, spaces, databases, linked views, and rows together with their required content and references. Compatible clients and integrations could retry interrupted requests without creating duplicate or partially saved objects.
+- **PostgreSQL 17 and 18 backups** — Added Backup runtime support for online recovery and redacted exports on PostgreSQL 17 and 18, including preservation of database locale settings.
+
+#### Improvements
+
+- **Realtime database sync** — Added restore identifiers to database and row WebSocket replies so compatible clients could use realtime updates while checking that received data belonged to the expected database restore.
+- **Permission checks** — Reduced repeated database work during concurrent synchronization and reconnects by batching restore checks and sharing short-lived permission-change observations across server replicas.
+
+#### Bug Fixes
+
+- Fixed stale sidebar responses after missed cache invalidation and unnecessary navigation delays while background updates caught up.
+- Fixed database page loads that silently omitted rows after temporary read failures, and page-opening races during row creation.
+- Fixed stale client requests after full-server restores for clients that supplied the restore identifier.
+
+
+**Baseline:** [`6cebfb21c7b4161f2057766c7bf9308d8902173e`](https://github.com/AppFlowy-IO/AppFlowy-Cloud-Preminum/commit/6cebfb21c7b4161f2057766c7bf9308d8902173e)
+
+### 🚀 v0.19.6
+
+#### New Features
+
+- **Search monitoring and queue controls** — Added Admin APIs across all license tiers to inspect Search availability, indexing state, storage, queue activity, and recovery progress. Administrators could preview and remove selected queued work in bounded batches; discarded updates could leave results stale until the affected workspaces were rebuilt.
+- **Interactive API documentation** — Added a built-in Swagger console at `/api/docs` to explore business APIs and send requests using a user access token, plus a downloadable OpenAPI specification at `/api/docs/openapi.json`. Documentation assets were bundled with Cloud and required no separate deployment.
+- **SCIM monitoring and recovery (Seed plan or higher)** — Added Admin APIs to inspect group synchronization, identify membership mismatches and users waiting for seats, and retry received group changes.
+- **Managed SCIM profiles and roles (opt-in, Seed plan or higher)** — Added support for structured names and employee attributes, optional synchronization of workspace display names, and explicit Member or Guest roles through the AppFlowy SCIM extension.
+
+#### Improvements
+
+- **Search recovery** — Automatically paused new indexing work after sustained Search health failures, retained queued work, and resumed indexing with catch-up for changes made during the pause. Page and Quick Note writes continued while indexing was paused.
+- **SCIM provisioning** — Queued activations blocked by seat limits without granting workspace access, then retried them automatically after an updated license was installed or seats became available.
+- **Snapshot processing** — Reduced repeated writes of unchanged recovery checkpoints.
+
+#### Bug Fixes
+
+- Fixed navigation for page-only invitations to Custom spaces, and MCP OAuth access and refresh checks after workspace removal or Guest downgrades.
+- Fixed permission-denied errors when opening eligible legacy row documents created separately from their database rows, while preserving database access checks.
+- Fixed loss of quarantined sync recovery data and retry history after Redis expiry or replacement by retaining them in PostgreSQL.
+- Fixed Admin database scans that could stall on large workspaces by limiting work per request, preserving completed progress between pages, and reporting row timeouts explicitly.
+
+#### ⚠️ Action Required
+
+- **SCIM configuration and rollback** — Pause provisioning while Cloud replicas run different versions. Enable `sync_profile_names` and `allow_scim_roles` per connection through the Admin API when needed; both defaulted to off. Before rollback, drain or cancel all waiting activations, disable both policies, and let queued role updates finish. Older builds could not round-trip the new profile attributes.
+- **Custom reverse proxies** — If API routes are restricted, forward `/api/docs` and its subpaths to Cloud for the new console, and `/api/error-messages` for the error catalog. The bundled Nginx configuration already supported these routes.
+
+**Baseline:** [`00887d7d06218a36913b259ad3e40d395a448216`](https://github.com/AppFlowy-IO/AppFlowy-Cloud-Preminum/commit/00887d7d06218a36913b259ad3e40d395a448216)
+
+### 🚀 v0.19.5
+
+#### Bug Fixes
+
+- Fixed missed sidebar updates for connected viewers and stale database row synchronization after deletions and restores.
+- Fixed document import retries that could discard pages and attachments already saved before a temporary conflict.
+- Fixed stale attachment access checks after unpublishing.
+
+
+**Baseline:** [`d55254037786da52456dfab1ccbf931e8e3a9772`](https://github.com/AppFlowy-IO/AppFlowy-Cloud-Preminum/commit/d55254037786da52456dfab1ccbf931e8e3a9772)
+
+### 🚀 v0.19.2
+
+#### New Features
+
+- **Legacy Word imports** — Added server support for importing `.doc` files into editable pages, including Word 97–2003 documents and HTML/MHTML exports with supported formatting, tables, and embedded images.
+- **Email-domain blocking (opt-in)** — Added Admin APIs to manage a registration email-domain blocklist and switch enforcement on or off independently of signup approval.
+
+#### Improvements
+
+- **Large imports** — Improved handling of database contention with smaller writes for imported content and attachments, plus retries for temporary lock conflicts.
+
+#### Bug Fixes
+
+- Fixed realtime sync stalls after permission changes and reconnects, including recovery from temporary backend failures.
+- Fixed DOCX imports that lost inherited bold formatting or embedded images.
+- Fixed MCP database-row deletions that left stored rows and connected views inconsistent after interrupted updates.
+
+#### ⚠️ Action Required
+
+- **Service rollout** — Drain application traffic and stop existing writers before the storage migration. Let updated Cloud finish migrations, then start matching self-hosted Worker, Search, and optional MCP builds before resuming traffic. Use the updated GoTrue image for the startup-permission fix.
+- **Migration tooling and rollback** — Use Cloud's updated startup migration runner, or `appflowy-migrate` for custom migration jobs. Preserve existing migration records and checksums. Rollback builds must support the updated migration runner and storage protocol.
+- **Email-domain blocking** — If blocking is required, set `email_domain_blocking_enabled=true` through the Admin system-configuration API. Existing domain lists were preserved, but enforcement defaulted to off and list downloads became explicit Admin actions.
+
+**Baseline:** [`36aaa3ca0a26043f8c26222f28713083ba072a13`](https://github.com/AppFlowy-IO/AppFlowy-Cloud-Preminum/commit/36aaa3ca0a26043f8c26222f28713083ba072a13)
+
+### 🚀 v0.19.0
+
+#### New Features
+
+- **PDF and Word imports (Desktop)** — Added imports of PDF and DOCX files into editable pages in workspaces connected to a server, with batch progress and warnings for unsupported content.
+- **Database version history (Desktop, opt-in)** — Added previews and restoration of saved database versions, with a recovery checkpoint before restoring.
+- **Formulas and rollups (Desktop)** — Added formulas that read properties from related rows, rollups of formula results, and counts or percentages matching multiple selected options.
+- **MCP database tools** — Added creation of Timeline and Form views and creation or editing of Formula properties. Formula results remained calculated by clients.
+
+#### Improvements
+
+- **Formula editing (Desktop)** — Opened the editor below the selected cell, added property-reference chips, and improved editing and copying of long formulas.
+- **Timeline views (Desktop)** — Added resizable table columns with saved widths and improved settings layouts.
+- **Import controls** — Added runtime configuration of document and ZIP upload limits through the Admin API. Enforced a shared limit of three ongoing imports per user across workspaces; `MAXIMUM_IMPORT_PENDING_TASK` no longer changed that limit.
+
+#### Bug Fixes
+
+- Fixed database restores so sidebar entries, relations, row metadata, and published-page cleanup followed the restored state, and connected clients recovered from stale updates.
+- Fixed Desktop linked-database recovery, tab refreshes, and spurious missing-database errors when switching workspaces; corrected self-hosted feature availability and cloud upgrade prompts.
+- Fixed interrupted import delivery and cleanup so retries recovered unfinished work without creating duplicate document pages.
+
+#### ⚠️ Action Required
+
+- **Service rollout** — Let Cloud's migrations finish before starting updated Worker, Search, and optional MCP services. Use matching self-hosted builds throughout, resume import traffic only after the updated Worker is running, and update the Desktop companion client separately.
+- **Database history** — To enable the Desktop feature, set `APPFLOWY_DATABASE_HISTORY_ENABLED=true` on Cloud and restart it after rollout. Keep page-history generation and database blob storage enabled, and use Desktop `0.14.6` or newer. The old `APPFLOWY_DATABASE_HISTORY_RESTORE_PERMISSION_FENCE_READY` flag was removed.
+- **Import storage permissions** — Ensure Cloud's S3 credentials can list and abort multipart uploads so interrupted imports can be cleaned up.
+
+**Baseline:** [`3066747196d8e39a1b9fe1b2b9eff3f697be3707`](https://github.com/AppFlowy-IO/AppFlowy-Cloud-Preminum/commit/3066747196d8e39a1b9fe1b2b9eff3f697be3707)
+
+**Desktop Baseline:** [`781e514d5e6b75e8a9d5b69e8fb685bbaa728ae1`](https://github.com/AppFlowy-IO/AppFlowy-Premium/commit/781e514d5e6b75e8a9d5b69e8fb685bbaa728ae1)
+
+### 🚀 v0.18.10
+
+#### Bug Fixes
+
+- Fixed integration authorization in AppFlowy Web so connection popups returned results to the browser and avoided unwanted desktop launches.
+
+#### ⚠️ Action Required
+
+- **Web connections** — When using Connections in AppFlowy Web, deploy Cloud alongside a Web build that supports the browser OAuth callback.
+
+**Baseline:** [`ac05c6f4988e8b76c1b003b35076e9564d25841d`](https://github.com/AppFlowy-IO/AppFlowy-Cloud-Preminum/commit/ac05c6f4988e8b76c1b003b35076e9564d25841d)
+
+### 🚀 v0.18.9
+
+#### New Features
+
+- **Database history previews and recovery** — Added APIs to preview saved database views and rows without changing live data, and to require a recovery checkpoint before restoring so the previous database state could be recovered.
+- **Formula fields** — Added server support for Formula properties, preserving expressions and display settings for calculation in compatible clients.
+- **Confluence CSV imports** — Added single-space CSV ZIP imports with page hierarchy and attachments, preserved source metadata and comments as document content, and reported omitted or unsupported content.
+
+#### Improvements
+
+- **Timeline views** — Expanded saved settings for dependencies, separate start and end dates, progress, and weekend-aware scheduling, and included embedded Timeline content in PDF exports.
+
+#### Bug Fixes
+
+- Fixed database duplication so self-relations, saved relation filters, and Timeline dependencies referenced the copied rows correctly.
+- Fixed inconsistent initialization of new row documents that could cause content loss when client and server initialized the same document independently.
+
+#### ⚠️ Action Required
+
+- **Service rollout** — Upgrade Cloud and Worker together, and let Cloud's database migrations finish before deploying clients that use the new history preview and recovery APIs.
+- **Row-document sync** — Deploy desktop/mobile clients containing the matching document-initialization fix alongside the server. This prevented new conflicting histories; it did not repair previously damaged documents.
+
+**Baseline:** [`fa6a37bee7bb1e5380e51cdceb909da17022c95e`](https://github.com/AppFlowy-IO/AppFlowy-Cloud-Preminum/commit/fa6a37bee7bb1e5380e51cdceb909da17022c95e)
+
+### 🚀 v0.18.8
+
+#### New Features
+
+- **Confluence imports** — Added Confluence HTML ZIP imports into new or existing workspaces, with page hierarchy, attachments, internal links, and editable tables.
+- **Admin audit APIs** — Added audit search and CSV export across workspaces, plus coverage for space, group, sharing, and directory permission changes when auditing was enabled.
+
+
+#### Bug Fixes
+
+- Fixed legacy row-document access for users with read-only permissions and enforced page and space restrictions on Notion import destinations.
+- Fixed stale snapshots and incomplete template copies, preserved pending updates through temporary storage failures, and reduced excessive retries in sync recovery and search indexing.
+
+**Baseline:** [`61160e37c6c790baff826183837b392cbcb7875c`](https://github.com/AppFlowy-IO/AppFlowy-Cloud-Preminum/commit/61160e37c6c790baff826183837b392cbcb7875c)
+
+### 🚀 v0.18.6
+
+#### New Features
+
+- **Saved publishing preferences** — Added an API to manage comment and duplication settings while pages were unpublished, preserving each page's choices across republishing and public URL reuse.
+
+#### Improvements
+
+- **Publishing diagnostics** — Added failure-stage, page, and asset details to server logs to help operators diagnose publishing errors.
+
+#### Bug Fixes
+
+- Fixed publishing failures caused by missing document child blocks or file metadata; missing files no longer blocked the rest of a page from publishing.
+- Fixed database publishing failures from repeated file references and preserved references to existing public files during republishing.
+
+#### ⚠️ Action Required
+
+- **Publishing settings clients** — If deploying clients that use the new publishing settings API, upgrade Cloud and let its database migrations finish first.
+
+**Baseline:** [`0314742175473683ab18d5b86147108d0a007fad`](https://github.com/AppFlowy-IO/AppFlowy-Cloud-Preminum/commit/0314742175473683ab18d5b86147108d0a007fad)
+
+### 🚀 v0.18.5
+
+#### New Features
+
+- **Database forms** — Added form views with public sharing, anonymous submissions, and file uploads, with responses automatically saved as database rows.
+- **Legacy database upgrades** — Added an upgrade API that organized eligible legacy database views under a tab container while preserving database and view identities and existing content.
+
+#### Improvements
+
+- **Search** — Preserved document headings, table context, and database field names in semantic indexing, bounded retained indexing memory, and improved queue backlog draining.
+- **Automatic row repair** — Enabled paced, resumable repair of verified missing database-row parent records so members regained access to affected row documents.
+- **Web compatibility** — Added an independent minimum Web client version through `APPFLOWY_MIN_WEB_CLIENT_VERSION`, defaulting to `0.17.1`, and exposed it alongside the server version.
+
+#### Bug Fixes
+
+- Fixed page-permission precedence and inconsistent sharing details, and prevented access increases through self-revocation.
+- Fixed account deletion and member removal involving owned private spaces, and authentication responses with missing identity sign-in timestamps.
+- Fixed recoverable Folder stalls, stale mutation replay, and missing or misordered sidebar updates.
+
+#### ⚠️ Action Required
+
+- **Service rollout** — Upgrade Cloud, Worker, and Search together, allowing Cloud's migrations to finish before starting the updated Worker and Search. Custom `APPFLOWY_WORKER_DATABASE_MAX_CONNECTIONS` settings must allow at least three connections.
+
+**Baseline:** [`e01e7f2a96c6f7acc3b19d0c3a2687fb18cdaadb`](https://github.com/AppFlowy-IO/AppFlowy-Cloud-Preminum/commit/e01e7f2a96c6f7acc3b19d0c3a2687fb18cdaadb)
+
+### 🚀 v0.18.3
+
+#### Improvements
+
+- **Permission caching** — Isolated access-detail group projections from realtime authorization and added a rollout-gated per-object Folder inventory, reducing broad cache invalidation without weakening access checks.
+- **Restore capacity** — Added auto-sized memory and disk staging profiles that bounded restore memory, row, object, and temporary-storage use to the Cloud container's configured limits.
+- **Search summaries** — Separated long AI-summary requests from ordinary interactive search timeouts so provider timeouts could return a structured response instead of an empty HTTP timeout.
+
+#### Bug Fixes
+
+- Fixed CSV imports so inferred field types were preserved, a later Rich Text column could become the title, and typed-only CSVs received a populated title without changing the source columns.
+- Fixed commercial seat enforcement so creating or joining another workspace did not double-count an existing person, while genuine distinct-user increases still respected the license limit after legacy overages or downgrades.
+- Fixed collaboration recovery by containing exact pending-gap resend loops, guaranteeing manifest repair after quarantine, repairing drained Folder projection wedges on Worker cold start, and backing off failed database-blob reconciliation.
+- Fixed legacy row-document access so pages created before provenance tracking safely inherited their parent database permission on first open without a migration.
+
+**Baseline:** [`7cc1303f1254e1001de7d85e9c46132f64bd1b65`](https://github.com/AppFlowy-IO/AppFlowy-Cloud-Preminum/commit/7cc1303f1254e1001de7d85e9c46132f64bd1b65)
+
+### 🚀 v0.18.0
+
+#### New Features
+
+- **Structured space permissions** — Added Public, Private, and Custom spaces with owner, member, and everyone-else access levels, access requests, safe visibility transitions, and controls for invitations, sidebar editing, guests, public links, and exports.
+- **Workspace groups** — Added manual group management and group-based access to spaces and individual pages; SCIM groups were projected into the same permission model.
+- **Admin recovery and diagnostics** — Added restoration of permanently deleted document and database views when their underlying collabs survived, plus secure download of database blobs selected through the database inspector.
+- **Database attribution** — Added read-only Created by and Last edited by fields and a row-by-ID update API that maintained editor attribution.
+
+#### Bug Fixes
+
+- Fixed workspace imports, exports, and CSV completion so recoverable content and row ordering were preserved instead of failing or reporting completion too early.
+- Fixed published database duplication and unpublishing across multi-view databases, relation dependencies, legacy relation identifiers, and incomplete database payloads.
+- Fixed realtime recovery issues involving Redis awareness reconnects, dependent updates, orphaned views, Folder create retries, and database-row template uploads.
+- Fixed space ownership and guest and group visibility edge cases, inline-comment anchoring and cross-device notifications, and renewed-license rebind consistency.
+- Fixed a SQL injection vulnerability in the Quick Note API endpoint.
+
+**Baseline:** [`d07810bafe7cc24925d0d20eda2028919fbfd517`](https://github.com/AppFlowy-IO/AppFlowy-Cloud-Preminum/commit/d07810bafe7cc24925d0d20eda2028919fbfd517)
+
+### 🚀 v0.17.4
+
+#### Highlights
+
+- **Collaboration & sync** — Improved realtime diagnostics, queue performance, replay recovery, and full-state synchronization.
+- **Data integrity** — Strengthened snapshots, database row recovery, private folder repair, and transient-write handling.
+- **Administration** — Added client diagnostic log upload and download, collab snapshot previews, and cloud invite and license management.
+- **Publishing & templates** — Unpublished trashed page trees automatically and fixed legacy, large-ID, and nested template publishing.
+- **Additional fixes** — Improved permissions, authentication rate-limit handling, workspace exports, folder-only chat attachments, and self-hosted Ollama Qwen documentation.
+
+**Baseline:** [`359e02ed78e825908e912376f586b4abebe7b4bb`](https://github.com/AppFlowy-IO/AppFlowy-Cloud-Premium/commit/359e02ed78e825908e912376f586b4abebe7b4bb)
+
+### 🚀 v0.17.3
+
+#### Enterprise Identity
+
+- **SCIM 2.0 directory sync** — Provision and deprovision users and Groups from Microsoft Entra ID, Okta, Authentik, and other compatible identity providers. Directory Groups can be mapped to AppFlowy workspace roles.
+- **LDAP login** — Authenticate against configured LDAP directories and, when automatic provisioning is enabled, add users to their workspace on first login.
+- **Enterprise identity administration** — Configure LDAP, SCIM, and custom OIDC connections through AppFlowy Admin.
+
+These enterprise-authentication features require the Seed plan or higher. SCIM handles directory provisioning only; users continue to sign in through LDAP, SAML, or OIDC.
+
+#### Required Companion Versions
+
+Use these component versions with the v0.17.3 enterprise identity features:
+
+| Component | Version | Purpose |
+| --- | --- | --- |
+| Admin Frontend | `0.16.5` | Configure LDAP, SCIM, and custom OIDC connections |
+| AppFlowy | `0.17.1` | Desktop LDAP and custom OIDC sign-in |
+| AppFlowy Web | `0.16.5` | Web LDAP and custom OIDC sign-in |
+
+#### ⚠️ Action Required: Expose SCIM Through Nginx
+
+SCIM is served at `/scim/v2/*`. The standard self-host deployment bind-mounts this repository's [`docker/nginx/nginx.conf`](docker/nginx/nginx.conf) into the Nginx container, so upgrading only the `appflowy_cloud` image does not update its routes.
+
+In a copied or customized Nginx configuration, add this sibling location alongside the `location /` frontend catch-all:
+
+```nginx
+location /scim {
+    # The bundled Nginx terminates TLS itself. Never redirect a bearer request
+    # after its credential has already crossed plaintext.
+    if ($scheme != https) {
+        return 403;
+    }
+
+    # SCIM filters can contain email addresses and external IDs.
+    access_log off;
+    error_log /dev/null;
+    # No trailing slash or rewrite: preserve /scim/v2/* for AppFlowy Cloud.
+    proxy_pass $appflowy_cloud_backend;
+}
+```
+
+LDAP also needs a trusted client address for per-IP rate limiting. In the existing `location /api`, add this directive, replacing any existing `X-Forwarded-For` directive rather than adding a duplicate:
+
+```nginx
+proxy_set_header X-Forwarded-For $remote_addr;
+```
+
+For rollout:
+
+1. Upgrade `appflowy_cloud` and wait for its migrations and health checks to complete.
+2. Reload or recreate Nginx with the SCIM route.
+3. In Admin Frontend `0.16.5`, create the SCIM connection and copy the bearer token when it is returned. Configure the identity provider to use `https://<host>/scim/v2`. AppFlowy stores only the token hash, and the token must be rotated before its 90-day expiry.
+
+The bundled Nginx listens on `443 ssl`, which is why the block above checks `$scheme`. Replace its development certificate with a valid certificate trusted by the identity provider. If a trusted load balancer terminates TLS before Nginx, enforce HTTPS at that outer edge and configure Nginx's trusted real-client-IP boundary explicitly instead of copying the guard unchanged. Do not redirect SCIM bearer-token requests from HTTP to HTTPS.
+
+No additional Docker Compose service, port, SCIM environment variable, CORS rule, or proprietary header is required. Nginx forwards the standard `Authorization` header by default. If another edge applies browser login or external authentication, exempt `/scim` so it does not consume that header; do not cache SCIM responses or automatically retry non-idempotent `POST` or `PATCH` requests. For new and existing installations, ensure these directives are present in the local bind-mounted configuration.
+
+### 🚀 v0.17.2
+
+#### Workspace Import & Export
+
+- Hardened workspace imports to improve data integrity.
+- Made degraded workspace exports tolerate inactive collabs.
+
+#### Collaboration & Sync
+
+- Upgraded RocksDB to prevent file descriptor leaks.
+- Improved sync speed and performance, especially under heavy workloads.
+
+#### Repair & Migration
+
+- Fixed retained Folder tail recovery when the frontier is missing.
+- Improved the Folder frontier migration so it converges on stalled backlogs.
+
+#### Permissions
+
+- Shared active-identity evidence across sessions during the SLO window.
+
+
+### 🚀 v0.17.1
+
+#### AppFlowy Server
+
+- **Workspace export** — Fixed failures for large workspaces, stalled tasks, and workspaces with missing or inconsistent data, while preserving all readable content.
+- **Database blob diff API** — Added opt-in paginated responses with bounded page sizes and resumable continuation cursors for `POST /api/workspace/{workspace_id}/database/{database_id}/blob/diff`, while preserving compatibility with existing clients.
+- **Search indexing** — Made workspace index repair bounded and progressive so one problematic document cannot stall indexing for the rest of the workspace.
+- **Client compatibility** — Added `APPFLOWY_MIN_CLIENT_VERSION` so operators can configure the minimum supported client version.
+
+### 🚀 v0.17.0
+
+
+#### Highlights
+
+- **More reliable realtime collaboration** — Stronger sync and reconnection handling keeps documents in sync, recovers cleanly after interruptions, and monitors for stalls.
+- **More durable snapshots and version history** — Improved snapshot recovery and gating so saved versions and history stay dependable.
+- **Stronger permissions** — Explicit per-page permissions for workspace members, with revocations now taking effect immediately.
+- **Better database integrity** — More consistent row identity and safer handling of concurrent edits.
+- **Faster, leaner search and AI** — Lower CPU and memory usage in search and AI indexing, with better prioritization and grounding.
+
+#### Collaboration & Sync
+
+- Improved WebSocket reconnection and recovery after interruptions.
+- More reliable convergence so everyone sees the same, correct document state.
+- Fixed syncing of restored versions.
+- Improved handling of missing or out-of-order updates, including quarantine of problematic gaps.
+
+#### Permissions
+
+- Added explicit page-level permissions for workspace members.
+- Permission revocations now take effect immediately.
+- Fixed cases where stale permissions could linger.
+- Editors can now resolve comments.
+- Isolated notifications per user so people only see what is meant for them.
+
+#### Snapshots & Version History
+
+- Improved snapshot recovery and worker reliability.
+- Version history now relies on durable snapshots.
+
+#### Database
+
+- More consistent database row identity for reliable parent/child relationships.
+- Safer database migrations.
+- Support for concurrent workspace updates.
+- Improved row-permission performance.
+- Reduced memory usage when comparing large database entries.
+
+#### Search & AI
+
+- Lower CPU usage and better backpressure handling in search.
+- Smarter query prioritization.
+- Provider-aware AI indexing with support for dynamic embedding dimensions.
+
+#### Improvements & Fixes
+
+- Improved mention notifications.
+- Isolated the recent-pages cache to prevent cross-contamination.
+
+#### Upgrade & Rollout Notes
+
+- This release includes database identity migrations.
+- Deploy AppFlowy Cloud and AppFlowy Worker together.
+- Deploy AppFlowy Cloud before AppFlowy AI and Admin Frontend.
+- Changing embedding models or dimensions requires re-embedding existing content.
+
+### 🚀 v0.15.0
+
+#### New Features
+
+- **Signup whitelist** — Admins can control who is allowed to register by managing domain and email allowlists from the admin dashboard. Signup whitelisting can be toggled on or off at any time without redeployment.
+- **System-wide AI toggle** — A single admin setting now disables all AI functionality across the platform. When turned off, all AI features become unavailable instantly across every service.
+- **Guest-invite admin approval** — Workspace owners can now queue guest invitations that require admin approval before the invite email is sent. Admins receive email notifications for new pending requests and can review, approve, or reject invites from the admin dashboard. Clients can distinguish between invites waiting on admin approval and those waiting on the invitee to accept.
+
+---
+
+#### Signup Whitelist
+
+Admins can restrict new user registrations by enabling the signup whitelist in the admin dashboard. When enabled, only users whose email matches the configured allowlist (by domain or individual address) can sign up.
+
+By default, the signup whitelist is **disabled**, so anyone can register.
+![Signup whitelist toggle](asset/signup_control_toggle.png)
+
+**To enable it:**
+
+1. Set the environment variable `GOTRUE_DISABLE_SIGNUP=false`. The signup whitelist only takes effect when signups are enabled at the GoTrue level — if `GOTRUE_DISABLE_SIGNUP=true`, all signups are blocked regardless of the whitelist.
+2. In the admin dashboard, toggle on **Enable Signup Whitelist**.
+3. Add allowed email domains (e.g., `@yourcompany.com`) or specific email addresses.
+
+![Configure allowed domains and emails](asset/enable_signup_control.png)
+
+---
+
+#### Guest-Invite Admin Approval
+
+From the admin frontend, navigate to **Users → Guest Invite** to view pending guest invitations. You can approve or reject each request; approved invites trigger the invitation email automatically.
+
+To require admin approval for all guest invites, toggle on **Require admin approval for guest invites**. This setting is **off** by default.
+
+**Example — admin approval disabled:**
+
+A workspace owner invites `user_a@appflowy.io`. The guest receives the invitation email immediately and can accept it without admin intervention.
+
+![Admin view — approval disabled](asset/admin_approve_guest.png)
+![Invitee view — user_a](asset/user_a.png)
+
+**Example — admin approval enabled:**
+
+A workspace owner invites `user_b@appflowy.io`. The invitation is marked **Pending Admin Approval**. Once an admin approves it, the guest receives the invitation email and can accept it to access the workspace.
+
+![Admin view — approval enabled](asset/admin_approve_guest_on.png)
+![Invitee view — user_b](asset/user_b.png)
+
+---
+
+#### ⚠️ Action Required: Upgrade Services
+
+This release requires upgrading the following services to `0.15.0`:
+
+- `appflowy-cloud`
+- `gotrue`
+- `admin-frontend`
+
+### 🚀 v0.14.17
+
+#### New Features
+
+- Added server-side database row duplication, including row document cloning
+- Improved published database pages so sibling database views are surfaced more consistently in published outlines and page metadata
+
+#### Bug Fixes
+
+- Fixed unpublished collabs to return `RecordNotFound` instead of stale publish metadata
+- Fixed PDF export title and spacing issues
+- Fixed relation rendering in PDF export to use relation titles instead of raw UUIDs
+- Fixed hidden database fields appearing in PDF exports
+- Fixed duplicate-row metadata so failed row-document duplication does not leave dangling document references
+
+**Platform Compatibility**
+
+- Replaced `aws-lc-rs` with `ring` to prevent `SIGILL` crashes on ARM64 Raspberry Pi deployments
+
+### 🚀 v0.13.8
+
+#### Bug Fixes
+
+- Fix Notion import issues: handle inaccessible databases/documents, restore missing database row pages, and abort import gracefully when the zip file is corrupted
+- Fix miscellaneous application logic bugs
+
+#### Optimizations
+
+- Optimize Redis connection handling for different usage scenarios
+
+---
+
+### 🚀 v0.13.4
+
+#### Optimizations
+
+- Optimize Redis connection
+- Fix missing access to pages after importing a Notion zip file
+
+---
+
+### 🚀 v0.13.2
+
+#### Optimizations
+
+**AppFlowy Search**
+
+- Support cancellable search requests
+- Pipeline search requests with automatic cancellation of in-flight previous requests
+
+**AppFlowy Worker**
+
+- Fix Notion import bug: corrected embedded database view links and mention database links
+- Fix additional Notion import bugs
+
+---
+
+### 🚀 v0.13.0
+
+#### New Features
+
+**AppFlowy Search**
+
+A new dedicated search service (`appflowy_search`) is now available, enabling both keyword and semantic (vector) search across your documents. It runs as a standalone service on port 4002.
+
+**Setup:**
+- Pull the latest [`docker-compose.yml`](docker-compose.yml) from this repository, as it has been updated to include this service
+- `APPFLOWY_SEARCH_SERVICE_URL` defaults to `http://appflowy_search:4002` and works out of the box. You only need to set it if you have a custom deployment configuration
+
+**AppFlowy AI**
+
+AI chat now leverages the search service for context retrieval, delivering more relevant and accurate responses by drawing from your workspace content.
+
+**Admin Frontend**
+
+A new **AI** tab has been added to the admin panel, allowing you to configure AI models and switch providers on the fly — no redeployment required.
+
+![](./asset/admin_ai_config.png)
+
+---
+
+#### ⚠️ Action Required: Nginx Configuration Update
+
+If you are using a **custom Nginx configuration**, you need to add the following location block:
+
+```nginx
+location /ai/ {
+    proxy_pass $appflowy_cloud_backend;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+> **Note:** If you are using this repository's default [`docker/nginx/nginx.conf`](docker/nginx/nginx.conf), this change is already included — no action needed.
+
+### 🚀 v0.10.1
+
+#### Features
+
+- Added AI Meeting feature for intelligent meeting assistance
+  - **Requires:** Set the `ASSEMBLYAI_API_KEY` environment variable. [Get your API key here](https://www.assemblyai.com/docs/faq/how-to-get-your-api-key)
+- Enhanced Web API with improved database creation capabilities
+
+#### Improvements
+
+- Improved performance by caching user and member profiles in Redis
+
+### 🚀 v0.9.159
+
+#### Improvements
+
+- Optimized the Publish Page for faster loading and smoother performance
+- Made file and image URLs private across the app, with access allowed only on the Publish Page
+
+#### Bug Fixes
+
+- Fixed an issue in the join-by-invite-code flow where an already-seated Member/Owner was incorrectly counted again. The system now properly avoids consuming an extra seat
+
+#### Other Changes
+
+- Deprecated the ws v1 API endpoint in preparation for future cleanup and migration

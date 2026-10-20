@@ -102,26 +102,43 @@
   const sorted=[...tabs].sort((a,b)=>rank(a)-rank(b));
   if(sorted.some((tab,i)=>tab!==tabs[i]))nav.append(...sorted);
  }
+ // A program template's tab carries its window the way Papers' own window tabs do, so dropping
+ // it on the As you Go area (centre or an edge) attaches or splits it with Papers' pane logic.
+ const WINDOW_TAB_MIME='application/x-papers-window-instance';
+ const PROGRAMS={AppFlowy:{template:'appflowy',match:c=>/appflowy/i.test(c.applicationLabel||'')||/^appflowy$/i.test(c.title||'')}};
+ const instances=new Map();
+ async function prefetchInstance(name){
+  const program=PROGRAMS[name];if(!program||!root.ProximaWorkspaces?.request)return;
+  try{const listed=await root.ProximaWorkspaces.request('papers:project:window-candidates',{includeNativeIcons:false});
+   const candidate=(listed?.candidates||[]).find(program.match);if(candidate?.windowInstanceId)instances.set(name,candidate.windowInstanceId);}catch{}
+ }
  function enableTabDrag(nav){
   if(nav.__blobTabDrag)return;nav.__blobTabDrag=true;
-  new MutationObserver(()=>applyOrder(nav)).observe(nav,{childList:true});applyOrder(nav);
-  let suppressClick=false;
-  nav.addEventListener('click',event=>{if(suppressClick){suppressClick=false;event.preventDefault();event.stopImmediatePropagation();}},true);
-  nav.addEventListener('pointerdown',event=>{
-   const tab=event.target.closest('.blob-template-tabs>button');if(!tab||event.button!==0)return;
-   const startX=event.clientX;let dragging=false;
-   const move=e=>{
-    if(!dragging){if(Math.abs(e.clientX-startX)<5)return;dragging=true;tab.classList.add('is-dragging');try{tab.setPointerCapture(e.pointerId);}catch{}}
-    // Swap with a neighbour once the pointer passes that neighbour's middle.
-    const tabs=tabsOf(nav),i=tabs.indexOf(tab);
-    const prev=tabs[i-1],next=tabs[i+1];
-    if(prev&&e.clientX<prev.getBoundingClientRect().left+prev.offsetWidth/2)nav.insertBefore(tab,prev);
-    else if(next&&e.clientX>next.getBoundingClientRect().left+next.offsetWidth/2)nav.insertBefore(next,tab);
-   };
-   const end=()=>{removeEventListener('pointermove',move,true);removeEventListener('pointerup',end,true);removeEventListener('pointercancel',end,true);
-    if(!dragging)return;tab.classList.remove('is-dragging');suppressClick=true;setTimeout(()=>{suppressClick=false;},0);
-    if(lastBlob)write(ORDER_KEY(lastBlob),JSON.stringify(tabsOf(nav).map(label)));};
-   addEventListener('pointermove',move,true);addEventListener('pointerup',end,true);addEventListener('pointercancel',end,true);
+  const prepare=()=>{applyOrder(nav);for(const tab of tabsOf(nav)){tab.draggable=true;if(PROGRAMS[label(tab)])void prefetchInstance(label(tab));}};
+  new MutationObserver(prepare).observe(nav,{childList:true});prepare();
+  let dragged=null,droppedHere=false;
+  nav.addEventListener('pointerenter',()=>{for(const tab of tabsOf(nav))if(PROGRAMS[label(tab)])void prefetchInstance(label(tab));});
+  nav.addEventListener('dragstart',event=>{
+   const tab=event.target.closest?.('.blob-template-tabs>button');if(!tab)return;
+   dragged=tab;droppedHere=false;tab.classList.add('is-dragging');
+   event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('text/plain',label(tab));
+   const instance=instances.get(label(tab));if(instance)event.dataTransfer.setData(WINDOW_TAB_MIME,instance);
+  });
+  // Inside the strip the drag reorders: swap with a neighbour once past its middle.
+  nav.addEventListener('dragover',event=>{
+   if(!dragged)return;event.preventDefault();event.dataTransfer.dropEffect='move';
+   const tabs=tabsOf(nav),i=tabs.indexOf(dragged),prev=tabs[i-1],next=tabs[i+1];
+   if(prev&&event.clientX<prev.getBoundingClientRect().left+prev.offsetWidth/2)nav.insertBefore(dragged,prev);
+   else if(next&&event.clientX>next.getBoundingClientRect().left+next.offsetWidth/2)nav.insertBefore(next,dragged);
+  });
+  nav.addEventListener('drop',event=>{if(!dragged)return;event.preventDefault();droppedHere=true;});
+  nav.addEventListener('dragend',event=>{
+   const tab=dragged;dragged=null;if(!tab)return;tab.classList.remove('is-dragging');
+   if(lastBlob)write(ORDER_KEY(lastBlob),JSON.stringify(tabsOf(nav).map(label)));
+   // Dropped into the As you Go layout: that layout now hosts the window, so the blob dock lets go.
+   const program=PROGRAMS[label(tab)];
+   if(!droppedHere&&program&&event.dataTransfer.dropEffect!=='none'&&instances.has(label(tab)))
+    void root.ProximaWorkspaces.call('program-window-close',{template:program.template}).catch(()=>{});
   });
  }
  new MutationObserver(()=>{const nav=pane()?.querySelector('.blob-template-tabs');if(nav)enableTabDrag(nav);}).observe(document.body,{childList:true,subtree:true});

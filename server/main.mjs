@@ -7,6 +7,7 @@ import vm from 'node:vm';
 import {fileURLToPath} from 'node:url';
 import {createServer} from 'node:net';
 import {createPortal} from './portal.mjs';
+import {createAppFlowy} from './appflowy.mjs';
 const here=path.dirname(fileURLToPath(import.meta.url));
 const {WorkspaceFiles,RemoteDeviceService}=createRequire(import.meta.url)('./host.cjs');
 const project='bp-7f977e43-e48d-44f7-9e02-df6bf7ee4349';
@@ -14,6 +15,7 @@ const project='bp-7f977e43-e48d-44f7-9e02-df6bf7ee4349';
 // Peer exchanges retain original causal stamps. Explicit public user commands use
 // the existing command owner and originate their own deliberate-edit stamps.
 export async function createEngine(directory){
+  const appflowy=createAppFlowy(directory);
   const native=new WorkspaceFiles(path.join(directory,'workspace'));
   const context=vm.createContext({structuredClone,crypto:{randomUUID},Date,console});
   for(const name of ['sync-core','workspace-domain','workspace-replica'])vm.runInContext(await readFile(path.join(here,name+'.js'),'utf8'),context,{filename:name+'.js'});
@@ -23,6 +25,7 @@ export async function createEngine(directory){
   let tail=Promise.resolve();
   function withFacts(work){const next=tail.catch(()=>{}).then(async()=>{for(let attempt=0;attempt<6;attempt++){const loaded=await native.call('proxima-relay',{operation:'journal-load'}),journal=loaded.state||{version:1,node:randomUUID(),vv:{},state:{version:1,seq:0},stamps:[],receipts:0};journal.state.seq??=journal.receipts||0;const before=JSON.stringify(journal),result=await work(journal,core);if(before===JSON.stringify(journal))return result;const saved=await native.call('proxima-relay',{operation:'journal-save',revision:loaded.revision,state:journal});if(saved.ok)return result;if(saved.code!=='STALE_REVISION')throw Error('Replica persistence failed.');}throw Error('Replica changed repeatedly.');});tail=next;return next;}
   async function exchange(message){
+    if(message?.workspaceProtocol===1&&message.appflowy){try{return {appflowy:await appflowy.open(message.appflowy)};}catch{return {appflowy:{error:'AppFlowy is unavailable on BOP. Your workspace has been kept; try again when the server is ready.'}};}}
     if(message?.workspaceProtocol===1)return replica.exchange(message);
     const work=tail.catch(()=>{}).then(async()=>{
       if(message?.protocol!==2||!message.vv||!Array.isArray(message.changes))throw Error('Unsupported sync protocol.');

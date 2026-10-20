@@ -1352,12 +1352,19 @@ const Store = (() => {
       const item=state.timelineIntervals.find(x=>x.id===payload.intervalId);if(!item)return refuse('INTERVAL_NOT_FOUND',{});
       const conflict=checkRev(ctx,'timeline-interval',item.id);if(conflict)return conflict;
       if(item.groupChildren)return refuse('GROUP_HAS_CHILDREN',{});
-      if(payload.template!==null&&payload.template!=='as-you-go')return refuse('PAYLOAD_INVALID',{});
+      if(payload.template!==null&&!['as-you-go','appflowy'].includes(payload.template))return refuse('PAYLOAD_INVALID',{});
       // Every blob's folder lives in the one synced As you Go root. A blob keeps its folder until
       // that folder is deleted; choosing As you Go again then gives it a fresh one (renew).
-      const keep=item.template?.kind==='as-you-go'&&item.template.version===2&&!payload.renew;
-      const next=payload.template===null?null:keep?item.template:{version:2,kind:'as-you-go',workspaceId:'ayg-root',folderId:id('blobfolder')};
-      return {ok:true,apply:()=>{if(JSON.stringify(item.template??null)===JSON.stringify(next))return {changed:false,value:{...item}};const before=structuredClone(item);item.template=next;return {changed:true,entity:{kind:'timeline-interval',id:item.id},before,after:structuredClone(item),value:{...item}};}};
+      const bindings=structuredClone(item.templates??(item.template?[item.template]:[]));
+      const kind=payload.template??payload.removeKind??'as-you-go';if(!['as-you-go','appflowy'].includes(kind))return refuse('PAYLOAD_INVALID',{});
+      const existing=bindings.find(binding=>binding.kind===kind);
+      if(payload.appflowyWorkspaceId!==undefined&&(kind!=='appflowy'||typeof payload.appflowyWorkspaceId!=='string'||!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(payload.appflowyWorkspaceId)))return refuse('PAYLOAD_INVALID',{});
+      let next=payload.template===null?null:existing&&!payload.renew?existing:kind==='as-you-go'
+        ?{version:2,kind,workspaceId:'ayg-root',folderId:id('blobfolder')}
+        :{version:1,kind,workspaceId:'blob-documents',documentId:id('document')};
+      if(next&&payload.appflowyWorkspaceId)next={...next,appflowyWorkspaceId:payload.appflowyWorkspaceId};
+      const templates=bindings.filter(binding=>binding.kind!==kind);if(next)templates.push(next);
+      return {ok:true,apply:()=>{if(JSON.stringify(item.templates??bindings)===JSON.stringify(templates))return {changed:false,value:{...item}};const before=structuredClone(item);item.templates=templates;item.template=templates.find(binding=>binding.kind==='as-you-go')??null;return {changed:true,entity:{kind:'timeline-interval',id:item.id},before,after:structuredClone(item),value:{...item}};}};
     },
     'timeline-interval.create'(payload) {
       const parentGroup=payload.parentGroupId&&state.timelineIntervals.find(x=>x.id===payload.parentGroupId&&x.groupChildren);
