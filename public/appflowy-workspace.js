@@ -19,7 +19,9 @@
  function visible(){return last&&surface?.isConnected&&!surface.closest('.blob-workspace-pane')?.hidden&&!document.hidden;}
  async function dock(value){
   if(nativeUnavailable||!value.workspaceId)return false;
-  const result=await call('program-window-open',{template:TEMPLATE,target:value.workspaceId,rect:rect()}).catch(error=>({ok:false,message:error.message}));
+  // The blob's own page in the home workspace: <workspace>/<page> (or the workspace alone).
+  const target=value.viewId?value.workspaceId+'/'+value.viewId:value.workspaceId;
+  const result=await call('program-window-open',{template:TEMPLATE,target,rect:rect()}).catch(error=>({ok:false,message:error.message}));
   if(result?.ok){docked=true;return true;}
   // Older Papers builds, or no native AppFlowy on this computer: use the web app from now on.
   if(result?.code==='PROGRAM_WINDOWS_UNAVAILABLE'||/unknown|unsupported|not installed/i.test(result?.message||''))nativeUnavailable=true;
@@ -70,7 +72,7 @@
   }
   if(!value)throw Error('Open this AppFlowy template in Papers on one of your connected devices first.');
   if(opening!==generation)return;
-  last={url:value.url,launchUrl:value.launchUrl,workspaceId:value.workspaceId,documentId:binding.documentId};
+  last={url:value.url,launchUrl:value.launchUrl,workspaceId:value.workspaceId,viewId:value.viewId,documentId:binding.documentId};
   await present(last,value.launchUrl||value.url);
   if(status){status.textContent='';status.hidden=true;}
   }catch(error){showError(error);throw error;}
