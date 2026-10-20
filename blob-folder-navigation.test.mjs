@@ -9,8 +9,8 @@ const tick=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
 function fixture(){
  const listeners=new Map(),frames=[],timers=new Map();let serial=0,finishTemplate,templateRequests=0;
  class Element{
-  constructor(tag){this.tag=tag;this.children=[];this.style={};this.hidden=false;this.classList={add(){},remove(){}};if(tag==='iframe'){this.sent=[];this.contentWindow={postMessage:value=>this.sent.push(value)};frames.push(this);}}
-  append(...nodes){this.children.push(...nodes);}prepend(node){this.children.unshift(node);}setAttribute(){}addEventListener(){}
+  constructor(tag){this.tag=tag;this.children=[];this.options=this.children;this.style={};this.hidden=false;this.classList={add(){},remove(){},toggle(){}};if(tag==='iframe'){this.sent=[];this.contentWindow={postMessage:value=>this.sent.push(value)};frames.push(this);}}
+  append(...nodes){this.children.push(...nodes);}prepend(node){this.children.unshift(node);}replaceChildren(...nodes){this.children=[...nodes];}setAttribute(){}addEventListener(){}
   querySelector(selector){return selector==='.blob-workspace-note'?this.children.find(x=>x.className==='blob-workspace-note')||null:null;}
  }
  const document={createElement:tag=>new Element(tag),body:new Element('body'),querySelectorAll:()=>[],addEventListener(){}};

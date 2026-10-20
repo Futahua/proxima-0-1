@@ -31,10 +31,10 @@
 
  function build(){if(pane)return;
   pane=document.createElement('section');pane.className='blob-workspace-pane';pane.hidden=true;pane.setAttribute('aria-label','Blob contents');
-  const head=document.createElement('header'),title=document.createElement('strong'),select=document.createElement('select'),close=document.createElement('button'),status=document.createElement('p'),body=document.createElement('div'),conflicts=document.createElement('aside');
+  const head=document.createElement('header'),title=document.createElement('strong'),select=document.createElement('select'),close=document.createElement('button'),splitClose=document.createElement('button'),status=document.createElement('p'),body=document.createElement('div'),conflicts=document.createElement('aside'),views=document.createElement('div'),aygSlot=document.createElement('section'),appflowySlot=document.createElement('section');
   for(const [value,label] of [['','Add template…'],['as-you-go','As you Go'],['appflowy','AppFlowy'],['remove','Remove current template']]){const o=document.createElement('option');o.value=value;o.textContent=label;select.append(o);}select.setAttribute('aria-label','Blob template');close.textContent='×';close.setAttribute('aria-label','Close blob contents');status.setAttribute('role','status');
   const loading=document.createElement('div');loading.className='blob-workspace-loading';loading.textContent='Opening folder…';loading.hidden=true;body.append(loading);
-  const tabs=document.createElement('nav');tabs.className='blob-template-tabs';tabs.setAttribute('aria-label','Blob templates');head.append(tabs,select,close);conflicts.hidden=true;conflicts.className='blob-workspace-conflicts';pane.append(head,status,conflicts,body);pane.parts={title,select,status,body,conflicts,loading,tabs};document.body.append(pane);close.onclick=()=>{pane.hidden=true;};
+  const tabs=document.createElement('nav');tabs.className='blob-template-tabs';tabs.setAttribute('aria-label','Blob templates');splitClose.type='button';splitClose.textContent='×';splitClose.title='Close split view';splitClose.setAttribute('aria-label','Close split view');splitClose.hidden=true;views.className='blob-template-views';aygSlot.className='blob-template-slot blob-template-slot-ayg';appflowySlot.className='blob-template-slot blob-template-slot-appflowy';aygSlot.setAttribute('aria-label','As you Go template');appflowySlot.setAttribute('aria-label','AppFlowy template');const splitDrop=document.createElement('div');splitDrop.className='blob-template-split-drop';splitDrop.textContent='Drop a template here to split';views.append(aygSlot,appflowySlot,splitDrop);body.append(views);head.append(tabs,splitClose,select,close);conflicts.hidden=true;conflicts.className='blob-workspace-conflicts';pane.append(head,status,conflicts,body);pane.parts={title,select,status,body,conflicts,loading,tabs,splitClose,views,aygSlot,appflowySlot,splitDrop};document.body.append(pane);close.onclick=()=>{pane.hidden=true;};splitClose.onclick=()=>{void flush().then(()=>{splitKind=null;return open(selected);}).catch(error=>{pane.parts.status.hidden=false;pane.parts.status.textContent=error.message;});};splitDrop.addEventListener('dragover',event=>{if(!['AppFlowy','As you Go'].includes(event.dataTransfer?.getData('text/plain')))return;event.preventDefault();event.dataTransfer.dropEffect='copy';});splitDrop.addEventListener('drop',event=>{const label=event.dataTransfer?.getData('text/plain'),kind=label==='AppFlowy'?'appflowy':label==='As you Go'?'as-you-go':null,item=Store.timelineIntervals().find(x=>x.id===selected);if(!kind||!item||!bindings(item).some(b=>b.kind===kind)||bindings(item).length<2)return;event.preventDefault();if(kind===activeKind)activeKind=bindings(item).find(b=>b.kind!==kind)?.kind||kind;splitKind=kind;document.body.dataset.blobTemplateDroppedIntoPane='1';document.body.classList.remove('blob-template-dragging');void open(selected);});
   select.onchange=async()=>{select.disabled=true;try{
    if(!select.value)return;await flush();const item=Store.timelineIntervals().find(x=>x.id===selected);
    // A deleted folder (or a first-generation template) is replaced by a fresh folder.
@@ -43,9 +43,9 @@
    if(!r.ok)throw Error('The blob changed before its template could be saved.');
    activeKind=select.value;await mount(selected);refreshTimelines();
   }catch(e){status.hidden=false;status.textContent=e.message;}finally{select.disabled=false;}};
-  setInterval(()=>{if(!pane.hidden&&frame&&activeKind==='as-you-go'&&!reporting)void report();},3000);
+  setInterval(()=>{if(!pane.hidden&&frame&&(activeKind==='as-you-go'||splitKind==='as-you-go')&&!reporting)void report();},3000);
  }
- async function flush(){if(!frame||activeKind!=='as-you-go')return;const requestId=crypto.randomUUID();return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{flushes.delete(requestId);reject(Error('The file pane has not confirmed saving yet.'));},15000);flushes.set(requestId,{resolve,reject,timer});frame.contentWindow.postMessage({type:'proxima:workspace:flush',workspaceId:ROOT,requestId},origin);});}
+ async function flush(){if(!frame||(activeKind!=='as-you-go'&&splitKind!=='as-you-go'))return;const requestId=crypto.randomUUID();return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{flushes.delete(requestId);reject(Error('The file pane has not confirmed saving yet.'));},15000);flushes.set(requestId,{resolve,reject,timer});frame.contentWindow.postMessage({type:'proxima:workspace:flush',workspaceId:ROOT,requestId},origin);});}
  // One status check at a time: on the phone a check can take longer than the interval.
  let reporting=null;
  function report(){return reporting||(reporting=reportNow().finally(()=>{reporting=null;}));}
@@ -57,9 +57,9 @@
  }catch(e){pane.parts.status.textContent=e.message;}}
  // One As you Go page stays alive for every blob: opening another blob moves it to that folder
  // instead of loading As you Go again, and a new page stays invisible until its first themed render.
- let readyTimer=0,frameReady=false,wantedFolder=null,creatingFrame=null,templateEntry=null,navigation=null,openSequence=0,frameNavigationProtocol=0;
- function note(text){let el=pane.parts.body.querySelector('.blob-workspace-note');if(!el){el=document.createElement('p');el.className='blob-workspace-note';pane.parts.body.prepend(el);}el.textContent=text;el.hidden=!text;if(frame)frame.hidden=!!text;}
- function revealFrame(){clearTimeout(readyTimer);pane.parts.loading.hidden=true;pane.parts.loading.textContent='Opening folder…';if(pane.parts.status.textContent==='Opening folder…')pane.parts.status.textContent='';if(frame)frame.style.pointerEvents='';}
+ let readyTimer=0,frameReady=false,wantedFolder=null,creatingFrame=null,templateEntry=null,navigation=null,openSequence=0,frameNavigationProtocol=0,splitKind=null;
+ function note(text){let el=pane.parts.body.querySelector('.blob-workspace-note');if(!el){el=document.createElement('p');el.className='blob-workspace-note';pane.parts.body.prepend(el);}el.textContent=text;el.hidden=!text;if(frame)frame.hidden=!!text;pane.parts.aygSlot.hidden=!!text;}
+ function revealFrame(){clearTimeout(readyTimer);pane.parts.loading.hidden=true;pane.parts.loading.textContent='Opening folder…';if(pane.parts.status.textContent==='Opening folder…')pane.parts.status.textContent='';if(frame)frame.style.pointerEvents='';pane.parts.aygSlot.hidden=false;}
  function confirmedFolder(folderId,requestId){frameFolder=folderId;if(!navigation||folderId!==navigation.folderId||frameNavigationProtocol>=1&&requestId!==navigation.requestId)return;const done=navigation;navigation=null;clearTimeout(done.timer);revealFrame();done.resolve(true);}
  function cancelNavigation(){if(!navigation)return;const old=navigation;navigation=null;clearTimeout(old.timer);old.resolve(false);}
  function waitForFolder(folderId){cancelNavigation();wantedFolder=folderId;pane.parts.loading.hidden=false;if(frame)frame.style.pointerEvents='none';return new Promise((resolve,reject)=>{const pending={folderId,requestId:crypto.randomUUID(),resolve,reject,timer:0};pending.timer=setTimeout(()=>slowFolder(pending,1),20000);navigation=pending;});}
@@ -78,14 +78,15 @@
  function createFrame(folderId,title){if(frame)return Promise.resolve(frame);if(creatingFrame)return creatingFrame;creatingFrame=(async()=>{
   const phone=new URL(location.href).searchParams.has('papers-phone'),entry=await prepareTemplate();
   const url=new URL(entry.url);url.searchParams.set('papers-blob-workspace',ROOT);url.searchParams.set('as-you-go-folder',folderId);url.searchParams.set('papers-blob-parent-origin',location.origin==='null'?location.protocol+'//'+location.host:location.origin);url.searchParams.set('papers-embedded-surface','proxima-blob');url.searchParams.set('papers-inline-device','1');if(phone)url.searchParams.set('papers-phone','1');origin=url.origin==='null'?url.protocol+'//'+url.host:url.origin;
-  frameReady=false;frame=document.createElement('iframe');frame.title=title+' · As you Go';frame.style.pointerEvents='none';frame.src=url.href;frameFolder=folderId;pane.parts.body.append(frame);
+  frameReady=false;frame=document.createElement('iframe');frame.title=title+' · As you Go';frame.style.pointerEvents='none';frame.src=url.href;frameFolder=folderId;pane.parts.aygSlot.append(frame);
   // A slow start must never reveal a different preloaded folder.
   readyTimer=setTimeout(()=>{if(!frameReady&&navigation){pane.parts.status.hidden=false;pane.parts.status.textContent='Opening folder…';}},8000);
   return frame;
  })().finally(()=>{creatingFrame=null;});return creatingFrame;}
- async function mount(id,request=openSequence){build();const item=Store.timelineIntervals().find(x=>x.id===id);if(!item)throw Error('This blob no longer exists.');pane.hidden=false;selected=id;pane.parts.title.textContent=item.name;renderTemplateTabs(item);
-  if(activeKind==='appflowy'&&bindings(item).some(b=>b.kind==='appflowy')){cancelNavigation();note('');if(frame)frame.hidden=true;pane.classList.add('has-folder');pane.parts.loading.hidden=true;pane.parts.status.hidden=true;pane.parts.conflicts.hidden=true;await openEditor(bindings(item).find(b=>b.kind==='appflowy'));return;}
-  void root.ProximaFullAppFlowy?.hide();
+ function configureViews(item){const available=bindings(item).map(b=>b.kind),split=!!splitKind&&available.includes(splitKind)&&available.includes(activeKind)&&splitKind!==activeKind;pane.parts.views.classList.toggle('is-split',split);pane.parts.splitClose.hidden=!split;pane.parts.appflowySlot.hidden=!(activeKind==='appflowy'||split&&splitKind==='appflowy');pane.parts.aygSlot.hidden=!(activeKind==='as-you-go'||split&&splitKind==='as-you-go');}
+ async function mount(id,request=openSequence){build();const item=Store.timelineIntervals().find(x=>x.id===id);if(!item)throw Error('This blob no longer exists.');pane.hidden=false;selected=id;pane.parts.title.textContent=item.name;renderTemplateTabs(item);configureViews(item);
+  const appflowyBinding=bindings(item).find(b=>b.kind==='appflowy'),split=!!splitKind&&splitKind!==activeKind&&bindings(item).some(b=>b.kind===splitKind);if(appflowyBinding&&(activeKind==='appflowy'||split&&splitKind==='appflowy')){cancelNavigation();pane.classList.add('has-folder');pane.parts.status.hidden=true;pane.parts.conflicts.hidden=true;await openEditor(appflowyBinding,pane.parts.appflowySlot);if(request!==openSequence)return;if(!split){note('');pane.parts.aygSlot.hidden=true;pane.parts.loading.hidden=true;return;}}
+  if(!(appflowyBinding&&(activeKind==='appflowy'||split&&splitKind==='appflowy')))void root.ProximaFullAppFlowy?.hide();
   if(isV2(item)&&!folders.has(item.template.folderId))await readFolders();
   if(request!==openSequence)return;
   if(!isV2(item)||folders.get(item.template.folderId)?.binned){
@@ -113,7 +114,7 @@
  // A frame born under display:none can remain on about:blank in Chromium.
  function prewarm(){if(frame||creatingFrame)return;const item=Store.timelineIntervals().find(propagated);if(!item)return;void prepareTemplate().catch(()=>{});}
  setTimeout(()=>{if('requestIdleCallback' in root)requestIdleCallback(prewarm,{timeout:4000});else prewarm();},2500);
- function open(id){const request=++openSequence;cancelNavigation();chain=chain.catch(()=>{}).then(()=>request===openSequence?mount(id,request):undefined).catch(e=>{if(request!==openSequence)return;build();pane.hidden=false;pane.parts.status.hidden=false;pane.parts.status.textContent=e.message;});return chain;}
+ function open(id){if(selected!==id)splitKind=null;const request=++openSequence;cancelNavigation();chain=chain.catch(()=>{}).then(()=>request===openSequence?mount(id,request):undefined).catch(e=>{if(request!==openSequence)return;build();pane.hidden=false;pane.parts.status.hidden=false;pane.parts.status.textContent=e.message;});return chain;}
  addEventListener('message',event=>{if(!frame||event.source!==frame.contentWindow||event.origin!==origin||event.data?.workspaceId!==ROOT)return;const v=event.data;
   if(v.type==='proxima:workspace:close'){pane.hidden=true;return;}
   // Show the page only once it shows the folder asked for, so the preloaded folder never flashes first.
@@ -140,7 +141,7 @@
  function renderTemplateTabs(item){
   const list=bindings(item).filter(b=>b.kind!=='as-you-go'||!folders.get(b.folderId)?.binned);
   if(!list.some(b=>b.kind===activeKind))activeKind=list[0]?.kind??null;
-  pane.parts.tabs.replaceChildren();for(const binding of list){const tab=document.createElement('button');tab.type='button';tab.textContent=binding.kind==='appflowy'?'AppFlowy':'As you Go';tab.setAttribute('aria-pressed',String(binding.kind===activeKind));tab.onclick=()=>{void flush().then(()=>{activeKind=binding.kind;return mount(item.id);}).catch(error=>{pane.parts.status.hidden=false;pane.parts.status.textContent=error.message;});};pane.parts.tabs.append(tab);}
+  pane.parts.tabs.replaceChildren();for(const binding of list){const tab=document.createElement('button');tab.type='button';tab.textContent=binding.kind==='appflowy'?'AppFlowy':'As you Go';tab.setAttribute('aria-pressed',String(binding.kind===activeKind||binding.kind===splitKind));tab.onclick=()=>{void flush().then(()=>{if(splitKind===binding.kind)splitKind=activeKind;activeKind=binding.kind;return mount(item.id);}).catch(error=>{pane.parts.status.hidden=false;pane.parts.status.textContent=error.message;});};tab.ondblclick=event=>{event.preventDefault();if(list.length<2)return;splitKind=binding.kind;activeKind=list.find(other=>other.kind!==binding.kind)?.kind||binding.kind;void open(item.id);};pane.parts.tabs.append(tab);}
   for(const option of pane.parts.select.options)option.disabled=!!list.find(b=>b.kind===option.value);pane.parts.select.value='';
  }
  async function openProjectTab(id){
@@ -150,9 +151,9 @@
   try{if(location.protocol==='papers-backpack:')await root.ProximaWorkspaces.request('papers:project:open-new-surface',{url:url.href,inlineGroupId:'sibling'});else window.open(url.href,'_blank','noopener');}
   catch(error){build();pane.hidden=false;pane.parts.status.hidden=false;pane.parts.status.textContent=error.message;}
  }
- async function openEditor(binding){
+ async function openEditor(binding,slot=pane.parts.body){
   if(!root.ProximaFullAppFlowy)throw Error('The full AppFlowy app is unavailable. Reload this page.');
-  return root.ProximaFullAppFlowy.open(binding,pane.parts.body,pane.parts.title.textContent,selected);
+  return root.ProximaFullAppFlowy.open(binding,slot,pane.parts.title.textContent,selected);
  }
  root.ProximaBlobWorkspaces=Object.freeze({open,openProjectTab,flush,button,prewarm});
  if(projectTab){document.documentElement.classList.add('blob-project-page');const start=()=>{const item=Store.timelineIntervals().find(x=>x.id===projectTab);if(item){document.title=item.name;void open(projectTab);}else setTimeout(start,100);};setTimeout(start,0);}
