@@ -45,7 +45,11 @@
       const inspection=W.inspect(journal.state,workspaceId,item.workspaceFileId);
       item.workspaceAvailability=binding.available&&(inspection.conflict||inspection.heads.some(v=>v.id===binding.versionId&&v.kind==='content'))?'local':'pending';item.workspaceConflict=inspection.conflict;
       if(item.workspaceAvailability!=='local'&&inspection.heads.some(v=>journal.cache?.evicted?.[v.hash]))item.workspaceAvailability='evicted';
+      // Carry the on-disk name As you Go's file tracker derives from the same path; without it every load
+      // dropped the name the tracker had just added, and two panes of one workspace re-saved it endlessly.
+      const diskName=(()=>{const part=String(binding.path||'').split(/[\\/]/).filter(Boolean).pop()||'';try{return decodeURIComponent(part);}catch{return part;}})();
       item.fileTarget={id:item.workspaceFileId,status:item.workspaceAvailability==='local'?'present':'unavailable',revision:journal.state.workspaceVersions.filter(v=>v.workspaceId===workspaceId&&v.entryId===item.workspaceFileId).length+1};
+      if(diskName)item.fileTarget.name=diskName;
       // The same recoverable deletion appears in every replica's ordinary AYG Bin.
       if(inspection.deleted)for(const placement of item.placements)placement.bin??={parentId:placement.parentId,order:placement.order??0,binnedAt:'1970-01-01T00:00:00.000Z'};
       return binding;
