@@ -7,6 +7,8 @@
  const ORIGIN='https://bop.taild88607.ts.net:8443',desktop=location.protocol==='papers-backpack:',TEMPLATE='appflowy';
  // docked: the native window is placed over this pane and stays running while hidden, so switching back is instant.
  let surface=null,last=null,openingDocumentId=null,session=null,docked=false,nativeUnavailable=false,generation=0,queue=Promise.resolve();
+ // Each blob's page as BOP last confirmed it (documentId -> {workspaceId, viewId, url, launchUrl}).
+ const pages=new Map();
  const enqueue=work=>{const result=queue.catch(()=>{}).then(work);queue=result;return result;};
  const call=(operation,detail)=>root.ProximaWorkspaces.call(operation,detail);
  async function release(){
@@ -56,8 +58,39 @@
   const pane=body.closest('.blob-workspace-pane');
   openingDocumentId=binding.documentId;
   if(!pane.__fullAppFlowyObserver){pane.__fullAppFlowyObserver=new MutationObserver(()=>{if(pane.hidden)void hide();});pane.__fullAppFlowyObserver.observe(pane,{attributes:true,attributeFilter:['hidden']});}
-  const status=pane.querySelector('[role=status]');if(status){status.hidden=false;status.textContent='Connecting to AppFlowy…';}
+  // "Connecting…" only when it actually takes a moment, never on an ordinary tab switch.
+  const status=pane.querySelector('[role=status]'),CONNECTING='Connecting to AppFlowy…';
+  if(status){status.textContent='';status.hidden=true;}
+  const slow=status?setTimeout(()=>{if(opening===generation&&status.hidden){status.hidden=false;status.textContent=CONNECTING;}},900):null;
+  const settled=()=>{clearTimeout(slow);if(status&&status.textContent===CONNECTING){status.textContent='';status.hidden=true;}};
+  const remember=value=>({url:value.url,launchUrl:value.launchUrl,workspaceId:value.workspaceId,viewId:value.viewId,documentId:binding.documentId});
   try{
+  // The native app needs only the page, so a page already known shows at once; BOP is
+  // asked afterwards and only a changed answer (say the page was deleted) re-docks.
+  const known=pages.get(binding.documentId);
+  if(known&&desktop&&!nativeUnavailable){
+   last={...known};
+   await present(last);
+   if(opening!==generation)return;
+   if(docked){
+    settled();
+    void ask(binding,name,intervalId).then(value=>{
+     if(opening!==generation)return;
+     const next=remember(value);pages.set(binding.documentId,next);
+     if(next.workspaceId!==last.workspaceId||next.viewId!==last.viewId){last=next;void present(last).catch(showError);}else last=next;
+    }).catch(()=>{});
+    return;
+   }
+  }
+  const value=await ask(binding,name,intervalId);
+  if(opening!==generation)return;
+  last=remember(value);pages.set(binding.documentId,last);
+  await present(last,value.launchUrl||value.url);
+  settled();
+  }catch(error){clearTimeout(slow);showError(error);throw error;}
+ }
+ // BOP's answer for a blob: its page in the home workspace, plus a fresh sign-in link for the web app.
+ async function ask(binding,name,intervalId){
   let value=binding.appflowyWorkspaceId?{workspaceId:binding.appflowyWorkspaceId,url:ORIGIN+'/app/'+binding.appflowyWorkspaceId}:null;
   const api=root.__proximaDeviceCopy;
   if(api){
@@ -71,11 +104,7 @@
    if(current.appflowyWorkspaceId!==value.workspaceId){const saved=await Store.command({type:'timeline-interval.template',ifRev:item.rev,payload:{intervalId,template:'appflowy',appflowyWorkspaceId:value.workspaceId}});if(!saved.ok)throw Error('This blob changed before its AppFlowy link was saved.');}
   }
   if(!value)throw Error('Open this AppFlowy template in Papers on one of your connected devices first.');
-  if(opening!==generation)return;
-  last={url:value.url,launchUrl:value.launchUrl,workspaceId:value.workspaceId,viewId:value.viewId,documentId:binding.documentId};
-  await present(last,value.launchUrl||value.url);
-  if(status){status.textContent='';status.hidden=true;}
-  }catch(error){showError(error);throw error;}
+  return value;
  }
  function showError(error){const pane=surface?.closest('.blob-workspace-pane'),status=pane?.querySelector('[role=status]');if(status){status.hidden=false;status.textContent='AppFlowy is unavailable. '+error.message;}}
  root.ProximaFullAppFlowy=Object.freeze({open,hide});
