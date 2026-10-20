@@ -1,7 +1,7 @@
 (async()=>{
  try{
   await ProximaPersistence.ready;
-  for(const name of ['schedule-fixture','remote-domain','schedule-projection','remote-follow','store','schedule-zoom','life-clock','date-strip','marquee-controller','exact-timeline','blob-workspaces','app']){
+  for(const name of ['schedule-fixture','remote-domain','schedule-projection','remote-follow','store','schedule-zoom','life-clock','date-strip','marquee-controller','exact-timeline','appflowy-workspace','blob-workspaces','blob-pane-controls','app']){
    await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src=name+'.js?v=calendar-native-peek-v173';script.onload=resolve;script.onerror=reject;document.body.append(script);});
    if(name==='store'&&globalThis.__proximaDevice)Store.command=globalThis.__proximaDevice.command;
    if(name==='store'){
