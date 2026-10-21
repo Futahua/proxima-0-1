@@ -120,7 +120,7 @@
   nav.addEventListener('pointerenter',()=>{for(const tab of tabsOf(nav))if(PROGRAMS[label(tab)])void prefetchInstance(label(tab));});
   nav.addEventListener('dragstart',event=>{
    const tab=event.target.closest?.('.blob-template-tabs>button');if(!tab)return;
-   dragged=tab;droppedHere=false;document.body.classList.add('blob-template-dragging');tab.classList.add('is-dragging');
+   dragged=tab;droppedHere=false;tab.classList.add('is-dragging');
    event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('text/plain',label(tab));
    const instance=instances.get(label(tab));if(instance)event.dataTransfer.setData(WINDOW_TAB_MIME,instance);
   });
@@ -133,11 +133,11 @@
   });
   nav.addEventListener('drop',event=>{if(!dragged)return;event.preventDefault();droppedHere=true;});
   nav.addEventListener('dragend',event=>{
-   const tab=dragged;dragged=null;document.body.classList.remove('blob-template-dragging');const droppedIntoPane=document.body.dataset.blobTemplateDroppedIntoPane==='1';delete document.body.dataset.blobTemplateDroppedIntoPane;if(!tab)return;tab.classList.remove('is-dragging');
+   const tab=dragged;dragged=null;if(!tab)return;tab.classList.remove('is-dragging');
    if(lastBlob)write(ORDER_KEY(lastBlob),JSON.stringify(tabsOf(nav).map(label)));
    // Dropped into the As you Go layout: that layout now hosts the window, so the blob dock lets go.
    const program=PROGRAMS[label(tab)];
-   if(!droppedHere&&!droppedIntoPane&&program&&event.dataTransfer.dropEffect!=='none'&&instances.has(label(tab)))
+   if(!droppedHere&&program&&event.dataTransfer.dropEffect!=='none'&&instances.has(label(tab)))
     void root.ProximaWorkspaces.call('program-window-close',{template:program.template}).catch(()=>{});
   });
  }
