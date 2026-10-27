@@ -6,7 +6,7 @@
  'use strict';
  const ORIGIN='https://bop.taild88607.ts.net:8443',desktop=location.protocol==='papers-backpack:',TEMPLATE='appflowy';
  // docked: the native window is placed over this pane and stays running while hidden, so switching back is instant.
- let surface=null,last=null,openingDocumentId=null,session=null,docked=false,sharedDock=false,nativeUnavailable=false,nativeElsewhere=false,generation=0,openGeneration=0,queue=Promise.resolve();
+ let surface=null,last=null,openingDocumentId=null,session=null,docked=false,sharedDock=false,nativeUnavailable=false,dockFailure='',generation=0,openGeneration=0,queue=Promise.resolve();
  // Each blob's page as BOP last confirmed it (documentId -> {workspaceId, viewId, url, launchUrl}).
  const CACHE_KEY='proxima.flow.confirmed-pages.v1';
  const pages=new Map();
@@ -72,20 +72,22 @@
   // the minimized window (-32000). The release is over by the time that answer arrives,
   // so one immediate retry docks it instead of falling back to the web app.
   if(!result?.ok&&/observed=\{X=-32000,Y=-32000/.test(result?.message||''))result=await attempt();
-  if(result?.ok){nativeElsewhere=false;if(result.snapshot)latestNativeSnapshot=result.snapshot;if(result.tabId)nativeTabId=result.tabId;docked=true;sharedDock=root.ProximaBlobLayout?.active()===true;if(sharedDock)root.ProximaBlobLayout.accept(result);return true;}
+  // Papers takes Flow over from whichever tab held it, but a launch or release still in
+  // flight can make the first placement miss; give it a moment and place it again.
+  for(let i=0;i<2&&!result?.ok&&result?.code!=='PROGRAM_WINDOWS_UNAVAILABLE';i++){await new Promise(r=>setTimeout(r,600));if(!visible())break;result=await attempt();}
+  if(result?.ok){dockFailure='';if(result.snapshot)latestNativeSnapshot=result.snapshot;if(result.tabId)nativeTabId=result.tabId;docked=true;sharedDock=root.ProximaBlobLayout?.active()===true;if(sharedDock)root.ProximaBlobLayout.accept(result);return true;}
   // Older Papers builds, or no native AppFlowy on this computer: use the web app from now on.
   if(result?.code==='PROGRAM_WINDOWS_UNAVAILABLE'||/unknown|unsupported|not installed/i.test(result?.message||''))nativeUnavailable=true;
-  // Flow is running but could not be placed here (it is docked in another tab or window).
-  // Papers' launch already handed this page to that Flow, so the web app must not stand in.
-  nativeElsewhere=!nativeUnavailable&&!/did not open a window/i.test(result?.message||'');
+  // Desktop Flow exists but could not be placed: say why rather than show the signed-out web app.
+  dockFailure=nativeUnavailable?'':(result?.message||result?.error||'Flow could not be placed here.');
   console.warn('AppFlowy native window unavailable here.',result?.message||result);
   return false;
  }
- // The page is open in the running Flow elsewhere: say so; once that Flow is free, retry here.
- function showElsewhere(){
+ // Desktop Flow could not be placed here: say why and offer to place it again.
+ function showDockFailure(){
   const note=document.createElement('div');note.className='full-appflowy-elsewhere';
   note.style.cssText='display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;height:100%;color:var(--muted,#9aa3b2);font:13px/1.4 system-ui,sans-serif;text-align:center;padding:16px';
-  const text=document.createElement('div');text.textContent='Flow is open in another tab and is showing this page there. Close it there to show it here.';
+  const text=document.createElement('div');text.textContent='Flow could not be placed here. '+dockFailure;
   const bring=document.createElement('button');bring.type='button';bring.textContent='Try again';
   bring.style.cssText='padding:6px 12px;border-radius:6px;border:1px solid var(--line,#3a4150);background:transparent;color:inherit;cursor:pointer';
   bring.addEventListener('click',()=>{if(last)void present(last).catch(showError);});
@@ -98,7 +100,7 @@
    if(desktop){
     surface.replaceChildren();
     if(await dock(value)){if(ticket!==generation||!visible())await release();return;}
-    if(nativeElsewhere){showElsewhere();return;}
+    if(dockFailure){showDockFailure();return;}
     const result=await call('browser-open',{url:launchUrl,rect:rect()});if(!result?.ok||!result.sessionId)throw Error(result?.message||'AppFlowy could not open.');session=result.sessionId;if(ticket!==generation||!visible())await release();
    }
    else{const frame=document.createElement('iframe');frame.title='AppFlowy';frame.src=launchUrl;surface.replaceChildren(frame);}
@@ -120,7 +122,7 @@
   const opening=++openGeneration;
   if(!surface){surface=document.createElement('div');surface.className='full-appflowy-surface';surface.hidden=true;
    let scheduled=false;const move=()=>{if(scheduled)return;scheduled=true;requestAnimationFrame(()=>{scheduled=false;place();});};new ResizeObserver(move).observe(surface);addEventListener('resize',move);
-   document.addEventListener('visibilitychange',()=>{if(!visible())return;if(desktop? !session&&surface.hidden: !surface.querySelector('iframe'))void present(last).catch(showError);});
+   document.addEventListener('visibilitychange',()=>{if(!visible())return;if(desktop? !session&&(surface.hidden||!docked): !surface.querySelector('iframe'))void present(last).catch(showError);});
   }
   body.append(surface);
   const pane=body.closest('.blob-workspace-pane');

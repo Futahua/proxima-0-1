@@ -3759,7 +3759,8 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
   const targetIdentity = (target) => target.group.id + ":" + target.side + (target.side.startsWith("span-") ? ":" + spanSignature : "");
   const outer = () => {
     const b = root.element.getBoundingClientRect();
-    return { x: Math.round(b.left), y: Math.round(b.top), width: Math.round(b.width), height: Math.round(b.height), ...rootBoundary ? {} : { rightInset: Math.max(0, win.innerWidth - b.right), bottomInset: Math.max(0, win.innerHeight - b.bottom) } };
+    // A minimized or hidden Papers measures 0x0, which Papers rejects; never send an empty rect.
+    return { x: Math.round(b.left), y: Math.round(b.top), width: Math.max(1, Math.round(b.width)), height: Math.max(1, Math.round(b.height)), ...rootBoundary ? {} : { rightInset: Math.max(0, win.innerWidth - b.right), bottomInset: Math.max(0, win.innerHeight - b.bottom) } };
   };
   let lastRefusal = "";
   function accept(next) {
