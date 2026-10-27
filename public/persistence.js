@@ -1,5 +1,6 @@
 /* IndexedDB owns durable facts; localStorage is retained only as a migration backup. */
 (function(root){
+ if(root.ProximaPersistence)return; // another device's Proxima (device-view.js) supplies its own
  const request=r=>new Promise((resolve,reject)=>{r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
  const done=t=>new Promise((resolve,reject)=>{t.oncomplete=resolve;t.onabort=()=>reject(t.error||new Error('Transaction aborted'));t.onerror=()=>{};});
  let db,previous=new Map();

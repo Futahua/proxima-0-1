@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Proxima</title>
 <link rel="stylesheet" href="app.css?v=calendar-native-peek-v173">
+<link rel="stylesheet" href="blob-workspaces.css">
 </head>
 <body>
 <!-- One quiet channel for every refused action. A refusal is a sentence the
@@ -55,7 +56,7 @@
     </div>
   </section>
 
-  <section class="boardhead" id="boardHead">
+  <section class="boardhead" id="boardHead" hidden>
     <div id="boardHeading" hidden>
       <p class="eyebrow" id="scopeLabel">ALL PROJECTS</p>
       <h1 id="boardTitle">Elastic Boards</h1>
@@ -66,7 +67,7 @@
     </div>
   </section>
 
-  <section class="runbar" id="runbar">
+  <section class="runbar" id="runbar" hidden>
     <label>
       <input type="datetime-local" id="target" aria-label="Execution target">
     </label>
@@ -74,7 +75,7 @@
     <span id="runInfo" class="runinfo" hidden></span>
   </section>
 
-  <section class="columns" id="columns">
+  <section class="columns" id="columns" hidden>
     <div class="col" data-status="backlog">
       <div class="colhead"><span>BACKLOG</span><span class="n" data-count="backlog">0</span></div>
       <div class="cards" data-drop="backlog"></div>
@@ -182,32 +183,7 @@
     </div>
   </section>
 
-  <section class="hub" id="projectsHub">
-    <div class="tk-bar">
-      <div>
-        <p class="eyebrow">PROJECTS</p>
-        <!-- The creator's own name for this surface (the original's
-             plugin.settings.mainPageHeader, App.svelte:15-19 and :86). It is the
-             name of the Hub, not a new label for the app. -->
-        <h1>This is Minh</h1>
-      </div>
-      <span class="spacer"></span>
-      <span class="tk-count" id="hubCount"></span>
-      <label class="hub-archived">
-        <input type="checkbox" id="hubShowArchived">
-        <span>Show archived</span>
-      </label>
-      <button class="primary" id="hubNewProject">+ New project</button>
-    </div>
-
-    <p class="tk-empty" id="hubEmpty" hidden>No projects yet. Create one and its tasks will gather here.</p>
-
-    <div class="hub-tabs" role="tablist" aria-label="Project type">
-      <button class="hub-tab active" data-project-kind="task" role="tab" aria-selected="true">📁 Task Projects <span id="taskProjectCount">0</span></button>
-      <button class="hub-tab" data-project-kind="schedule" role="tab" aria-selected="false">▦ Schedules <span id="scheduleProjectCount">0</span></button>
-    </div>
-    <div class="hub-grid" id="hubGrid" hidden></div>
-  </section>
+  <!-- The Projects hub was removed (creator, 2026-10-14). Project and schedule records stay in the store. -->
 
 
 
@@ -336,7 +312,7 @@
   </form>
 </dialog>
 
-<script src="persistence.js?v=indexeddb-v1"></script>
-<script src="bootstrap.js?v=month-dividers-v1"></script>
+<script src="device-view.js"></script><script src="phone-local.js"></script><script src="persistence.js?v=indexeddb-v1"></script><script src="sync-core.js"></script><script src="workspace-domain.js"></script><script src="workspace-replica.js"></script><script src="workspace-runtime.js"></script><script src="proxima-sync.js"></script>
+<script src="bootstrap.js?v=one-palette"></script><script src="device-copy.js"></script><script src="bop-monitor.js"></script><script src="device-mirror.js"></script><script src="proxima-conflicts.js"></script><script src="ui-scale.js"></script><script src="timeline-fit.js"></script>
 </body>
 </html>
