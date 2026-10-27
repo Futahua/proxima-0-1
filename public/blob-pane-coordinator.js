@@ -3726,7 +3726,10 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
         if (reply?.snapshot) accept(reply.snapshot);
         if (reply?.ok === false) {
           if (rootBoundary && snapshot) onOuterEdge(snapshot.viewport);
-          onStatus(reply.error || reply.message || "Window layout could not resize");
+          if (/Window layout is not mounted/i.test(reply.message || reply.error || "")) {
+            mounted = false;
+            void api.restore().then(() => onStatus(""), (e) => onStatus(e.message));
+          } else onStatus(reply.error || reply.message || "Window layout could not resize");
         }
       }
     } catch (error) {
@@ -3823,7 +3826,15 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
       return reply;
     });
     queue = task.catch((error) => {
-      if (!disposed) onStatus(error.message);
+      if (disposed) return;
+      // Papers drops this page's layout when another tab takes its window (say Flow) over;
+      // mount it again on the next command instead of leaving the error in the header.
+      if (/Window layout is not mounted/i.test(error.message)) {
+        mounted = false;
+        void api.restore().then(() => onStatus(""), (e) => onStatus(e.message));
+        return;
+      }
+      onStatus(error.message);
     });
     return task;
   }
@@ -4518,7 +4529,7 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
     if (opened.snapshot) accept(opened.snapshot);
     if (!opened.ok) throw new Error(opened.error || "Lens could not open");
   }
-  return {
+  const api = {
     acceptSnapshot: accept,
     async selectPanel(id) {
       await command("select", () => ({ groupId: groupFor(ref(id)), tabId: ref(id) }));
@@ -4647,6 +4658,7 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
       spanHandles.remove();
     }
   };
+  return api;
 }
 export {
   GROUP_DRAG_MIME,

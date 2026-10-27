@@ -9,7 +9,7 @@
  document.addEventListener('dragover',event=>{if(!enabled||!dragTransfer||externalDrag===event.shiftKey)return;externalDrag=event.shiftKey;void root.ProximaWorkspaces.call('pane-transfer-overlay',{active:true,transferId:dragTransfer,local:!externalDrag}).catch(status);},true);
  const finishDrag=()=>{document.documentElement.classList.remove('blob-layout-dragging');dragTransfer=null;externalDrag=false;};
  for(const type of ['dragend','drop'])document.addEventListener(type,finishDrag,true);
- const status=error=>{if(pane){pane.parts.status.hidden=false;pane.parts.status.textContent=error.message||String(error);}};
+ const status=error=>{if(pane){const text=error?error.message||String(error):'';pane.parts.status.hidden=!text;pane.parts.status.textContent=text;}};
  addEventListener('message',event=>{if(event.source===window&&event.data?.type==='papers:project:pane-layout')for(const cb of listeners)cb(event.data.snapshot);});
  function syncOverlay(){controller?.setOverlay(!enabled||!!pane?.hidden||!!menu||root.ProximaModalGuard?.blocked()===true);}
  function pickTemplates(groupId,header){
