@@ -14,7 +14,7 @@
   async function call(operation,detail={}){
     if(root.__proximaWorkspaceNative)return root.__proximaWorkspaceNative(operation,detail);
     const response=(await request('papers:project:file-capability',{operation,params:detail})).fileCapability;
-    if(response?.ok===false)throw Object.assign(Error(response.message||response.code||'Workspace file operation failed.'),{code:response.code});
+    if(response?.ok===false)throw Object.assign(Error(response.message||response.error||response.code||'Workspace file operation failed.'),{code:response.code});
     return response?.result??response;
   }
   const files=detail=>call('workspace-files',detail);

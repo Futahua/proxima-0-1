@@ -87,7 +87,7 @@
    if(lastBlob&&root.ProximaBlobWorkspaces&&Store.timelineIntervals().some(x=>x.id===lastBlob)){event.preventDefault();event.stopPropagation();write(FULL_KEY,'1');if(node)node.classList.add('blob-pane-full');root.ProximaBlobWorkspaces.open(lastBlob);}
    return;
   }
-  if(open){event.preventDefault();event.stopPropagation();const close=node.querySelector("header>button[aria-label='Close blob contents']");if(close)close.click();else node.hidden=true;return;}
+  if(open){event.preventDefault();event.stopPropagation();node.hidden=true;return;}
   if(lastBlob&&root.ProximaBlobWorkspaces&&Store.timelineIntervals().some(x=>x.id===lastBlob)){event.preventDefault();event.stopPropagation();root.ProximaBlobWorkspaces.open(lastBlob);}
  },true);
 
@@ -113,7 +113,7 @@
    const candidate=(listed?.candidates||[]).find(program.match);if(candidate?.windowInstanceId)instances.set(name,candidate.windowInstanceId);}catch{}
  }
  function enableTabDrag(nav){
-  if(nav.__blobTabDrag)return;nav.__blobTabDrag=true;
+  if(root.ProximaBlobLayout?.active()||nav.__blobTabDrag)return;nav.__blobTabDrag=true;
   const prepare=()=>{applyOrder(nav);for(const tab of tabsOf(nav)){tab.draggable=true;if(PROGRAMS[label(tab)])void prefetchInstance(label(tab));}};
   new MutationObserver(prepare).observe(nav,{childList:true});prepare();
   let dragged=null,droppedHere=false;

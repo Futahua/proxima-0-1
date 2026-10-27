@@ -6,14 +6,14 @@
  'use strict';
  const ORIGIN='https://bop.taild88607.ts.net:8443',desktop=location.protocol==='papers-backpack:',TEMPLATE='appflowy';
  // docked: the native window is placed over this pane and stays running while hidden, so switching back is instant.
- let surface=null,last=null,openingDocumentId=null,session=null,docked=false,nativeUnavailable=false,generation=0,queue=Promise.resolve();
+ let surface=null,last=null,openingDocumentId=null,session=null,docked=false,sharedDock=false,nativeUnavailable=false,generation=0,queue=Promise.resolve();
  // Each blob's page as BOP last confirmed it (documentId -> {workspaceId, viewId, url, launchUrl}).
  const pages=new Map();
  const enqueue=work=>{const result=queue.catch(()=>{}).then(work);queue=result;return result;};
  const call=(operation,detail)=>root.ProximaWorkspaces.call(operation,detail);
  async function release(){
   const id=session;session=null;if(id)await call('browser-close',{sessionId:id}).catch(()=>{});
-  if(docked)await call('program-window-visible',{template:TEMPLATE,visible:false}).catch(()=>{});
+  if(docked&&!sharedDock)await call('program-window-visible',{template:TEMPLATE,visible:false}).catch(()=>{});
   if(surface)surface.hidden=true;
  }
  function hide(clear=true){++generation;if(clear){last=null;openingDocumentId=null;}return enqueue(release);}
@@ -23,8 +23,8 @@
   if(nativeUnavailable||!value.workspaceId)return false;
   // The blob's own page in the home workspace: <workspace>/<page> (or the workspace alone).
   const target=value.viewId?value.workspaceId+'/'+value.viewId:value.workspaceId;
-  const result=await call('program-window-open',{template:TEMPLATE,target,rect:rect()}).catch(error=>({ok:false,message:error.message}));
-  if(result?.ok){docked=true;return true;}
+  const result=await call('program-window-open',{template:TEMPLATE,target,rect:rect(),layout:root.ProximaBlobLayout?.active()===true}).catch(error=>({ok:false,message:error.message}));
+  if(result?.ok){docked=true;sharedDock=root.ProximaBlobLayout?.active()===true;if(sharedDock)root.ProximaBlobLayout.accept(result);return true;}
   // Older Papers builds, or no native AppFlowy on this computer: use the web app from now on.
   if(result?.code==='PROGRAM_WINDOWS_UNAVAILABLE'||/unknown|unsupported|not installed/i.test(result?.message||''))nativeUnavailable=true;
   console.warn('AppFlowy native window unavailable; using the web app.',result?.message||result);
@@ -45,7 +45,7 @@
  // positions a second and queuing them all left the native window crawling behind.
  let moving=false,movePending=false;
  function place(){
-  if(!visible())return;
+  if(!visible()||sharedDock)return;
   if(moving){movePending=true;return;}
   moving=true;movePending=false;
   const task=session?call('browser-move',{sessionId:session,rect:rect()}):docked?call('program-window-move',{template:TEMPLATE,rect:rect()}):null;
@@ -114,5 +114,5 @@
  function showError(error){const pane=surface?.closest('.blob-workspace-pane'),status=pane?.querySelector('[role=status]');if(status){status.hidden=false;status.textContent='AppFlowy is unavailable. '+error.message;}}
  root.ProximaFullAppFlowy=Object.freeze({open,hide});
  // Leaving the page hands the native window back to the desktop instead of keeping it hidden.
- addEventListener('pagehide',()=>{void hide();if(docked){docked=false;void call('program-window-close',{template:TEMPLATE}).catch(()=>{});}});
+ addEventListener('pagehide',()=>{void hide();if(docked&&!sharedDock){docked=false;void call('program-window-close',{template:TEMPLATE}).catch(()=>{});}});
 })(globalThis);
