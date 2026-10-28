@@ -133,6 +133,9 @@
  function toggle(id=selected||localStorage.getItem('proxima.blobPane.last')){if(!id||!Store.timelineIntervals().some(x=>x.id===id))return false;if(pane&&!pane.hidden&&selected===id)closePane();else void open(id);return true;}
  function startEditor(item,request){void openEditor(bindings(item).find(b=>b.kind==='appflowy')).catch(error=>{if(request!==openSequence||selected!==item.id||pane.hidden)return;pane.parts.status.hidden=false;pane.parts.status.textContent=error.message;});}
  function open(id){localStorage.setItem('proxima.blobPane.last',id);const request=++openSequence;cancelNavigation();chain=chain.catch(()=>{}).then(()=>request===openSequence?mount(id,request):undefined).catch(e=>{if(request!==openSequence)return;build();pane.hidden=false;pane.parts.status.hidden=false;pane.parts.status.textContent=e.message;});return chain;}
+ // A file pane that is unloading (a blob switch reloads it) closes its hosted previews on the way out;
+ // that message arrives with no source any more. Forward just those closes, or the preview stays on screen.
+ addEventListener('message',event=>{const v=event.data;if(frame&&event.source===null&&event.origin===origin&&v?.workspaceId===ROOT&&v.type==='proxima:workspace:request'&&v.method==='file'&&/^preview-[a-z]+-close$/.test(v.args?.[0])&&typeof v.args[1]?.sessionId==='string'){void Promise.resolve(root.ProximaWorkspaces.frameCall(ROOT,'file',[v.args[0],{sessionId:v.args[1].sessionId}])).catch(()=>{});}});
  addEventListener('message',event=>{if(!frame||event.source!==frame.contentWindow||event.origin!==origin||event.data?.workspaceId!==ROOT)return;const v=event.data;
   if(v.type==='proxima:workspace:close'){closePane();return;}
   if(v.type==='proxima:workspace:pane-key'){if(v.shift)root.ProximaBlobPaneControls?.toggleFullscreen();else closePane();return;}
