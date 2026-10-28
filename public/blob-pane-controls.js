@@ -155,6 +155,9 @@
  const style=document.createElement('style');
  style.textContent='.blob-pane-resize{position:fixed;z-index:901;width:'+EDGE+'px;cursor:ew-resize;touch-action:none}.blob-pane-resize[hidden]{display:none}.blob-pane-resize:hover,.blob-pane-resizing .blob-pane-resize{background:#a8c98d55}.blob-pane-resizing,.blob-pane-resizing *{cursor:ew-resize!important;user-select:none}.blob-pane-resizing iframe{pointer-events:none}'
   +'@media(pointer:fine){.blob-workspace-pane.blob-pane-full{left:12px;width:auto!important}}'
+  // While a pane is open, the page leaves its centred 1200px column and starts at the left edge,
+  // so the timeline uses the space beside the pane instead of a blank margin.
+  +'@media(pointer:fine){body:has(>.blob-workspace-pane:not([hidden])) main{max-width:none;margin-inline:0}}'
   // Papers group tabs: compact rounded-top tabs on a dark strip; the open one is lifted and outlined.
   +'.blob-workspace-pane header .blob-template-tabs{gap:2px;align-items:flex-end;align-self:stretch;padding-top:4px}'
   +'.blob-workspace-pane header .blob-template-tabs button{display:flex;align-items:center;min-width:92px;max-width:180px;padding:6px 12px;font:11px system-ui;text-align:left;color:#c3ccd6;background:#ffffff08;border:1px solid transparent;border-bottom:0;border-radius:8px 8px 0 0;cursor:default;user-select:none;touch-action:none}'
