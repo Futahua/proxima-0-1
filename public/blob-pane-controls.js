@@ -1,6 +1,6 @@
 /* Blob pane controls (creator, 2026-10-20):
  * - the pane's left edge drags to resize it; the width is remembered on this device;
- * - inline fullscreen: the pane fills the whole page (Shift+Tab, double-click the edge, or
+ * - inline fullscreen: the pane fills the whole page (F or Shift+Tab, double-click the edge, or
  *   drag the edge to the far left); remembered too, and dragging the edge back leaves it;
  * - Tab on the timeline (not while typing) collapses the open blob pane, and Tab again
  *   reopens the blob pane last visited.
@@ -76,6 +76,14 @@
  // Remember which blob was opened last.
  addEventListener('proxima:blob-open',event=>{if(!event.detail?.id)return;lastBlob=event.detail.id;write(LAST_KEY,lastBlob);});
  const typing=target=>target instanceof Element&&!!target.closest('input,textarea,select,[contenteditable=""],[contenteditable=true]');
+ // F with a blob pane open toggles its inline fullscreen. Capture phase on the window runs
+ // before the timeline's F (Return to Live), which still applies while no pane is open.
+ addEventListener('keydown',event=>{
+  if(event.code!=='KeyF'||event.repeat||event.ctrlKey||event.altKey||event.metaKey||event.shiftKey)return;
+  if(typing(event.target)||projectPage()||coarse()||[...document.querySelectorAll('dialog[open],[role=dialog]')].some(node=>node.getClientRects().length))return;
+  const node=pane();if(!node||node.hidden)return;
+  event.preventDefault();event.stopImmediatePropagation();setFull(!isFull(node));
+ },true);
  // Capture phase: the timeline stops Tab key events before they reach the window.
  addEventListener('keydown',event=>{
   if(event.key!=='Tab'||event.repeat||event.ctrlKey||event.altKey||event.metaKey)return;
