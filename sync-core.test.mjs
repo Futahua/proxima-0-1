@@ -244,3 +244,16 @@ test('an automatic deletion and structural repair cannot remove or retime an exp
  const state=structuredClone(a.state);state.timelineIntervals.push({id:'late-clock',rowId:'r1',start:'2026-10-14T10:00:00.000Z',end:'2026-10-14T11:00:00.000Z',followNow:true});
  const repaired=S.repair(state,a.stamps);assert.equal(repaired.state.timelineIntervals.find(i=>i.id==='x').followNow,true);
 });
+
+test('missing retained record waits for its value instead of reviving null',()=>{
+ for(const key of ['run/run','tasks/task']){
+  const human={h:S.stamp(1000,0,'human'),o:'human',n:1,c:{},u:1};
+  const tomb={h:S.stamp(2000,0,'auto'),o:'auto',n:1,c:{human:1},a:1};
+  const stamps=new Map([[key+'#name',human]]),state={run:null,tasks:[]};
+  const first=S.merge(state,stamps,[{key,fields:{},tomb}]);
+  assert.equal(first.state.run,null);assert.equal(first.state.tasks.length,0);
+  assert.ok(stamps.has(key+'#name'));
+  const next=S.merge(first.state,stamps,[{key,fields:{name:{...human,v:'Retained work'}}}]);
+  assert.equal(key.startsWith('run/')?next.state.run.name:next.state.tasks[0].name,'Retained work');
+ }
+});

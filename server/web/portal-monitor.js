@@ -12,7 +12,13 @@
   try{const report=await P.api('api/storage'),s=report.storage;status.textContent='BOP is online. Browser edits are saved directly on BOP.';storage.replaceChildren();const label=document.createElement('div'),bar=document.createElement('div'),used=document.createElement('span'),free=document.createElement('span'),size=n=>(n/1024**3).toLocaleString(undefined,{maximumFractionDigits:2})+' GB';label.textContent='BOP · '+size(s.freeBytes)+' free · '+size(s.syncBytes)+' synced';bar.className='portal-storage-bar';const capacity=Math.max(1,s.freeBytes+s.syncBytes);used.style.width=s.syncBytes/capacity*100+'%';free.style.flex='1';bar.append(used,free);bar.setAttribute('role','img');bar.setAttribute('aria-label',size(s.syncBytes)+' synced and '+size(s.freeBytes)+' free');storage.append(label,bar);}
   catch{status.textContent=navigator.onLine?'This device has a network connection, but BOP cannot be reached. Changes cannot be saved.':'This device is offline. BOP may still be online.';}
  }
- async function connections(){try{choices=(await P.api('api/connections')).connections;links.replaceChildren();for(const item of choices){const a=document.createElement('a');a.href=item.url+location.hash;a.textContent=item.label+(new URL(item.url).origin===location.origin?' · current':'');a.title=item.note;links.append(a);}}catch{}}
+ async function connections(){try{choices=(await P.api('api/connections')).connections;links.replaceChildren();for(const item of choices){
+  const row=document.createElement('div'),a=document.createElement('a'),input=document.createElement('input'),copy=document.createElement('button');row.className='portal-copy-link';
+  a.href=item.url+location.hash;a.textContent=item.label+(new URL(item.url).origin===location.origin?' · current':'');a.title=item.note;
+  input.value=a.href;input.readOnly=true;input.setAttribute('aria-label',item.label+' address');input.onclick=()=>input.select();
+  copy.type='button';copy.textContent='Copy';copy.setAttribute('aria-label','Copy '+item.label);copy.onclick=async()=>{try{if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(input.value);else{input.focus();input.select();if(!document.execCommand('copy'))throw Error('Clipboard unavailable');}copy.textContent='Copied';setTimeout(()=>copy.textContent='Copy',1500);}catch{input.focus();input.select();copy.textContent='Select to copy';}};
+  row.append(a,input,copy);links.append(row);
+ }}catch{}}
  button.onclick=()=>{panel.showModal();void read();void connections();};
  const clock=document.getElementById('lifeProgressClock');clock?.addEventListener('click',event=>{if(!event.target.closest('#overviewProjects'))return;event.preventDefault();event.stopImmediatePropagation();button.click();},true);
  addEventListener('offline',()=>{P.status.textContent='This device is offline · changes cannot be saved';P.status.dataset.state='error';if(panel.open)void read();});addEventListener('online',()=>{if(panel.open)void read();});

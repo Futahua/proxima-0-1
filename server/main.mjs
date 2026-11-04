@@ -71,7 +71,10 @@ export async function serve(directory){
     next.defaultGrant=async()=>({canWrite:true,shares:[{id:'a5bb8174-e5e6-48e7-a64f-b87baa024494',name:'Replica content',directory:content.path},{id:'790f8bcc-8c81-44e1-9dd4-cd2add52ccab',name:'Incoming content',directory:incoming.path}],backpacks:[share]});
     next.replaceBackpack=async(_share,payload)=>{
       if(!payload.proximaSync)throw Error('This server accepts sync exchanges, not whole-copy replacement.');
-      return {proximaSync:await engine.exchange(payload.proximaSync)};
+      // Errors from the VM domain are not instanceof this realm's Error.
+      // Preserve the actual cause for the transport and server diagnostics.
+      try{return {proximaSync:await engine.exchange(payload.proximaSync)};}
+      catch(error){console.error('Replica exchange: '+String(error));throw new Error(error?.message||String(error));}
     };
     await next.initialize();
     const status=next.snapshot();

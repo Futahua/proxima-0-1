@@ -186,7 +186,8 @@
       // Revived after a deletion: fields this device no longer has come back from their kept values (or
       // the deletion's snapshot).
       if(alive){for(const k of [...(fieldsOf.get(key)||[])]){const field=k.slice(key.length+1),st=stamps.get(k);if(record&&field in record)continue;const from=st&&'v' in st?st:tomb?.v&&field in tomb.v?{v:tomb.v[field]}:null;if(from){if(!record)record={};record[field]=structuredClone(from.v);changed=true;}}}
-      if(alive){if(changed||!records.has(key)){records.set(key,record);touched.push(key);}}
+      // Keep value-less retained stamps pending; a null record cannot be revived until its fields arrive.
+      if(alive){if(record&&(changed||!records.has(key))){records.set(key,record);touched.push(key);}}
       else{keepValues(stamps,key,record);if(records.has(key)){records.delete(key);touched.push(key);}}
     }
     if(!touched.length)return {state,changed:false,touched,overwritten};
