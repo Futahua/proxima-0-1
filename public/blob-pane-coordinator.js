@@ -3940,15 +3940,22 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
     header.append(contour);
     const paintContour = () => {
       if (!header.isConnected) return;
-      const box = header.getBoundingClientRect(), tab = header.querySelector(".pane-window-tab.active");
-      const w = box.width, h = box.height, y = h - 1;
-      contour.setAttribute("viewBox", `0 0 ${w} ${h}`);
-      if (!tab) {
-        contourPath.setAttribute("d", `M0 ${y}H${w}`);
-        return;
-      }
-      const r = tab.getBoundingClientRect(), a = Math.max(8, r.left - box.left), b = Math.min(w - 8, r.right - box.left), top = Math.max(1, r.top - box.top);
-      contourPath.setAttribute("d", `M0 ${y}H${a - 7}Q${a} ${y} ${a} ${y - 7}V${top + 7}Q${a} ${top} ${a + 7} ${top}H${b - 7}Q${b} ${top} ${b} ${top + 7}V${y - 7}Q${b} ${y} ${b + 7} ${y}H${w}`);
+      const box = header.getBoundingClientRect(), w = box.width, h = box.height;
+      // Hidden/collapsed headers have no contour. Never project a full-size
+      // tab curve into a zero-size or narrower-than-the-tab strip.
+      if (w < 2 || h < 2) { contourPath.setAttribute('d', ''); return; }
+      contour.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+      const y = h - 1, tab = header.querySelector('.pane-window-tab.active');
+      const line = 'M0 ' + y + 'H' + w;
+      if (!tab) { contourPath.setAttribute('d', line); return; }
+      const r = tab.getBoundingClientRect();
+      const a = Math.max(1, Math.min(w - 1, r.left - box.left));
+      const b = Math.max(1, Math.min(w - 1, r.right - box.left));
+      const top = Math.max(1, Math.min(y, r.top - box.top));
+      const radius = Math.min(7, a, w - b, (b - a) / 2, (y - top) / 2);
+      if (r.width < 2 || r.height < 2 || radius < 1) { contourPath.setAttribute('d', line); return; }
+      const q = radius;
+      contourPath.setAttribute('d', 'M0 '+y+'H'+(a-q)+'Q'+a+' '+y+' '+a+' '+(y-q)+'V'+(top+q)+'Q'+a+' '+top+' '+(a+q)+' '+top+'H'+(b-q)+'Q'+b+' '+top+' '+b+' '+(top+q)+'V'+(y-q)+'Q'+b+' '+y+' '+(b+q)+' '+y+'H'+w);
     };
     header.addEventListener("scroll", paintContour, true);
     const handle = document.createElement("button");

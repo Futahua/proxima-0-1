@@ -5,11 +5,35 @@
   anchor.style.cursor='pointer';
   const panel=document.createElement('dialog');panel.id='deviceMonitor';panel.innerHTML='<header><nav role="tablist" aria-label="Device monitor"><button type="button" id="monitorStorageTab" role="tab" aria-selected="true" aria-controls="monitorStorage">Storage</button><button type="button" id="monitorConflictsTab" role="tab" aria-selected="false" aria-controls="monitorConflicts">Sync conflicts</button></nav><button type="button" data-close aria-label="Close device monitor">×</button></header><div id="monitorStorage" role="tabpanel" aria-labelledby="monitorStorageTab"><div id="monitorDevices"></div><footer><button type="button" id="bopMonitor">BOP · Checking</button><div class="monitor-local"></div></footer></div><div id="monitorConflicts" role="tabpanel" aria-labelledby="monitorConflictsTab" hidden></div>';
   document.body.append(panel);panel.querySelector('[data-close]').onclick=()=>panel.close();
-  const open=()=>{if(!panel.open)panel.showModal();void check();};anchor.addEventListener('click',event=>{if(!event.target.closest('#overviewProjects'))return;event.preventDefault();event.stopImmediatePropagation();open();},true);
+  const open=()=>{if(!panel.open)panel.showModal();void publicLinks();void check();};anchor.addEventListener('click',event=>{if(!event.target.closest('#overviewProjects'))return;event.preventDefault();event.stopImmediatePropagation();open();},true);
   const tabs=[panel.querySelector('#monitorStorageTab'),panel.querySelector('#monitorConflictsTab')];
   function selectTab(index){tabs.forEach((tab,i)=>{tab.setAttribute('aria-selected',String(i===index));tab.tabIndex=i===index?0:-1;});panel.querySelector('#monitorStorage').hidden=index!==0;panel.querySelector('#monitorConflicts').hidden=index!==1;if(index===1)dispatchEvent(new CustomEvent('proxima:open-conflicts',{detail:{host:panel.querySelector('#monitorConflicts')}}));else void check();}
   tabs.forEach((tab,index)=>{tab.addEventListener('click',()=>selectTab(index));tab.addEventListener('keydown',event=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const next=event.key==='Home'?0:event.key==='End'?1:1-index;selectTab(next);tabs[next].focus();}});});tabs[1].tabIndex=-1;
   const button=panel.querySelector('#bopMonitor');
+  const linksSection=document.createElement('section');linksSection.className='monitor-public-links';linksSection.setAttribute('aria-label','Public Proxima links');
+  panel.querySelector('#monitorDevices').after(linksSection);
+  async function publicLinks(){
+    try{
+      const saved=await globalThis.ProximaWorkspaces.readDocument('proxima.public-links').catch(()=>({content:null}));
+      // Retain the last provisioned addresses while a paired device is offline.
+      if(saved.content?.links)try{localStorage.setItem('proxima.public-links-cache',JSON.stringify(saved.content));}catch{}
+      if(!saved.content)try{saved.content=JSON.parse(localStorage.getItem('proxima.public-links-cache')||'null');}catch{}
+      const links=(saved.content?.links||[]).filter(link=>{
+        try{const url=new URL(link.url);return url.protocol==='https:'&&['bop-proxima-44091a08.shares.zrok.io','bop.taild88607.ts.net'].includes(url.host)&&/^\/s\/[A-Za-z0-9_-]+\/$/.test(url.pathname);}catch{return false;}
+      });
+      linksSection.replaceChildren();
+      const title=document.createElement('strong');title.textContent='Public Proxima links';linksSection.append(title);
+      if(!links.length){const message=document.createElement('p');message.textContent='Links will appear after syncing with BOP.';linksSection.append(message);return;}
+      for(const link of links){
+        const row=document.createElement('label'),name=document.createElement('span'),input=document.createElement('input'),copy=document.createElement('button');
+        name.textContent=link.label;input.value=link.url;input.readOnly=true;input.setAttribute('aria-label',link.label+' address');input.addEventListener('click',()=>input.select());
+        copy.type='button';copy.textContent='Copy';copy.setAttribute('aria-label','Copy '+link.label);
+        copy.onclick=async()=>{try{if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(link.url);else{input.focus();input.select();if(!document.execCommand('copy'))await globalThis.ProximaWorkspaces.request('papers:project:copy-text',{text:link.url});}copy.textContent='Copied';setTimeout(()=>copy.textContent='Copy',1500);}catch{input.focus();input.select();copy.textContent='Select to copy';}};
+        row.append(name,input,copy);linksSection.append(row);
+      }
+      const note=document.createElement('p');note.textContent='Anyone with a full link can view and edit this workspace.';linksSection.append(note);
+    }catch{if(!linksSection.children.length)linksSection.textContent='Public links are temporarily unavailable.';}
+  }
   const style=document.createElement('style');style.textContent=`
     #deviceMonitor{box-sizing:border-box;width:min(400px,calc(100vw - 28px));max-height:85vh;overflow:auto;color:var(--ink,#e6e9ef);background:var(--panel,#222a30);border:1px solid var(--line,#46525d);border-radius:16px;padding:20px;font:12px/1.45 system-ui}
     #deviceMonitor::backdrop{background:#0008}#deviceMonitor button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
@@ -24,6 +48,12 @@
     #bopMonitor[data-state="online"]{color:#a9c99b}
     #bopMonitor[data-state="offline"]{color:#d6a58c}
     #bopMonitor:focus-visible{outline:2px solid currentColor;outline-offset:2px}
+    #deviceMonitor .monitor-public-links{border-top:1px solid var(--line,#46525d);margin-top:14px;padding-top:14px;display:grid;gap:9px}
+    #deviceMonitor .monitor-public-links label{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 8px;align-items:center}
+    #deviceMonitor .monitor-public-links label>span{grid-column:1/-1;color:var(--dim,#aab5bf);font-size:11px}
+    #deviceMonitor .monitor-public-links input{min-width:0;width:100%;box-sizing:border-box;color:inherit;background:#0002;border:1px solid var(--line,#46525d);border-radius:5px;padding:7px;font:11px system-ui}
+    #deviceMonitor .monitor-public-links button{padding:7px 9px;border:1px solid var(--line,#46525d);border-radius:5px}
+    #deviceMonitor .monitor-public-links p{margin:0;font-size:10px;color:var(--dim,#aab5bf)}
   `;document.head.append(style);
   const local=panel.querySelector('.monitor-local');
   const statusFooter=panel.querySelector('footer');
@@ -85,7 +115,7 @@
   }
   function show(state,text,detail){button.dataset.state=state;button.textContent=text;button.title=detail;button.setAttribute('aria-label',text+'. '+detail);}
   async function check(){
-    if(busy||document.hidden||!panel.open)return;busy=true;clearTimeout(timer);void localStatus();void storageRows();
+    if(busy||document.hidden||!panel.open)return;busy=true;clearTimeout(timer);void publicLinks();void localStatus();void storageRows();
     if(!navigator.onLine){show('unknown','This device is offline. BOP can’t be checked.','BOP may still be online. Your saved work stays on this device.');busy=false;timer=setTimeout(check,60000);return;}
     show('checking','Checking BOP…','Checking whether the server answers.');
     try{
