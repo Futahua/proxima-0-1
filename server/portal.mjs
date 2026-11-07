@@ -1,7 +1,7 @@
 import {createServer} from 'node:http';
 import {readFile,writeFile,mkdir,rename,readdir,stat,statfs,unlink,open} from 'node:fs/promises';
 import {createReadStream} from 'node:fs';
-import {randomBytes,randomUUID} from 'node:crypto';
+import {randomBytes,randomUUID,timingSafeEqual} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {pipeline} from 'node:stream/promises';
 import path from 'node:path';
@@ -17,6 +17,16 @@ async function atomic(file,value){const temp=file+'.'+randomUUID()+'.tmp';const 
 export async function createPortal(engine,directory){
  const configPath=path.join(directory,'portal.json');let config;try{config=JSON.parse(await readFile(configPath,'utf8'));}catch(error){if(error.code==='ENOENT')return null;throw error;}if(!config.enabled)return null;
  if(!/^[a-zA-Z0-9_-]{43}$/.test(config.key||''))throw Error('Invalid public link key.');
+ // Agent authority is independent of the public calendar/storage capability.
+ // The connector reads this BOP-only file; no route returns its credential.
+ const agentAccessPath=path.join(directory,'agent-access.json');
+ // Provision/rotate explicitly with tools/rotate-agent-access.ps1. Missing or
+ // disabled agent access fails closed without disabling public file sharing.
+ async function authorizeAgent(req){
+  let access;try{access=JSON.parse(await readFile(agentAccessPath,'utf8'));}catch{throw Object.assign(Error('Agent access unavailable.'),{status:403});}
+  const token=String(req.headers.authorization||'').replace(/^Bearer /,'');
+  if(access.enabled!==true||!/^[-_a-zA-Z0-9]{43}$/.test(access.key||'')||!/^[-_a-zA-Z0-9]{43}$/.test(token)||!timingSafeEqual(Buffer.from(token),Buffer.from(access.key)))throw Object.assign(Error('Independent agent credential required.'),{status:403});
+ }
  const base='/s/'+config.key+'/',publicOrigin=new URL(config.origin).origin,uploads=path.join(directory,'portal-uploads'),receipts=path.join(directory,'portal-receipts');await Promise.all([mkdir(uploads,{recursive:true}),mkdir(receipts,{recursive:true})]);
  const origins=[...new Set([publicOrigin,...(config.allowedOrigins||[]).map(value=>{const origin=new URL(value);if(origin.protocol!=='https:')throw Error('Public origins must use HTTPS.');return origin.origin;})])];
  const domain=createWebDomain(engine),calendar=await createCalendar(engine),agentCalendar=await createAgentCalendar(calendar,directory,config),store=new FileStore({directory:uploads}),publishing=new Map(),reservations=new Map();const browserWorkspace=createBrowserWorkspace(engine,{store,uploads,receipts,atomic,derived:path.join(directory,'derived')});let creation=Promise.resolve(),active=0;const rates=new Map();
@@ -37,12 +47,22 @@ export async function createPortal(engine,directory){
  });
  const server=createServer(async(req,res)=>{for(const [key,value] of Object.entries(headers))res.setHeader(key,value);try{
   const url=new URL(req.url,'http://portal.invalid');if(!url.pathname.startsWith(base)){res.writeHead(404);res.end('Not found');return;}const route=url.pathname.slice(base.length);
+  if(route.startsWith('api/agent/'))await authorizeAgent(req);
   if(req.headers.origin&&!origins.includes(req.headers.origin))throw fail('Origin refused.',403);
   if(!['GET','HEAD','OPTIONS'].includes(req.method)&&req.headers['x-proxima-request']!=='1')throw fail('Request refused.',403);
   if(route==='api/workspace/frame'&&req.method==='POST'){rate('workspace',1200);const input=await body(req),ws=input.workspaceId;await allowed(ws);if(!Array.isArray(input.args))throw fail('Invalid workspace request.');json(res,await browserWorkspace.call(ws,input.method,input.args));return;}
   if(route==='api/connections'&&req.method==='GET'){json(res,{connections:[{label:'Public link · zrok',url:publicOrigin+base,note:'No setup required. Hosted transfer allowance applies.'},...origins.filter(x=>x.endsWith('.ts.net')).map(x=>({label:'Public link · Tailscale Funnel',url:x+base,note:'No setup required. If the hostname does not resolve, use the zrok link.'})),...origins.filter(x=>x.endsWith('.ts.net:8443')).map(x=>({label:'Private Tailscale',url:x+base,note:'Requires this device to be connected to your Tailscale network.'}))]});return;}
   if(route==='api/state'&&req.method==='GET'){json(res,await calendar());return;}
   if(route==='api/agent/catalog'&&req.method==='GET'){const result=await calendar(null,{catalog:true});json(res,{catalog:result.catalog,seq:result.state.seq});return;}
+  if(route==='api/agent/query'&&req.method==='GET'){
+    const input=Object.fromEntries(url.searchParams),result=await calendar(null,{query:input,...(input.kind==='schedule-conflicts'?{range:{from:input.from,to:input.to}}:{})}),value=result.query;
+    if(input.kind==='blob-context'&&value.go){for(const ref of value.go){await allowed(ref.workspace_id);const loaded=await engine.replica.metadata(ref.workspace_id),doc=loaded.state,folders=new Set([ref.folder_id]);let changed;do{changed=false;for(const group of doc.groups)if(!group.bin&&folders.has(group.parentId)&&!folders.has(group.id)){folders.add(group.id);changed=true;}}while(changed);const rootFolder=doc.groups.find(group=>group.id===ref.folder_id);ref.status=ref.folder_id==='root'||rootFolder&&!rootFolder.bin?'ready':'missing_or_binned';ref.files=ref.status==='ready'?doc.shortcuts.filter(item=>item.placements?.some(p=>!p.bin&&folders.has(p.parentId))).map(item=>({id:item.id,entry_id:item.workspaceFileId||null,name:item.name,kind:item.workspaceFileId?'file':'link'})):[];ref.revision=loaded.revision;}}
+    // A blob's Flow page is owned by this server's Flow adapter registry (appflowy-links.json),
+    // which confirms or creates the page when a device opens the blob. Read it rather than
+    // copying page ids into Proxima facts; pending (unconfirmed) entries are not reported.
+    if(input.kind==='blob-context'&&value.flow?.length){let links=null;try{links=JSON.parse(await readFile(path.join(directory,'appflowy-links.json'),'utf8'));}catch{}for(const ref of value.flow){if(ref.page_id)continue;const entry=links?.items?.[ref.document_id];if(entry&&!entry.pending&&entry.viewId){ref.page_id=entry.viewId;ref.workspace_id=entry.workspaceId;ref.status='confirmed_by_bop_flow_registry';}else ref.status='page_not_opened_yet';}}
+    json(res,value);return;
+  }
   if(route==='api/agent/managed-search'&&req.method==='GET'){
     const ws=url.searchParams.get('workspaceId')||'ayg-root';await allowed(ws);
     const q=(url.searchParams.get('q')||'').toLocaleLowerCase();if(!q||q.length>500)throw fail('Enter a query up to 500 characters.');

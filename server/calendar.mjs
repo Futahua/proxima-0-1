@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 const here=path.dirname(fileURLToPath(import.meta.url));
 // The same command owner as the installed cockpit, with durable CAS and causal stamps.
 export async function createCalendar(engine){
- const names=['remote-domain','remote-follow','store','schedule-projection'];
+ const names=['remote-domain','remote-follow','agent-context','store','schedule-projection'];
  const sources=await Promise.all(names.map(name=>readFile(path.join(here,'public',name+'.js'),'utf8')));
  return async function calendar(envelope,options={}){return engine.withFacts(async(journal,core)=>{
   const original=structuredClone(journal),reset=()=>{for(const key of Object.keys(journal))delete journal[key];Object.assign(journal,structuredClone(original));};
@@ -56,6 +56,7 @@ export async function createCalendar(engine){
   let occurrences;
   if(options.range){const from=Date.parse(options.range.from),to=Date.parse(options.range.to);if(!Number.isFinite(from)||!Number.isFinite(to)||to<=from||to-from>366*86400000)throw Error('Choose a valid occurrence range up to 366 days.');occurrences=snapshot.scheduleEvents.flatMap(item=>context.ProximaScheduleProjection.occurrences(item,{start:new Date(from),end:new Date(to)}));if(occurrences.length>10000)throw Error('Too many schedule occurrences.');}
   const result={command,...(batch?{batch}:{}),state:snapshot,projection:{observed_at:new Date(now).toISOString(),timeline},...(options.catalog?{catalog:Store.commandCatalog()}:{}),...(occurrences?{occurrences}: {})};
+  if(options.query)result.query=context.ProximaAgentContext.query({state:snapshot,timeline,observedAt:now,occurrences},options.query);
   if(options.dryRun)reset();
   return result;
  });};

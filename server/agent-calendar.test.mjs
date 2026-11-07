@@ -10,6 +10,25 @@ import { createAgentCalendar } from './dist/agent-calendar.mjs';
 async function fixture(work){const root=await mkdtemp(path.join(tmpdir(),'proxima-agent-'));const engine=await createEngine(root);const calendar=await createCalendar(engine);const owner=await createAgentCalendar(calendar,root,{});try{await work({engine,calendar,owner,root});}finally{await engine.flush();await rm(root,{recursive:true,force:true});}}
 const create=name=>({type:'timeline-interval.create',payload:{name,start:'2026-11-01T00:00:00Z',end:'2026-11-01T01:00:00Z'}});
 
+test('blob context resolves a confirmed synced Flow page; stale document identities refuse',()=>fixture(async({calendar,owner})=>{
+  const made=await owner.apply((await owner.preview({commands:[create('High-rise apartment')]})).preview_id),id=made.results[0].value.id;
+  await owner.apply((await owner.preview({commands:[{type:'timeline-interval.template',payload:{intervalId:id,template:'appflowy'}}]})).preview_id);
+  const before=(await calendar()).state.timelineIntervals.find(x=>x.id===id),binding=before.templates[0];
+  const workspace='11111111-1111-4111-8111-111111111111',page='22222222-2222-4222-8222-222222222222';
+  const payload={intervalId:id,template:'appflowy',appflowyWorkspaceId:workspace,appflowyPageId:page,expectedDocumentId:binding.documentId};
+  assert.equal((await owner.preview({commands:[{type:'timeline-interval.template',payload:{...payload,expectedDocumentId:'stale'}}]})).ok,false);
+  await owner.apply((await owner.preview({commands:[{type:'timeline-interval.template',payload,ifRev:before.rev}]})).preview_id);
+  const context=(await calendar(null,{query:{kind:'blob-context',id}})).query;
+  assert.equal(context.flow[0].page_id,page);assert.equal(context.flow[0].document_id,binding.documentId);assert.equal(context.blob.id,id);
+  const related=(await calendar(null,{query:{kind:'relations',id:page}})).query;assert(related.relations.some(x=>x.id===id));
+  const activity=(await calendar(null,{query:{kind:'activity',from:'2026-11-01T00:30:00Z',to:'2026-11-01T02:00:00Z'}})).query;assert.equal(activity.total_session_ms,1800000);
+}));
+test('context name ambiguity requires a choice and change cursors expose history gaps',()=>fixture(async({calendar,owner})=>{
+  await owner.apply((await owner.preview({commands:[create('Drawing one'),create('Drawing two')]})).preview_id);
+  const context=(await calendar(null,{query:{kind:'blob-context',name:'Drawing'}})).query;assert(context.selection_required);assert.equal(context.candidates.length,2);
+  const changes=(await calendar(null,{query:{kind:'changes',after_seq:99999}})).query;assert(changes.reset_required);
+}));
+
 test('preview persists no facts; invalid later batch step rolls back every earlier command',()=>fixture(async({calendar,owner})=>{
   const initial=await calendar();
   const p=await owner.preview({commands:[create('Preview')]});assert(p.preview_id);

@@ -35,7 +35,7 @@ export async function createAgentCalendar(calendar, directory, config) {
     for(const name of existing){try{const old=JSON.parse(await readFile(path.join(root,name),'utf8'));if(old.expires<Date.now())await unlink(path.join(root,name));}catch{}}
     if((await readdir(root)).filter(name=>name.endsWith('.preview.json')).length>=256)throw failure('Too many pending previews.');
     await save(file(id,'preview'),plan);
-    return {preview_id:id,expected_seq:batch.expectedSeq,expires_at:new Date(plan.expires).toISOString(),commands:result.batch.results,changes:factChanges(current,result.state),provisional_ids:true,business_changes:false,scope:'Proxima facts only; Flow/Go bytes/native actions are separate owners'};
+    return {preview_id:id,expected_seq:batch.expectedSeq,expires_at:new Date(plan.expires).toISOString(),commands:result.batch.results,changes:factChanges(current,result.state),provisional_ids:true,business_changes:false,history_effects:{redo_entries_before:current.timelineHistory?.redo?.length||0,redo_entries_after:result.state.timelineHistory?.redo?.length||0,note:'Applying a new timeline edit or targeted timeline reversal clears redo, like an ordinary new edit.'},scope:'Proxima facts only; Flow/Go bytes/native actions are separate owners'};
   }
   async function apply(id){
     try{return {...JSON.parse(await readFile(file(id,'receipt'),'utf8')),replay:true};}catch(error){if(error.code!=='ENOENT')throw error;}

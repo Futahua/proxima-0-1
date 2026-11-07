@@ -28,3 +28,5 @@ await writeFile(path.join(out,'public/blob-workspaces.js'),blob.replace("new URL
 await build({stdin:{contents:`export {Upload} from 'tus-js-client';`,resolveDir:papers},outfile:path.join(out,'web/tus.js'),bundle:true,platform:'browser',format:'iife',globalName:'tus',target:'es2020',minify:true});
 await writeFile(path.join(out,'package.json'),JSON.stringify({private:true,type:'module'}));
 console.log('Headless replica built at '+out);
+
+await mkdir(path.join(out,'tools'),{recursive:true});await copyFile(path.join(here,'tools/rotate-agent-access.ps1'),path.join(out,'tools/rotate-agent-access.ps1'));
