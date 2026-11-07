@@ -9,6 +9,7 @@ import {fileURLToPath} from 'node:url';
 import {createCalendar} from './calendar.mjs';
 import {createWebDomain} from './web-domain.mjs';
 import {createBrowserWorkspace} from './browser-workspace.mjs';
+import {createAgentCalendar} from './agent-calendar.mjs';
 const here=path.dirname(fileURLToPath(import.meta.url)),{TusServer,FileStore}=createRequire(import.meta.url)('./host.cjs');
 const identity=value=>typeof value==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(value);
 const filename=value=>String(value||'file').normalize('NFC').replace(/[\\/<>:"|?*\x00-\x1f\x7f]/g,'_').replace(/[. ]+$/g,'').slice(0,180).replace(/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?=\.|$)/i,'_$1')||'file';
@@ -18,7 +19,7 @@ export async function createPortal(engine,directory){
  if(!/^[a-zA-Z0-9_-]{43}$/.test(config.key||''))throw Error('Invalid public link key.');
  const base='/s/'+config.key+'/',publicOrigin=new URL(config.origin).origin,uploads=path.join(directory,'portal-uploads'),receipts=path.join(directory,'portal-receipts');await Promise.all([mkdir(uploads,{recursive:true}),mkdir(receipts,{recursive:true})]);
  const origins=[...new Set([publicOrigin,...(config.allowedOrigins||[]).map(value=>{const origin=new URL(value);if(origin.protocol!=='https:')throw Error('Public origins must use HTTPS.');return origin.origin;})])];
- const domain=createWebDomain(engine),calendar=await createCalendar(engine),store=new FileStore({directory:uploads}),publishing=new Map(),reservations=new Map();const browserWorkspace=createBrowserWorkspace(engine,{store,uploads,receipts,atomic,derived:path.join(directory,'derived')});let creation=Promise.resolve(),active=0;const rates=new Map();
+ const domain=createWebDomain(engine),calendar=await createCalendar(engine),agentCalendar=await createAgentCalendar(calendar,directory,config),store=new FileStore({directory:uploads}),publishing=new Map(),reservations=new Map();const browserWorkspace=createBrowserWorkspace(engine,{store,uploads,receipts,atomic,derived:path.join(directory,'derived')});let creation=Promise.resolve(),active=0;const rates=new Map();
  const fail=(message,status=400)=>Object.assign(Error(message),{status});
  const headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff','X-Robots-Tag':'noindex, nofollow, noarchive','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; frame-src 'self' https://bop.taild88607.ts.net:8443; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"};
  function json(res,value,status=200){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));}
@@ -41,6 +42,29 @@ export async function createPortal(engine,directory){
   if(route==='api/workspace/frame'&&req.method==='POST'){rate('workspace',1200);const input=await body(req),ws=input.workspaceId;await allowed(ws);if(!Array.isArray(input.args))throw fail('Invalid workspace request.');json(res,await browserWorkspace.call(ws,input.method,input.args));return;}
   if(route==='api/connections'&&req.method==='GET'){json(res,{connections:[{label:'Public link · zrok',url:publicOrigin+base,note:'No setup required. Hosted transfer allowance applies.'},...origins.filter(x=>x.endsWith('.ts.net')).map(x=>({label:'Public link · Tailscale Funnel',url:x+base,note:'No setup required. If the hostname does not resolve, use the zrok link.'})),...origins.filter(x=>x.endsWith('.ts.net:8443')).map(x=>({label:'Private Tailscale',url:x+base,note:'Requires this device to be connected to your Tailscale network.'}))]});return;}
   if(route==='api/state'&&req.method==='GET'){json(res,await calendar());return;}
+  if(route==='api/agent/catalog'&&req.method==='GET'){const result=await calendar(null,{catalog:true});json(res,{catalog:result.catalog,seq:result.state.seq});return;}
+  if(route==='api/agent/managed-search'&&req.method==='GET'){
+    const ws=url.searchParams.get('workspaceId')||'ayg-root';await allowed(ws);
+    const q=(url.searchParams.get('q')||'').toLocaleLowerCase();if(!q||q.length>500)throw fail('Enter a query up to 500 characters.');
+    const loaded=await engine.replica.metadata(ws),doc=loaded.state,groups=new Map(doc.groups.map(item=>[item.id,item]));
+    const live=id=>{const seen=new Set();while(id&&id!=='root'){const item=groups.get(id);if(!item||item.bin||seen.has(id))return false;seen.add(id);id=item.parentId;}return id==='root';};
+    const rows=doc.groups.filter(item=>!item.bin&&live(item.parentId)).map(item=>({kind:'folder',id:item.id,name:item.name,folder_id:item.parentId}));
+    for(const item of doc.shortcuts){const placement=item.placements?.find(p=>!p.bin&&live(p.parentId));if(placement)rows.push({kind:item.workspaceFileId?'file':'link',id:item.id,entry_id:item.workspaceFileId||null,name:item.name,folder_id:placement.parentId});}
+    const matches=rows.filter(item=>(item.name||'').toLocaleLowerCase().includes(q)),limit=Math.min(200,Math.max(1,Number(url.searchParams.get('limit'))||50));
+    json(res,{results:matches.slice(0,limit),matches:matches.length,truncated:matches.length>limit,workspace_id:ws,revision:loaded.revision,coverage:'all live managed names in this workspace'});return;
+  }
+  if(route==='api/agent/occurrences'&&req.method==='GET'){const result=await calendar(null,{range:{from:url.searchParams.get('from'),to:url.searchParams.get('to')}});json(res,{occurrences:result.occurrences,observed_at:result.projection.observed_at});return;}
+  if(route==='api/agent/preview'&&req.method==='POST'){rate('commands',600);json(res,await agentCalendar.preview(await body(req)));return;}
+  if(route==='api/agent/apply'&&req.method==='POST'){rate('commands',600);json(res,await agentCalendar.apply((await body(req)).preview_id));return;}
+  if(route==='api/agent/sync-status'&&req.method==='GET'){
+    const workspaceId=url.searchParams.get('workspaceId')||'ayg-root';await allowed(workspaceId);
+    const report=await engine.withFacts(async(journal,core)=>({node:journal.node,seq:journal.state.seq,vv:journal.vv,conflicts:core.conflictsOf(journal.state,new Map(journal.stamps)),names:journal.names||{}}));
+    // Inspect the existing journal, not status()'s full cold-cache hash/path scan.
+    // Availability is deliberately unknown until the file owner verifies bytes.
+    const metadata=await engine.replica.metadata(workspaceId);
+    const workspace={workspace_id:workspaceId,metadata_mode:'owner_snapshot_no_byte_io',metadata_durable:metadata.durable,node:metadata.node,vv:metadata.vv,entries:metadata.state.groups.length+metadata.state.shortcuts.length,versions:metadata.versions,content_verification:'not performed by this read',peers:metadata.peers};
+    json(res,{observed_at:new Date().toISOString(),server:'BOP',facts:report,workspace,workspace_conflicts:metadata.conflicts,device_reachability:'Not inferred from server receipt; device acknowledgements may be cached.'});return;
+  }
   if(route==='api/conflicts'&&req.method==='GET'){json(res,await domain.conflicts());return;}
   if(route==='api/conflicts/resolve'&&req.method==='POST'){rate('commands',600);json(res,await domain.conflicts(await body(req)));return;}
   if(route==='api/storage'&&req.method==='GET'){json(res,{storage:await engine.native.call('bp-7f977e43-e48d-44f7-9e02-df6bf7ee4349',{operation:'storage-status'}),server:'BOP',at:new Date().toISOString()});return;}

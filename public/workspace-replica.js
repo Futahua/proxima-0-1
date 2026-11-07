@@ -86,7 +86,7 @@
       if(observe&&binding.available&&await capture(workspaceId,item.workspaceFileId,item.workspaceFilename||item.name))return entry(workspaceId,item.workspaceFileId);
       return {item,binding,history:{versions:journal.state.workspaceVersions,...W.inspect(journal.state,workspaceId,item.workspaceFileId)}};
     }
-    async function document(journal,workspaceId){
+    async function document(journal,workspaceId,metadataOnly=false){
       const records=(journal.state.workspaceEntries||[]).filter(value=>value.workspaceId===workspaceId),groups=[],shortcuts=[];
       for(const value of records){
         if(!['group','shortcut'].includes(value.kind))continue;
@@ -97,7 +97,7 @@
       }
       // One device call per file: asked together, not one after another (a folder of forty files took
       // seconds on the phone).
-      await Promise.all(shortcuts.filter(item=>item.workspaceFileId).map(item=>bind(journal,workspaceId,item)));
+      if(!metadataOnly)await Promise.all(shortcuts.filter(item=>item.workspaceFileId).map(item=>bind(journal,workspaceId,item)));
       const view={...(journal.views[workspaceId]||{preferences:{theme:'dark',workspaceNavigatorMode:'list'}})};for(const record of records)if(record.kind==='view')view[record.recordId]=structuredClone(record.value);
       // Keep a concurrent cycle or orphan visible without rewriting human records.
       const byId=new Map(groups.map(g=>[g.id,g]));
@@ -110,6 +110,14 @@
     }
     const entryRevision=(journal,workspaceId)=>JSON.stringify(journal.state.workspaceEntries.filter(e=>e.workspaceId===workspaceId).map(e=>JSON.stringify(e)).sort());
     async function load(workspaceId){return transaction(async journal=>({state:await document(journal,workspaceId),revision:String(journal.n)+':'+JSON.stringify(journal.vv),entryRevision:entryRevision(journal,workspaceId)}));}
+    // Read one committed owner snapshot without waiting behind byte reconciliation.
+    // No bind/path/hash calls and no journal writes; normal load() keeps its behavior.
+    async function metadata(workspaceId){
+      const loaded=await storage.load(),journal=loaded.state||fresh(),stamps=new Map(journal.stamps);
+      const state=await document(journal,workspaceId,true),versions=journal.state.workspaceVersions.filter(v=>v.workspaceId===workspaceId);
+      const conflicts=[...S.conflictsOf(journal.state,stamps).filter(c=>c.key.startsWith('workspaceEntries/'+workspaceId+':')),...state.shortcuts.filter(item=>item.workspaceFileId).flatMap(item=>{const view=W.inspect(journal.state,workspaceId,item.workspaceFileId);return view.conflict?[{type:'versions',entryId:item.workspaceFileId,name:item.name,heads:view.heads}]:[];})];
+      return {state,revision:String(journal.n)+':'+JSON.stringify(journal.vv),durable:!!loaded.state,node:journal.node,vv:structuredClone(journal.vv),peers:Object.fromEntries(Object.entries(journal.peers).map(([id,peer])=>[id,{name:peer.name||id,vv:peer.vv||{},waiting:peer.waiting===true}])),versions:versions.length,conflicts};
+    }
     async function save(workspaceId,raw,revision,metadata={}){return transaction(async(journal,stamps)=>{
       if(revision!==String(journal.n)+':'+JSON.stringify(journal.vv))return {ok:false,code:'STALE_REVISION'};
       const doc=typeof raw==='string'?JSON.parse(raw):raw;let records=encode(workspaceId,doc);
@@ -350,7 +358,7 @@
       }else for(const field of Object.keys(record))stamps.set(conflict.key+'#'+field,nextStamp(journal));
       return {ok:true};
     });}
-      return Object.freeze({readDocument,saveDocument,load,entry,save,importFile,receiveFile,capture,reconcile,exchange,syncWith,remove,restore,status,history,conflicts,resolveMetadata,folder,folders,ensureFolder,cachePolicy,liveContent,requestLocal,maintainCache:replaceDownloaded,flush:async()=>{await tail;await trimming;}});
+      return Object.freeze({readDocument,saveDocument,load,metadata,entry,save,importFile,receiveFile,capture,reconcile,exchange,syncWith,remove,restore,status,history,conflicts,resolveMetadata,folder,folders,ensureFolder,cachePolicy,liveContent,requestLocal,maintainCache:replaceDownloaded,flush:async()=>{await tail;await trimming;}});
   }
   root.ProximaWorkspaceReplica=Object.freeze({create});
 })(globalThis);

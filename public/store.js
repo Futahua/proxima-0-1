@@ -1527,7 +1527,47 @@ const Store = (() => {
       return refuse('COMMAND_NOT_IMPLEMENTED', { type: 'proposal.accept', slice: 'slice 2' });
     },
     'history.revert'(payload, ctx) {
-      return refuse('COMMAND_NOT_IMPLEMENTED', { type: 'history.revert', slice: 'slice 2' });
+if (ctx.actor !== 'agent-connector') return refuse('ACTOR_NOT_AUTHORIZED', {});
+      const history = timelineHistory(), index = history.undo.findIndex(x => x.commandId === payload.commandId && x.actor === 'agent-connector');
+      const entry = history.undo[index];
+      if (!entry?.beforeState || !entry?.afterState) {
+        const event=state.events.find(x=>x.commandId===payload.commandId&&x.actor==='agent-connector'),receipt=state.commands[payload.commandId];
+        if(!event||!receipt||revisionOf(event.entity?.kind,event.entity?.id)!==receipt.rev)return refuse('HISTORY_CONFLICT',{reason:'Command record changed or expired'});
+        let inverse;
+        if(event.type==='task.patch')inverse={type:'task.patch',payload:{taskId:event.entity.id,patch:event.before}};
+        else if(event.type==='task.create'){if(state.run?.members?.some(x=>x.id===event.entity.id))return refuse('HISTORY_CONFLICT',{reason:'Task now belongs to a run'});inverse={type:'task.delete',payload:{taskId:event.entity.id}};}
+        else if(event.type==='project.archive'||event.type==='project.restore')inverse={type:event.type==='project.archive'?'project.restore':'project.archive',payload:{projectId:event.entity.id}};
+        else if(event.type==='project.create'){if(state.tasks.some(x=>x.project===event.entity.id)||state.scheduleEvents.some(x=>x.project===event.entity.id))return refuse('HISTORY_CONFLICT',{reason:'Project now has dependants'});inverse={type:'project.delete',payload:{projectId:event.entity.id}};}
+        else if(event.type==='schedule-event.create')inverse={type:'schedule-event.delete',payload:{eventId:event.entity.id}};
+        else if(event.type==='schedule-event.patch')inverse={type:'schedule-event.patch',payload:{eventId:event.entity.id,patch:Object.fromEntries(['name','note','project','start','deadline','recurrence','color'].filter(key=>Object.hasOwn(event.before||{},key)).map(key=>[key,event.before[key]]))}};
+        else if(event.type==='run.lock')inverse={type:'run.unlock',payload:{}};
+        if(!inverse)return refuse('COMMAND_RECEIPT_UNAVAILABLE',{reason:'This command has no safe inverse'});
+        const checked=COMMANDS[inverse.type](inverse.payload,{...ctx,ifRev:receipt.rev});
+        if(!checked.ok)return checked;
+        return {ok:true,apply:()=>{const result=checked.apply();return {...result,extra:{...result.extra,revertedCommandId:payload.commandId}};}};
+      }
+      const canonical = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(key => [key,item[key]])) : item);
+      const current = timelineSnapshot(), changes = {};
+      for (const key of ['rows','sessions']) {
+        const before = new Map(entry.beforeState[key].map(x => [x.id,x])), after = new Map(entry.afterState[key].map(x => [x.id,x]));
+        changes[key] = [...new Set([...before.keys(),...after.keys()])].filter(id => canonical(before.get(id)||null) !== canonical(after.get(id)||null)).map(id => ({id,before:before.get(id)||null,after:after.get(id)||null}));
+        for (const change of changes[key]) if (canonical(current[key].find(x => x.id===change.id)||null) !== canonical(change.after)) return refuse('HISTORY_CONFLICT',{kind:key,id:change.id});
+      }
+      const candidate = structuredClone(current);
+      for (const key of ['rows','sessions']) for (const change of changes[key]) {
+        candidate[key] = candidate[key].filter(x => x.id !== change.id);
+        if (change.before) candidate[key].push({...structuredClone(change.before),rev:Math.max(change.before.rev||0,change.after?.rev||0)+1});
+      }
+      if (candidate.sessions.some(x => !candidate.rows.some(row=>row.id===x.rowId) || x.groupChildren?.some(id=>!candidate.sessions.some(other=>other.id===id)))) return refuse('HISTORY_CONFLICT',{reason:'Relationships changed'});
+      const touched = new Set(changes.sessions.flatMap(x=>[x.before?.rowId,x.after?.rowId]));
+      for (const a of candidate.sessions) if (touched.has(a.rowId) && !a.groupChildren && !candidate.rows.find(row=>row.id===a.rowId)?.queue) {
+        if (candidate.sessions.some(b=>a.id!==b.id && !b.groupChildren && a.rowId===b.rowId && Date.parse(a.start)<(b.followNow?Infinity:Date.parse(b.end)) && Date.parse(b.start)<(a.followNow?Infinity:Date.parse(a.end)))) return refuse('INTERVAL_OVERLAP',{});
+      }
+      return {ok:true,apply:()=>{
+        state.timelineRows=candidate.rows;state.timelineIntervals=candidate.sessions;
+        history.undo.splice(index,1);history.redo=[];
+        return {changed:true,entity:{kind:'timeline-batch',id:'agent-revert'},value:{revertedCommandId:payload.commandId},before:current,after:candidate,extra:{revertedCommandId:payload.commandId}};
+      }};
     },
   };
 
@@ -1649,7 +1689,7 @@ const Store = (() => {
       const value = result.value && typeof result.value === 'object' && 'rev' in result.value
         ? { ...result.value, rev: rev }
         : result.value;
-      if(timelineBefore&&result.changed){const history=timelineHistory();const entry=history.undo.at(-1);if(entry){entry.beforeState=timelineBefore;entry.afterState=timelineSnapshot();}}
+      if(timelineBefore&&result.changed){const history=timelineHistory();const entry=history.undo.at(-1);if(entry){entry.beforeState=timelineBefore;entry.afterState=timelineSnapshot();entry.commandId=commandId;entry.actor=env.actor||Cockpit.actor;}}
       rememberEvent({
         seq: state.seq,
         at: new Date().toISOString(),
@@ -1693,6 +1733,7 @@ const Store = (() => {
 
   return {
     snapshot: () => structuredClone(state),
+    commandCatalog: () => Object.keys(COMMANDS).filter(type=>!['proposal.accept'].includes(type)).map(type=>({type,payloadFields:[...new Set([...String(COMMANDS[type]).matchAll(/payload\.([A-Za-z0-9_]+)/g)].map(match=>match[1]))],validation:'Store.command; preview returns exact validation refusals',implemented:type!=='proposal.accept'})),
     previewImport(projection,importId){try{return {ok:true,candidate:ProximaRemoteDomain.prepareImport(projection,importId)};}catch(error){return refuse('IMPORT_INVALID',{reason:error.message});}},
     importedRuns:()=>structuredClone(state.importedRuns||[]),
     imports:()=>structuredClone(state.remoteImports||[]).map(receipt=>receipt.value),

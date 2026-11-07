@@ -8,6 +8,16 @@ import {createEngine} from './dist/main.mjs';
 const context=vm.createContext({structuredClone});
 vm.runInContext(await readFile(new URL('../public/sync-core.js',import.meta.url),'utf8'),context);
 const core=context.ProximaSyncCore,plain=v=>JSON.parse(JSON.stringify(v));
+test('metadata reads neither touch file bytes nor wait behind a blocked file binding',async()=>{
+ const c=vm.createContext({structuredClone,crypto:{randomUUID:()=> 'isolated'},Date,console});
+ for(const name of ['sync-core','workspace-domain','workspace-replica'])vm.runInContext(await readFile(new URL('../public/'+name+'.js',import.meta.url),'utf8'),c);
+ const journal={version:1,node:'test',n:0,clock:null,vv:{},stamps:[],views:{},peers:{},state:{workspaceVersions:[],workspaceEntries:[{id:'w:shortcut:a',recordId:'a',workspaceId:'w',kind:'shortcut',workspaceFileId:'file',name:'Visible name'}]}};
+ let unblock,entered,io=0;const started=new Promise(resolve=>entered=resolve);
+ const replica=c.ProximaWorkspaceReplica.create({storage:{load:async()=>({state:structuredClone(journal),revision:'1'})},files:async()=>{io++;entered();return new Promise(resolve=>unblock=()=>resolve({path:'isolated',available:false}));}});
+ const binding=replica.load('w');await started;
+ try{let timer;const metadata=await Promise.race([replica.metadata('w'),new Promise((_,reject)=>timer=setTimeout(()=>reject(Error('Metadata waited on file IO')),500))]).finally(()=>clearTimeout(timer));assert.equal(metadata.state.shortcuts[0].name,'Visible name');assert.equal(io,1);}
+ finally{unblock();await binding;}
+});
 test('durable relay retains original stamps and can supply a new device after restarting',async()=>{
  const root=await mkdtemp(path.join(os.tmpdir(),'papers-relay-'));
  try{
