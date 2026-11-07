@@ -53,3 +53,16 @@ test('targeted reversal preserves unrelated human changes and refuses an interve
   const blocked=await owner.preview({commands:[{type:'history.revert',payload:{commandId:second.undo_command_ids[0]}}]});assert.equal(blocked.ok,false);
   assert.equal((await calendar()).state.timelineIntervals.find(x=>x.id===id).name,'Human latest');
 }));
+
+
+test('every owner command has a structural schema; agent typos refuse without writes',()=>fixture(async({calendar,owner})=>{
+  const catalog=(await calendar(null,{catalog:true})).catalog;
+  assert.equal(catalog.length,50);
+  for(const command of catalog){assert.equal(command.schema?.type,'object',command.type);assert.equal(command.schema.additionalProperties,false,command.type);}
+  assert(catalog.find(x=>x.type==='timeline-group.create').payloadFields.includes('intervalIds'));
+  const before=(await calendar()).state.seq;
+  const refused=await owner.preview({commands:[{type:'task.create',payload:{name:'Invalid',stats:'finished'}}]});
+  assert.equal(refused.ok,false);assert.match(refused.results[0].details?.reason||JSON.stringify(refused),/unknown field/);
+  const badType=await owner.preview({commands:[{type:'task.create',payload:{name:'Invalid',weight:'heavy'}}]});assert.equal(badType.ok,false);
+  assert.equal((await calendar()).state.seq,before);
+}));

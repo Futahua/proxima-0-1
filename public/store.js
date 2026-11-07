@@ -773,6 +773,82 @@ const Store = (() => {
     for(const group of state.timelineIntervals.filter(x=>x.groupChildren)){const children=group.groupChildren.filter(key=>!remove.has(key)&&state.timelineIntervals.some(x=>x.id===key));if(children.length!==group.groupChildren.length){group.groupChildren=children;group.rev++;}}
     let empty;do{empty=state.timelineIntervals.filter(x=>x.groupChildren&&!x.groupChildren.length).map(x=>x.id);if(empty.length){state.timelineIntervals=state.timelineIntervals.filter(x=>!empty.includes(x.id));for(const group of state.timelineIntervals.filter(x=>x.groupChildren)){const children=group.groupChildren.filter(key=>!empty.includes(key));if(children.length!==group.groupChildren.length){group.groupChildren=children;group.rev++;}}}}while(empty.length);
   }
+  // Agent input contracts live beside the handlers. UI compatibility remains with
+  // the existing semantic validators; strict structural checks apply to agents.
+  const COMMAND_SCHEMAS = (() => {
+    const str={type:'string'},key={type:'string',minLength:1},bool={type:'boolean'},num={type:'number'},integer={type:'integer'},
+      nullable=s=>({anyOf:[s,{type:'null'}]}),array=s=>({type:'array',items:s}),
+      object=(properties={},required=[])=>({type:'object',properties,required,additionalProperties:false}),
+      map=s=>({type:'object',additionalProperties:s}), ids={...array(key),minItems:1},
+      revisions=map({type:'integer',minimum:1}),color={type:'string',pattern:'^#[0-9a-fA-F]{6}$'},
+      instant={type:'string',description:'Timezone-bearing ISO instant; actual dates/ranges checked by Store'},
+      day={type:'string',description:'YYYY-MM-DD or empty; actual day checked by Store'},
+      recurrence=nullable(object({frequency:{enum:['none','daily','weekly','monthly','custom']},interval:num,count:num,until:str,weekdays:array(integer),unit:{enum:['days','weeks','months']}})),
+      selection={intervalIds:ids,revisions},out={}, put=(type,props={},required=[])=>out[type]=object(props,required);
+    const task={name:key,note:str,project:str,weight:num,start:day,deadline:day,ganttRow:nullable(integer)};
+    put('task.create',{...task,status:{enum:['backlog','running','finished']}},['name']);
+    put('task.patch',{taskId:key,patch:{...object(task),minProperties:1}},['taskId','patch']);
+    put('task.move',{taskId:key,toStatus:{enum:['backlog','running','finished']},beforeTaskId:nullable(str)},['taskId','toStatus']);
+    put('task.layout',{rows:array(object({taskId:key,ganttRow:integer},['taskId','ganttRow']))},['rows']);
+    put('task.delete',{taskId:key},['taskId']);
+    put('project.create',{name:key,description:str,projectType:{enum:['task','schedule']},sourceKey:str},['name']);
+    for(const action of ['archive','restore','delete'])put('project.'+action,{projectId:key},['projectId']);
+    put('run.lock',{target:instant,taskIds:ids},['target','taskIds']);put('run.unlock');
+    const interval={name:key,start:instant,end:instant,followNow:bool,color,deadline:nullable(instant),checked:bool};
+    put('timeline-interval.create',{name:key,start:instant,end:instant,followNow:bool,color,rowId:nullable(str),beforeId:nullable(str),parentGroupId:key,parentGroupRev:integer},['name','start','end']);
+    put('timeline-interval.patch',{intervalId:key,patch:{...object(interval),minProperties:1}},['intervalId','patch']);
+    put('timeline-interval.delete',{intervalId:key},['intervalId']);
+    put('timeline-interval.reorder',{intervalId:key,beforeId:nullable(str)},['intervalId']);
+    put('timeline-interval.delete-batch',selection,['intervalIds']);
+    put('timeline-interval.reorder-batch',{...selection,beforeId:nullable(str)},['intervalIds']);
+    put('timeline-interval.template',{intervalId:key,template:{enum:['as-you-go','appflowy',null]},removeKind:{enum:['as-you-go','appflowy']},renew:bool,appflowyWorkspaceId:key},['intervalId','template']);
+    put('timeline-interval.move-selection',{...selection,rowId:nullable(str),newRow:bool,times:array(object({id:key,start:instant,end:instant},['id','start','end']))},['intervalIds']);
+    put('timeline-group.ungroup',{groupId:key,revisions},['groupId']);
+    put('timeline-group.add',{...selection,groupId:key},['groupId','intervalIds']);
+    put('timeline-group.reorder',{...selection,anchorId:key,after:bool},['anchorId','intervalIds']);
+    for(const action of ['create','delete','queue'])put('timeline-group.'+action,selection,['intervalIds']);
+    put('timeline-queue.extend-selection',{...selection,edge:{enum:['start','end']},time:instant,reorder:bool,index:integer},['intervalIds','edge','time']);
+    put('timeline-queue.color-selection',{...selection,color},['intervalIds','color']);
+    put('timeline-queue.reorder-rows',{rowIds:ids,beforeRowId:nullable(str)},['rowIds']);
+    put('timeline-queue.restore',{intervalIds:ids,intervalId:key});out['timeline-queue.restore'].anyOf=[{required:['intervalIds']},{required:['intervalId']}];
+    put('timeline-queue.collapse',{...selection,colors:map(color)},['intervalIds']);
+    put('timeline-queue.delete',{rowId:key,expired:bool},['rowId']);
+    put('timeline-queue.create',{rowId:nullable(str),end:instant},['end']);
+    put('timeline-queue.enqueue',{...selection,rowId:key},['rowId','intervalIds']);
+    put('timeline-queue.resize',{rowId:key,intervalId:key,time:instant,end:bool},['rowId','time']);
+    put('timeline-queue.swap',{rowId:key,intervalId:key,targetId:key},['rowId','intervalId','targetId']);
+    put('timeline-queue.complete',{intervalId:key,color,rev:integer},['intervalId','color']);
+    for(const action of ['migrate','undo','redo'])put('timeline.'+action);
+    const event={name:key,note:str,project:str,start:instant,deadline:instant,recurrence,color:str};
+    put('schedule-event.create',{...event,sourceKey:str},['name','start','deadline']);
+    put('schedule-event.patch',{eventId:key,patch:{...object(event),minProperties:1}},['eventId','patch']);
+    put('schedule-event.occurrence.patch',{eventId:key,occurrenceKey:key,occurrenceStart:instant,occurrenceDeadline:instant,patch:object({name:key,note:str,start:instant,deadline:instant,color:str})},['eventId','occurrenceKey','patch']);
+    put('schedule-event.occurrence.delete',{eventId:key,occurrenceKey:key},['eventId','occurrenceKey']);
+    put('schedule-event.delete',{eventId:key},['eventId']);put('history.revert',{commandId:key},['commandId']);
+    // Remote projection records retain their separate domain validator. These
+    // commands are discoverable but excluded by the public agent capability.
+    const domain={type:'object',description:'Checked by ProximaRemoteDomain/RemoteFollow; opaque domain projection'};
+    const remote={importId:key,label:str,mode:{enum:['independent','follow']},projection:domain,receiver:domain,binding:domain};
+    put('remote.import-stage',remote,['importId','projection']);put('remote.import',remote,['importId','projection']);
+    put('remote.reconcile',{importId:key,projection:domain},['importId','projection']);put('remote.stop',{importId:key},['importId']);
+    put('remote.resolve',{importId:key,choice:{enum:['keep','source','both']},expected:key,copyId:key},['importId','choice','expected']);
+    return out;
+  })();
+  function commandSchemaError(schema,value,path='payload'){
+    if(schema.anyOf&&!schema.anyOf.some(option=>!commandSchemaError(option,value,path)))return path+': no allowed shape matched';
+    if(schema.enum&&!schema.enum.some(item=>Object.is(item,value)))return path+': unsupported value';
+    if(schema.type){const valid=schema.type==='null'?value===null:schema.type==='array'?Array.isArray(value):schema.type==='object'?value!==null&&typeof value==='object'&&!Array.isArray(value):schema.type==='integer'?Number.isSafeInteger(value):schema.type==='number'?typeof value==='number'&&Number.isFinite(value):typeof value===schema.type;if(!valid)return path+': expected '+schema.type;}
+    if(typeof value==='string'&&(schema.minLength&&value.length<schema.minLength||schema.pattern&&!new RegExp(schema.pattern).test(value)))return path+': invalid text';
+    if(typeof value==='number'&&schema.minimum!==undefined&&value<schema.minimum)return path+': below minimum';
+    if(Array.isArray(value)){if(schema.minItems&&value.length<schema.minItems)return path+': too few items';for(let i=0;i<value.length;i++){const error=commandSchemaError(schema.items||{},value[i],path+'['+i+']');if(error)return error;}}
+    if(value&&typeof value==='object'&&!Array.isArray(value)){
+      for(const field of schema.required||[])if(!Object.hasOwn(value,field))return path+'.'+field+': required';
+      if(schema.minProperties&&Object.keys(value).length<schema.minProperties)return path+': empty object';
+      for(const field of Object.keys(value)){const child=schema.properties?.[field];if(!child&&schema.additionalProperties===false)return path+'.'+field+': unknown field';const error=commandSchemaError(child||(typeof schema.additionalProperties==='object'?schema.additionalProperties:{}),value[field],path+'.'+field);if(error)return error;}
+    }
+    return null;
+  }
+
   const COMMANDS = {
     'timeline-group.ungroup'(payload){
       const group=state.timelineIntervals.find(x=>x.id===payload.groupId&&x.groupChildren);if(!group)return refuse('INTERVAL_NOT_FOUND',{});
@@ -1637,6 +1713,7 @@ if (ctx.actor !== 'agent-connector') return refuse('ACTOR_NOT_AUTHORIZED', {});
     }
 
     if(env.expectedSeq!==undefined&&(!Number.isSafeInteger(env.expectedSeq)||env.expectedSeq!==state.seq))return {...refuse('SOURCE_CHANGED',{expected:env.expectedSeq,current:state.seq}),commandId};
+    if(env.actor==='agent-connector'&&COMMAND_SCHEMAS[type]){const error=commandSchemaError(COMMAND_SCHEMAS[type],payload);if(error)return {...refuse('PAYLOAD_INVALID',{reason:error}),commandId};}
     const checked = handler(payload, {
       actor: env.actor || Cockpit.actor,
       client: env.client || Cockpit.clientId,
@@ -1733,7 +1810,7 @@ if (ctx.actor !== 'agent-connector') return refuse('ACTOR_NOT_AUTHORIZED', {});
 
   return {
     snapshot: () => structuredClone(state),
-    commandCatalog: () => Object.keys(COMMANDS).filter(type=>!['proposal.accept'].includes(type)).map(type=>({type,payloadFields:[...new Set([...String(COMMANDS[type]).matchAll(/payload\.([A-Za-z0-9_]+)/g)].map(match=>match[1]))],validation:'Store.command; preview returns exact validation refusals',implemented:type!=='proposal.accept'})),
+    commandCatalog: () => Object.keys(COMMANDS).filter(type=>type!=='proposal.accept').map(type=>({type,payloadFields:Object.keys(COMMAND_SCHEMAS[type]?.properties||{}),schema:structuredClone(COMMAND_SCHEMAS[type]),validation:'Agent structural schema, then Store semantic validators; preview checks current relationships/revisions',implemented:true,agentCapability:!type.startsWith('remote.')&&!type.startsWith('timeline.')})),
     previewImport(projection,importId){try{return {ok:true,candidate:ProximaRemoteDomain.prepareImport(projection,importId)};}catch(error){return refuse('IMPORT_INVALID',{reason:error.message});}},
     importedRuns:()=>structuredClone(state.importedRuns||[]),
     imports:()=>structuredClone(state.remoteImports||[]).map(receipt=>receipt.value),
