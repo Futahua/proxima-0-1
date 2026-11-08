@@ -113,18 +113,18 @@
   const start=async()=>{const value=p.name.value.trim(),item=blobOf(view.intervalId);if(!value||!item)return;const running=runningOf(item);
    if(running){if(value!==running.name)await command({action:'rename',taskId:running.id,name:value});return;}
    await command({action:'start',name:value,durationMs:durationOf(item)});};
-  p.name.addEventListener('keydown',e=>{e.stopPropagation();if(e.key==='Enter'){e.preventDefault();p.name.blur();}if(e.key==='Escape'){const r=runningOf(blobOf(view.intervalId));p.name.value=r?.name||'';p.name.blur();}});
+  p.name.taskKey=(e=>{if(e.key==='Enter'){e.preventDefault();p.name.blur();}if(e.key==='Escape'){const r=runningOf(blobOf(view.intervalId));p.name.value=r?.name||'';p.name.blur();}});
   p.name.addEventListener('blur',()=>void start());
   p.stop.onclick=async()=>{const r=runningOf(blobOf(view.intervalId));if(!r)return;await command({action:'abandon',taskId:r.id});p.name.value='';};
   p.time.onclick=()=>{const item=blobOf(view.intervalId);if(!item)return;const r=runningOf(item),current=r?r.durationMs:durationOf(item);const input=el('input');input.type='number';input.min='1';input.max='1440';input.step='1';input.value=String(Math.round(current/MIN));input.title='Minutes';view.editingTime=true;p.time.replaceWith(input);input.focus();input.select();
    let finished=false;const finish=async keep=>{if(finished)return;finished=true;view.editingTime=false;input.replaceWith(p.time);const minutes=Math.round(Number(input.value));if(!keep||!Number.isFinite(minutes)||minutes<1||minutes>1440){render(true);return;}const ms=minutes*MIN,running=runningOf(blobOf(view.intervalId));
     if(running)await command({action:'duration',taskId:running.id,durationMs:ms});
     else{const it=blobOf(view.intervalId);if(it&&ms!==durationOf(it))await command({action:'default-duration',durationMs:ms});}};
-   input.addEventListener('keydown',e=>{e.stopPropagation();if(e.key==='Enter')void finish(true);if(e.key==='Escape')void finish(false);});input.addEventListener('blur',()=>void finish(true));};
+   input.taskKey=(e=>{if(e.key==='Enter')void finish(true);if(e.key==='Escape')void finish(false);});input.addEventListener('blur',()=>void finish(true));};
   p.done.onclick=async()=>{const r=runningOf(blobOf(view.intervalId));if(!r||!hasProof(view.doc))return;p.done.disabled=true;try{await flushProof();if(view.dirty){p.status.textContent='The proof has not saved yet; try again.';return;}const result=await command({action:'complete',taskId:r.id});if(result.ok){p.name.value='';view.taskId=null;view.doc=null;render(true);}}finally{render();}};
   // Proof editing
   const proof=p.proof;
-  proof.addEventListener('keydown',e=>{e.stopPropagation();const block=e.target.closest?.('.text');if(!block)return;
+  proof.taskKey=(e=>{const block=e.target.closest?.('.text');if(!block)return;
    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();const rest=splitAtCaret(block);const next=textBlock(rest);block.after(next);focusStart(next);changed();}
    else if(e.key==='Backspace'&&caretAtStart(block)){const prev=block.previousElementSibling;if(prev?.classList.contains('text')){e.preventDefault();const at=prev.textContent.length;prev.textContent+=block.textContent;block.remove();focusAt(prev,at);changed();}else if(prev?.tagName==='FIGURE'&&!block.textContent){e.preventDefault();prev.remove();changed();}}});
   proof.addEventListener('input',()=>changed());
@@ -179,6 +179,10 @@
    if(view.openHistory.has(t.id)){const box=el('div','proof-view',' ');li.append(box);void readProof(t.id).then(v=>{box.replaceChildren(...v.content.blocks.map(x=>{if(x.type==='image'){const img=el('img');img.src=x.src;img.alt='Proof picture';return img;}return el('div','text',x.text||'');}));if(!hasProof(v.content))box.textContent='No proof has reached this device yet.';}).catch(e=>{box.textContent='Could not open the proof: '+e.message;});}
    return li;}));
  }
+ // Typing in the task screen never reaches Proxima's keyboard shortcuts (Z, F, A, Tab…): window capture runs before
+ // every document-level shortcut, hands the key to the field's own handler, then stops it going any further.
+ addEventListener('keydown',e=>{const t=e.target;if(!(t instanceof Element)||!t.closest('.blob-task'))return;const editable=t.closest('input,textarea,[contenteditable]');if(!editable)return;
+  let owner=t;while(owner&&!owner.taskKey&&!owner.classList?.contains('blob-task'))owner=owner.parentElement;try{owner?.taskKey?.(e);}finally{e.stopImmediatePropagation();}},true);
  addEventListener('proxima:remote-imported',()=>{if(view&&!view.node.hidden)render(true);});
  addEventListener('proxima-sync:local-change',()=>{if(view&&!view.node.hidden)render();});
  root.ProximaBlobTasks=Object.freeze({mount,hide,fills,flush:()=>flushProof(),running:id=>runningOf(blobOf(id))});
