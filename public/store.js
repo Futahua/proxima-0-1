@@ -801,7 +801,8 @@ const Store = (() => {
     put('timeline-interval.reorder',{intervalId:key,beforeId:nullable(str)},['intervalId']);
     put('timeline-interval.delete-batch',selection,['intervalIds']);
     put('timeline-interval.reorder-batch',{...selection,beforeId:nullable(str)},['intervalIds']);
-    put('timeline-interval.template',{intervalId:key,template:{enum:['as-you-go','appflowy',null]},removeKind:{enum:['as-you-go','appflowy']},renew:bool,appflowyWorkspaceId:key},['intervalId','template']);
+    put('timeline-interval.template',{intervalId:key,template:{enum:['as-you-go','appflowy',null]},removeKind:{enum:['as-you-go','appflowy']},renew:bool,appflowyWorkspaceId:key,appflowyPageId:key,expectedDocumentId:key},['intervalId','template']);
+    put('timeline-interval.task',{intervalId:key,action:{enum:['start','rename','duration','default-duration','complete','abandon','delete']},taskId:key,name:key,durationMs:integer},['intervalId','action']);
     put('timeline-interval.move-selection',{...selection,rowId:nullable(str),newRow:bool,times:array(object({id:key,start:instant,end:instant},['id','start','end']))},['intervalIds']);
     put('timeline-group.ungroup',{groupId:key,revisions},['groupId']);
     put('timeline-group.add',{...selection,groupId:key},['groupId','intervalIds']);
@@ -1438,9 +1439,37 @@ const Store = (() => {
       let next=payload.template===null?null:existing&&!payload.renew?existing:kind==='as-you-go'
         ?{version:2,kind,workspaceId:'ayg-root',folderId:id('blobfolder')}
         :{version:1,kind,workspaceId:'blob-documents',documentId:id('document')};
-      if(next&&payload.appflowyWorkspaceId)next={...next,appflowyWorkspaceId:payload.appflowyWorkspaceId};
+      if(payload.appflowyPageId!==undefined){
+        if(kind!=='appflowy'||!existing||payload.renew||payload.expectedDocumentId!==existing.documentId||typeof payload.appflowyPageId!=='string'||!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(payload.appflowyPageId)||!payload.appflowyWorkspaceId)return refuse('PAYLOAD_INVALID',{reason:'A confirmed Flow page requires its current document binding and workspace.'});
+        next={...next,appflowyPageId:payload.appflowyPageId};
+      }
+      if(next&&payload.appflowyWorkspaceId){if(next.appflowyWorkspaceId&&next.appflowyWorkspaceId!==payload.appflowyWorkspaceId&&!payload.appflowyPageId)delete next.appflowyPageId;next={...next,appflowyWorkspaceId:payload.appflowyWorkspaceId};}
       const templates=bindings.filter(binding=>binding.kind!==kind);if(next)templates.push(next);
       return {ok:true,apply:()=>{if(JSON.stringify(item.templates??bindings)===JSON.stringify(templates))return {changed:false,value:{...item}};const before=structuredClone(item);item.templates=templates;item.template=templates.find(binding=>binding.kind==='as-you-go')??null;return {changed:true,entity:{kind:'timeline-interval',id:item.id},before,after:structuredClone(item),value:{...item}};}};
+    },
+    // Blob tasks (the Task tab). A blob is drawn as an underline except where a completed task fills it,
+    // from that attempt's start to its completion. A running task that passes its countdown restarts on its
+    // own: the current attempt begins at startedAt + k*durationMs, worked out on read, never written per tick.
+    // tasks is an ordinary field of the blob record, so it syncs to every device like the blob's other fields.
+    'timeline-interval.task'(payload) {
+      const item=state.timelineIntervals.find(x=>x.id===payload.intervalId);if(!item)return refuse('INTERVAL_NOT_FOUND',{});
+      if(item.groupChildren)return refuse('GROUP_HAS_CHILDREN',{});
+      const tasks=Array.isArray(item.tasks)?structuredClone(item.tasks):[],now=Date.now(),running=tasks.find(t=>!t.completedAt);
+      const minute=60000,validDuration=v=>Number.isSafeInteger(v)&&v>=minute&&v<=24*60*minute,cleanName=v=>typeof v==='string'&&v.trim()?v.trim().slice(0,300):null;
+      const attemptStart=t=>{const s=Date.parse(t.startedAt),d=t.durationMs;return now<=s?s:s+Math.floor((now-s)/d)*d;};
+      const target=payload.taskId?tasks.find(t=>t.id===payload.taskId):null;
+      let extra={};
+      switch(payload.action){
+        case 'start':{if(running)return refuse('TASK_RUNNING',{taskId:running.id});const name=cleanName(payload.name);if(!name)return refuse('NAME_REQUIRED',{});if(!validDuration(payload.durationMs))return refuse('PAYLOAD_INVALID',{reason:'durationMs must be 1 minute to 24 hours'});tasks.push({id:id('task'),name,startedAt:new Date(now).toISOString(),durationMs:payload.durationMs,completedAt:null});extra={taskDurationMs:payload.durationMs};break;}
+        case 'rename':{if(!target)return refuse('TASK_NOT_FOUND',{});const name=cleanName(payload.name);if(!name)return refuse('NAME_REQUIRED',{});target.name=name;break;}
+        case 'duration':{if(!target||target.completedAt)return refuse('TASK_NOT_FOUND',{});if(!validDuration(payload.durationMs))return refuse('PAYLOAD_INVALID',{});target.startedAt=new Date(attemptStart(target)).toISOString();target.durationMs=payload.durationMs;extra={taskDurationMs:payload.durationMs};break;}
+        case 'default-duration':{if(!validDuration(payload.durationMs))return refuse('PAYLOAD_INVALID',{});extra={taskDurationMs:payload.durationMs};break;}
+        case 'complete':{if(!target||target.completedAt)return refuse('TASK_NOT_FOUND',{});target.startedAt=new Date(attemptStart(target)).toISOString();target.completedAt=new Date(Math.max(now,Date.parse(target.startedAt)+1)).toISOString();break;}
+        case 'abandon':{if(!target||target.completedAt)return refuse('TASK_NOT_FOUND',{});tasks.splice(tasks.indexOf(target),1);break;}
+        case 'delete':{if(!target)return refuse('TASK_NOT_FOUND',{});tasks.splice(tasks.indexOf(target),1);break;}
+        default:return refuse('PAYLOAD_INVALID',{});
+      }
+      return {ok:true,apply:()=>{const before=structuredClone(item);item.tasks=tasks;Object.assign(item,extra);const task=tasks.find(t=>t.id===payload.taskId)||(payload.action==='start'?tasks[tasks.length-1]:null);return {changed:true,entity:{kind:'timeline-interval',id:item.id},before,after:structuredClone(item),value:{...item,task:task?{...task}:null}};}};
     },
     'timeline-interval.create'(payload) {
       const parentGroup=payload.parentGroupId&&state.timelineIntervals.find(x=>x.id===payload.parentGroupId&&x.groupChildren);

@@ -25,7 +25,7 @@
   pane=node;enabled=true;
   if(!controller){
    if(!loading)loading=(async()=>{
-    const {installCoordinatedWindowSlices}=await import('./blob-pane-coordinator.js');
+    const {installCoordinatedWindowSlices}=await import('./blob-pane-coordinator.js?v=group-rmb-20261106');
     const link=document.createElement('link');link.rel='stylesheet';link.href=new URL('./blob-pane-native.css',location.href).href;document.head.append(link);
     viewport=document.createElement('div');viewport.className='blob-native-viewport';node.parts.body.append(viewport);
     panel=document.createElement('div');panel.className='blob-native-files';panel.hidden=true;document.body.append(panel);
@@ -38,7 +38,7 @@
      panels:[Object.assign(goTab,{panel:{element:panel}})],onStatus:status,rootBoundary:true,onTemplatePick:pickTemplates,nativeTabPresentation:tab=>/^AppFlowy(?:$| ·)/i.test(tab.title||'')?{...tab,title:'Flow',icon:new URL('./template-icons/flow.png',location.href).href}:tab,
      onDragState:active=>{if(!active)finishDrag();},
      onOuterEdge:rect=>{if(!enabled||node.hidden)return;const border=node.getBoundingClientRect().width-viewport.getBoundingClientRect().width;const width=Math.round(rect.width+border);if(Math.abs(node.getBoundingClientRect().width-width)>1){node.classList.remove('blob-pane-full');node.style.width=width+'px';try{localStorage.setItem('proxima.blobPane.width',String(width));localStorage.removeItem('proxima.blobPane.full');}catch{}}},
-     headerActions:tools=>{const close=document.createElement('button');close.type='button';close.innerHTML='<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 5 7 7-7 7m7-14 7 7-7 7"/></svg>';close.title='Collapse blob workspace';close.setAttribute('aria-label','Collapse blob workspace');close.onclick=()=>root.ProximaBlobWorkspaces.close();tools.append(close);},
+     headerActions:tools=>{const task=document.createElement('button');task.type='button';task.textContent='Task';task.title='Current task and task history';task.setAttribute('aria-label','Show current task');task.className='blob-layout-task';task.onclick=()=>root.ProximaBlobWorkspaces.showTask();tools.append(task);const close=document.createElement('button');close.type='button';close.innerHTML='<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 5 7 7-7 7m7-14 7 7-7 7"/></svg>';close.title='Collapse blob workspace';close.setAttribute('aria-label','Collapse blob workspace');close.onclick=()=>root.ProximaBlobWorkspaces.close();tools.append(close);},
      onSelection:tabId=>{if(String(tabId||'').startsWith('preview:blob-file-'))return;dispatchEvent(new CustomEvent('proxima:blob-template-selected',{detail:{kind:tabId==='preview:blob-files'?'as-you-go':'appflowy'}}));}});
     new MutationObserver(()=>{if(!enabled)return;viewport.hidden=node.hidden;syncOverlay();controller.refresh();}).observe(node,{attributes:true,attributeFilter:['hidden']});
     await controller.restore();
@@ -70,5 +70,6 @@
  .blob-template-picker button{padding:7px 12px;border:0;background:transparent;color:inherit;text-align:left;font:12px system-ui}.blob-template-picker button:hover{background:#ffffff18}
  .blob-shared-layout .full-appflowy-surface{pointer-events:none}
  .blob-shared-layout .blob-workspace-loading{z-index:1200}
+ .blob-layout-task{font:11px system-ui!important;padding:3px 8px!important;border:1px solid #536272!important;border-radius:5px!important;background:transparent;color:#e6e9ef;cursor:pointer;width:auto!important}
  `;document.head.append(style);
 })(globalThis);

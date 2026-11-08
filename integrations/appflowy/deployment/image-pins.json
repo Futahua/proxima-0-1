@@ -1,0 +1,12 @@
+{
+  "library/nginx": "library/nginx@sha256:eb1c896deef834f4e056829fd6dadac8305501f16cc71ba65fb252c8d0aa168e",
+  "appflowyinc/minio": "appflowyinc/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
+  "pgvector/pgvector": "pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a",
+  "library/redis": "library/redis@sha256:4fa24486b8bcca8eec45ee0eb166edc674795e53a2b53d1a9ef263eecebaac85",
+  "appflowyinc/gotrue": "appflowyinc/gotrue@sha256:74b60212c3e6a044555badb9085870708f806e54e422096fb8c4b7025133d1ba",
+  "appflowyinc/appflowy_cloud": "appflowyinc/appflowy_cloud@sha256:b4b42afefd060c4df4ed949651ca336124bb27cf90a1846b757c7e6cc25c933b",
+  "appflowyinc/admin_frontend": "appflowyinc/admin_frontend@sha256:96a470e4fe315d492d09643db7269b2b982080f7c5381d9a93b90a16245f6168",
+  "appflowyinc/appflowy_worker": "appflowyinc/appflowy_worker@sha256:0a325fc3baf131eebb11ede1b938229f51b6d027df80dd7d17589931d327e6c6",
+  "appflowyinc/appflowy_search": "appflowyinc/appflowy_search@sha256:487f25665e4ffd708dd9af276143e7d062f2e829858e0047a397fb8a4b0d1357",
+  "appflowyinc/appflowy_web": "appflowyinc/appflowy_web@sha256:314033844c4ff59cec478cd2d3fdb64fda7f35cbece029812f16c4ef787c5dae"
+}

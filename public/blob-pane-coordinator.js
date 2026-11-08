@@ -354,6 +354,12 @@ function installNativeWindowTabs({ document, header, host, bounds, prepare, over
       release.addEventListener("click", () => {
         if (!disposed) void request("pane-window-detach", { tabId: tab.id }).catch(report);
       });
+      // Creator request 2026-11-06: no X on tabs; right-click releases the window instead.
+      group.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        release.click();
+      });
       group.addEventListener("click", (event) => {
         if (event.target === group) button.click?.();
       });
@@ -420,7 +426,7 @@ function installNativeWindowTabs({ document, header, host, bounds, prepare, over
         strip.setAttribute("data-drag-hint", "");
         render();
       });
-      group.append(button, release);
+      group.append(button);
       strip.append(group);
     }
     const addButton = document.createElement("button");
@@ -497,7 +503,11 @@ function installNativeWindowTabs({ document, header, host, bounds, prepare, over
         void overlay(documentTabs.some((t) => t.active)).catch(report);
       });
       group.append(button);
-      if (!tab.protected) group.append(close);
+      if (!tab.protected) group.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        close.click();
+      });
       const nativeGroups = Array.from(strip.children).filter((node) => node.getAttribute?.("data-pane-tab-id"));
       const anchor = Number.isInteger(tab.nativeIndex) ? nativeGroups[Math.max(0, tab.nativeIndex)] : null;
       if (anchor && strip.insertBefore) strip.insertBefore(group, anchor);
@@ -2541,10 +2551,13 @@ function createFileCapabilityPanel(options) {
       state.nativeGeometry?.update({ rect, visible: !state.previewSuspended });
     };
     refreshPreviewGeometry();
-    if (typeof ResizeObserver === "function") {
-      state.nativePreviewObserver = new ResizeObserver(move);
-      state.nativePreviewObserver.observe(surface);
-    }
+    // The Windows viewer is a separate native window: a surface that moves without
+    // resizing (neighbouring panes shifting) fires no ResizeObserver, so also re-check
+    // its position. The scheduler drops unchanged rectangles.
+    const resize = typeof ResizeObserver === "function" ? new ResizeObserver(move) : null;
+    resize?.observe(surface);
+    const follow = setInterval(() => { if (surface.isConnected) move(); }, 250);
+    state.nativePreviewObserver = { disconnect() { resize?.disconnect(); clearInterval(follow); } };
     documentRef.defaultView?.addEventListener("resize", move, { passive: true, once: true });
   }
   async function startPdfPreview(data) {

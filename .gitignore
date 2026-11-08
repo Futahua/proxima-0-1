@@ -1,2 +1,6 @@
 # Host-specific runtime identity and journals.
 /.papers-local/
+# Machine-local AppFlowy credentials and runtime backups.
+/integrations/appflowy/deployment/server/deploy.env
+/integrations/appflowy/deployment/server/docker/
+/server/dist/

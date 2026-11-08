@@ -51,7 +51,8 @@
   function day(value){if(typeof value!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(value)||new Date(value+'T00:00:00.000Z').toISOString().slice(0,10)!==value)throw Error('Invalid task day.');}
   function template(value){
     if(value==null)return;
-    shape(value,['version','kind','workspaceId','folderId','documentId','appflowyWorkspaceId'],'blob template');
+    shape(value,['version','kind','workspaceId','folderId','documentId','appflowyWorkspaceId','appflowyPageId'],'blob template');
+    if(value.appflowyPageId!==undefined&&(value.kind!=='appflowy'||!value.appflowyWorkspaceId||typeof value.appflowyPageId!=='string'||!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(value.appflowyPageId)))throw Error('Invalid AppFlowy page identity.');
     if(value.appflowyWorkspaceId!==undefined&&(value.kind!=='appflowy'||typeof value.appflowyWorkspaceId!=='string'||!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(value.appflowyWorkspaceId)))throw Error('Invalid AppFlowy workspace identity.');
     const ident=v=>typeof v==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(v);
     // Version 1 gave each blob its own workspace; version 2 is a folder in the shared synced root.

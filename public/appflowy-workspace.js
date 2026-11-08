@@ -161,7 +161,7 @@
  }
  // BOP's answer for a blob: its page in the home workspace, plus a fresh sign-in link for the web app.
  async function ask(binding,name,intervalId){
-  let value=binding.appflowyWorkspaceId?{workspaceId:binding.appflowyWorkspaceId,url:ORIGIN+'/app/'+binding.appflowyWorkspaceId}:null;
+  let value=binding.appflowyWorkspaceId?{workspaceId:binding.appflowyWorkspaceId,viewId:binding.appflowyPageId,url:ORIGIN+'/app/'+binding.appflowyWorkspaceId+(binding.appflowyPageId?'/'+binding.appflowyPageId:'')}:null;
   const api=root.__proximaDeviceCopy;
   if(api){
    const devices=await withDeadline(api.devices(),'Device lookup is unavailable. Your Flow page is retained.',8000),bop=devices.others.find(device=>device.id==='44091a08-55e1-46b8-8fa7-df60366779c2'||/^bop$/i.test(device.name));
@@ -171,7 +171,7 @@
    if(!value||!value.url.startsWith(ORIGIN+'/app/')||!value.launchUrl?.startsWith(ORIGIN+'/papers-launch#'))throw Error('BOP did not confirm the AppFlowy workspace.');
    const item=Store.timelineIntervals().find(item=>item.id===intervalId),current=(item?.templates||[]).find(b=>b.kind==='appflowy');
    if(!current||current.documentId!==binding.documentId)throw Error('This blob template changed while AppFlowy was opening.');
-   if(current.appflowyWorkspaceId!==value.workspaceId){const saved=await Store.command({type:'timeline-interval.template',ifRev:item.rev,payload:{intervalId,template:'appflowy',appflowyWorkspaceId:value.workspaceId}});if(!saved.ok)throw Error('This blob changed before its AppFlowy link was saved.');}
+   if(current.appflowyWorkspaceId!==value.workspaceId||current.appflowyPageId!==value.viewId){const saved=await Store.command({type:'timeline-interval.template',ifRev:item.rev,payload:{intervalId,template:'appflowy',appflowyWorkspaceId:value.workspaceId,appflowyPageId:value.viewId,expectedDocumentId:binding.documentId}});if(!saved.ok)throw Error('This blob changed before its AppFlowy link was saved.');}
   }
   if(!value)throw Error('Open this AppFlowy template in Papers on one of your connected devices first.');
   return value;

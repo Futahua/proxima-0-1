@@ -67,7 +67,7 @@
  // One As you Go page stays alive for every blob: opening another blob moves it to that folder
  // instead of loading As you Go again, and a new page stays invisible until its first themed render.
  let readyTimer=0,frameReady=false,wantedFolder=null,creatingFrame=null,templateEntry=null,navigation=null,openSequence=0,frameNavigationProtocol=0;
- function note(text){let el=pane.parts.body.querySelector('.blob-workspace-note');if(!el){el=document.createElement('p');el.className='blob-workspace-note';pane.parts.body.prepend(el);}el.textContent=text;el.hidden=!text;if(frame)frame.hidden=!!text;}
+ function note(text){let el=pane.parts.body.querySelector('.blob-workspace-note');if(!el){el=document.createElement('p');el.className='blob-workspace-note';pane.parts.body.prepend(el);}el.textContent=text;el.hidden=!text;if(frame)frame.hidden=!!text||activeKind==='task';}
  function revealFrame(){clearTimeout(readyTimer);pane.parts.loading.hidden=true;pane.parts.loading.textContent='Opening folder…';if(pane.parts.status.textContent==='Opening folder…')pane.parts.status.textContent='';if(frame){frame.style.pointerEvents='';frame.style.visibility='visible';}}
  function confirmedFolder(folderId,requestId){frameFolder=folderId;if(!navigation||folderId!==navigation.folderId||frameNavigationProtocol>=1&&requestId!==navigation.requestId)return;const done=navigation;navigation=null;clearTimeout(done.timer);revealFrame();done.resolve(true);}
  function cancelNavigation(){if(!navigation)return;const old=navigation;navigation=null;clearTimeout(old.timer);old.resolve(false);}
@@ -93,6 +93,8 @@
   return frame;
  })().finally(()=>{creatingFrame=null;});return creatingFrame;}
  async function mount(id,request=openSequence){build();const item=Store.timelineIntervals().find(x=>x.id===id);if(!item)throw Error('This blob no longer exists.');pane.hidden=false;selected=id;pane.parts.title.textContent=item.name;
+  if(activeKind==='task'){showTask(item);return;}
+  root.ProximaBlobTasks?.hide();
   const shared=location.protocol==='papers-backpack:'&&bindings(item).some(b=>b.kind==='appflowy')&&isV2(item)&&!folders.get(item.template.folderId)?.binned;
   if(shared){const requestedKind=activeKind;await root.ProximaFullAppFlowy?.hide();await root.ProximaBlobLayout.ensure(pane,await prepareTemplate());activeKind=requestedKind;if(frame&&frame.parentElement!==root.ProximaBlobLayout.panel()){frame.style.visibility='hidden';frameReady=false;root.ProximaBlobLayout.panel().append(frame);}}
   else {root.ProximaBlobLayout?.disable();if(frame&&frame.parentElement!==pane.parts.body){frame.style.visibility='hidden';frameReady=false;pane.parts.body.append(frame);}}
@@ -132,7 +134,7 @@
  function closePane(){++openSequence;cancelNavigation();if(pane)pane.hidden=true;void root.ProximaFullAppFlowy?.hide();document.querySelector('#exactTimeline')?.focus({preventScroll:true});}
  function toggle(id=selected||localStorage.getItem('proxima.blobPane.last')){if(!id||!Store.timelineIntervals().some(x=>x.id===id))return false;if(pane&&!pane.hidden&&selected===id)closePane();else void open(id);return true;}
  function startEditor(item,request){void openEditor(bindings(item).find(b=>b.kind==='appflowy')).catch(error=>{if(request!==openSequence||selected!==item.id||pane.hidden)return;pane.parts.status.hidden=false;pane.parts.status.textContent=error.message;});}
- function open(id){localStorage.setItem('proxima.blobPane.last',id);const request=++openSequence;cancelNavigation();chain=chain.catch(()=>{}).then(()=>request===openSequence?mount(id,request):undefined).catch(e=>{if(request!==openSequence)return;build();pane.hidden=false;pane.parts.status.hidden=false;pane.parts.status.textContent=e.message;});return chain;}
+ function open(id,kind='task'){if(kind)activeKind=kind;localStorage.setItem('proxima.blobPane.last',id);const request=++openSequence;cancelNavigation();chain=chain.catch(()=>{}).then(()=>request===openSequence?mount(id,request):undefined).catch(e=>{if(request!==openSequence)return;build();pane.hidden=false;pane.parts.status.hidden=false;pane.parts.status.textContent=e.message;});return chain;}
  // A file pane that is unloading (a blob switch reloads it) closes its hosted previews on the way out;
  // that message arrives with no source any more. Forward just those closes, or the preview stays on screen.
  addEventListener('message',event=>{const v=event.data;if(frame&&event.source===null&&event.origin===origin&&v?.workspaceId===ROOT&&v.type==='proxima:workspace:request'&&v.method==='file'&&/^preview-[a-z]+-close$/.test(v.args?.[0])&&typeof v.args[1]?.sessionId==='string'){void Promise.resolve(root.ProximaWorkspaces.frameCall(ROOT,'file',[v.args[0],{sessionId:v.args[1].sessionId}])).catch(()=>{});}});
@@ -160,10 +162,19 @@
  }
  addEventListener('proxima:blob-open',event=>{void (event.detail.newTab?openProjectTab(event.detail.id):toggle(event.detail.id));});
  document.addEventListener('dblclick',event=>{if(event.target.closest('input,button,.exact-resize-edge,.exact-queue-boundary'))return;const node=event.target.closest('.exact-selectable,.exact-outside-name');if(!propagated(node?.interval))return;event.preventDefault();event.stopImmediatePropagation();void open(node.interval.id);},true);
+ // The Task tab: Proxima's own surface in the pane body. Go and Flow stay loaded behind it, only hidden.
+ function showTask(item){
+  cancelNavigation();root.ProximaBlobLayout?.disable();void root.ProximaFullAppFlowy?.hide();
+  if(frame&&frame.parentElement!==pane.parts.body){frame.style.visibility='hidden';frameReady=false;pane.parts.body.append(frame);}
+  if(frame)frame.hidden=true;note('');pane.parts.loading.hidden=true;pane.parts.status.hidden=true;pane.parts.conflicts.hidden=true;pane.classList.add('has-folder');
+  renderTemplateTabs(item);
+  if(!root.ProximaBlobTasks){pane.parts.status.hidden=false;pane.parts.status.textContent='The task screen did not load. Reload this page.';return;}
+  root.ProximaBlobTasks.mount(pane.parts.body,item.id);
+ }
  function renderTemplateTabs(item){
   const list=bindings(item).filter(b=>b.kind!=='as-you-go'||!folders.get(b.folderId)?.binned);
-  if(!list.some(b=>b.kind===activeKind))activeKind=list[0]?.kind??null;
-  pane.parts.tabs.replaceChildren();for(const binding of list){const tab=document.createElement('button');tab.type='button';tab.textContent=binding.kind==='appflowy'?'Flow':'Go';tab.setAttribute('aria-pressed',String(binding.kind===activeKind));tab.onclick=()=>{void flush().then(()=>{activeKind=binding.kind;return mount(item.id);}).catch(error=>{pane.parts.status.hidden=false;pane.parts.status.textContent=error.message;});};pane.parts.tabs.append(tab);}
+  if(activeKind!=='task'&&!list.some(b=>b.kind===activeKind))activeKind='task';
+  pane.parts.tabs.replaceChildren();{const tab=document.createElement('button');tab.type='button';tab.textContent='Task';tab.setAttribute('aria-pressed',String(activeKind==='task'));tab.onclick=()=>{void flush().then(()=>{activeKind='task';return mount(item.id);}).catch(error=>{pane.parts.status.hidden=false;pane.parts.status.textContent=error.message;});};pane.parts.tabs.append(tab);}for(const binding of list){const tab=document.createElement('button');tab.type='button';tab.textContent=binding.kind==='appflowy'?'Flow':'Go';tab.setAttribute('aria-pressed',String(binding.kind===activeKind));tab.onclick=()=>{void flush().then(()=>{activeKind=binding.kind;return mount(item.id);}).catch(error=>{pane.parts.status.hidden=false;pane.parts.status.textContent=error.message;});};pane.parts.tabs.append(tab);}
   for(const option of pane.parts.select.options)option.disabled=!!list.find(b=>b.kind===option.value);pane.parts.select.value='';
  }
  async function openProjectTab(id){
@@ -178,7 +189,7 @@
   return root.ProximaFullAppFlowy.open(binding,pane.parts.body,pane.parts.title.textContent,selected);
  }
  async function chooseTemplate(kind){const item=Store.timelineIntervals().find(x=>x.id===selected);if(!item)return;if(bindings(item).some(b=>b.kind===kind)){await flush();activeKind=kind;return mount(selected);}pane.parts.select.value=kind;return pane.parts.select.onchange();}
- root.ProximaBlobWorkspaces=Object.freeze({open,toggle,lastOpened:()=>selected||localStorage.getItem('proxima.blobPane.last'),close:closePane,openProjectTab,flush,button,prewarm,chooseTemplate});
+ root.ProximaBlobWorkspaces=Object.freeze({showTask:()=>{if(selected)void open(selected,'task');},open,toggle,lastOpened:()=>selected||localStorage.getItem('proxima.blobPane.last'),close:closePane,openProjectTab,flush,button,prewarm,chooseTemplate});
  if(projectTab){document.documentElement.classList.add('blob-project-page');const start=()=>{const item=Store.timelineIntervals().find(x=>x.id===projectTab);if(item){document.title=item.name;void open(projectTab);}else setTimeout(start,100);};setTimeout(start,0);}
- const previousFlush=root.__papersFlushBeforeClose;root.__papersFlushBeforeClose=async()=>{await flush();await previousFlush?.();await root.ProximaWorkspaces.flush();return {ok:true};};
+ const previousFlush=root.__papersFlushBeforeClose;root.__papersFlushBeforeClose=async()=>{await root.ProximaBlobTasks?.flush();await flush();await previousFlush?.();await root.ProximaWorkspaces.flush();return {ok:true};};
 })(globalThis);
