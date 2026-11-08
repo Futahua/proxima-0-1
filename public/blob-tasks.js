@@ -13,6 +13,9 @@
  'use strict';
  const ZONE='Asia/Ho_Chi_Minh',MIN=60000,DEFAULT_MS=25*MIN,PICTURE_EDGE=1600,DOC_LIMIT=1900000;
  const proofId=taskId=>'blob-task-proof.'+taskId;
+ // Desktop and phone pages hold the replica (readDocument/saveDocument); BOP's web page reaches the same documents
+ // through its workspace frame call.
+ const docs={read:id=>{const W=root.ProximaWorkspaces;return W.readDocument?W.readDocument(id):W.frameCall('ayg-root','document-load',[id]);},save:(id,content,revision)=>{const W=root.ProximaWorkspaces;return W.saveDocument?W.saveDocument(id,content,revision):W.frameCall('ayg-root','document-save',[id,content,revision]);}};
  const blobOf=id=>Store.timelineIntervals().find(x=>x.id===id)||null;
  const tasksOf=item=>Array.isArray(item?.tasks)?item.tasks.filter(t=>t&&typeof t.id==='string'&&Number.isFinite(Date.parse(t.startedAt))&&Number.isSafeInteger(t.durationMs)&&t.durationMs>0):[];
  const runningOf=item=>tasksOf(item).find(t=>!t.completedAt)||null;
@@ -27,7 +30,7 @@
  // ── Proof documents ──
  const emptyProof=()=>({blocks:[{type:'text',text:''}]});
  const hasProof=doc=>!!doc?.blocks?.some(b=>b.type==='image'&&b.src||b.type==='text'&&String(b.text||'').trim());
- async function readProof(taskId){const v=await root.ProximaWorkspaces.readDocument(proofId(taskId));const c=v?.content;return {content:c&&Array.isArray(c.blocks)?c:emptyProof(),revision:v?.revision??null,conflicts:v?.conflicts||[]};}
+ async function readProof(taskId){const v=await docs.read(proofId(taskId));const c=v?.content;return {content:c&&Array.isArray(c.blocks)?c:emptyProof(),revision:v?.revision??null,conflicts:v?.conflicts||[]};}
  async function shrinkPicture(file){
   const bitmap=await createImageBitmap(file),scale=Math.min(1,PICTURE_EDGE/Math.max(bitmap.width,bitmap.height)),w=Math.max(1,Math.round(bitmap.width*scale)),h=Math.max(1,Math.round(bitmap.height*scale));
   const canvas=Object.assign(document.createElement('canvas'),{width:w,height:h});canvas.getContext('2d').drawImage(bitmap,0,0,w,h);bitmap.close?.();
@@ -147,9 +150,9 @@
  async function addPictures(files,after){view.parts.saved.textContent='Adding picture…';try{let anchor=after;for(const file of files){const b=await shrinkPicture(file);const fig=figureBlock({type:'image',...b});if(anchor)anchor.after(fig);else{const last=view.parts.proof.lastElementChild;if(last?.classList.contains('text')&&!last.textContent)last.before(fig);else view.parts.proof.append(fig);}anchor=fig;}ensureTrailingText();changed();}catch(e){view.parts.saved.textContent='Could not add the picture: '+e.message;}}
  function changed(){if(!view.taskId)return;view.doc=readEditor();if(JSON.stringify(view.doc).length>DOC_LIMIT){view.parts.saved.textContent='Too much for one proof: remove a picture.';return;}view.dirty=true;view.parts.saved.textContent='Saving…';clearTimeout(view.saveTimer);view.saveTimer=setTimeout(()=>void flushProof(),600);renderDone();}
  function flushProof(){if(!view)return Promise.resolve();clearTimeout(view.saveTimer);const run=async()=>{if(!view.dirty||!view.taskId)return;const taskId=view.taskId,doc=view.doc;view.dirty=false;
-   try{let r=await root.ProximaWorkspaces.saveDocument(proofId(taskId),doc,view.revision);
+   try{let r=await docs.save(proofId(taskId),doc,view.revision);
     // Another device saved this proof meanwhile: it is the same person, so the newest typing wins.
-    if(!r.ok&&r.code==='DOCUMENT_CHANGED'&&!(r.conflicts||[]).length)r=await root.ProximaWorkspaces.saveDocument(proofId(taskId),doc,r.revision??null);
+    if(!r.ok&&r.code==='DOCUMENT_CHANGED'&&!(r.conflicts||[]).length)r=await docs.save(proofId(taskId),doc,r.revision??null);
     if(!r.ok)throw Error(r.conflicts?.length?'two devices changed this proof at once':'it changed elsewhere');
     if(view.taskId===taskId)view.revision=r.revision;if(view.taskId===taskId&&!view.dirty)view.parts.saved.textContent='Saved';}
    catch(e){if(view.taskId===taskId){view.dirty=true;view.parts.saved.textContent='Not saved: '+e.message;}}};
