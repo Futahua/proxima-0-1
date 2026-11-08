@@ -191,5 +191,9 @@
  async function chooseTemplate(kind){const item=Store.timelineIntervals().find(x=>x.id===selected);if(!item)return;if(bindings(item).some(b=>b.kind===kind)){await flush();activeKind=kind;return mount(selected);}pane.parts.select.value=kind;return pane.parts.select.onchange();}
  root.ProximaBlobWorkspaces=Object.freeze({showTask:()=>{if(selected)void open(selected,'task');},open,toggle,lastOpened:()=>selected||localStorage.getItem('proxima.blobPane.last'),close:closePane,openProjectTab,flush,button,prewarm,chooseTemplate});
  if(projectTab){document.documentElement.classList.add('blob-project-page');const start=()=>{const item=Store.timelineIntervals().find(x=>x.id===projectTab);if(item){document.title=item.name;void open(projectTab);}else setTimeout(start,100);};setTimeout(start,0);}
- const previousFlush=root.__papersFlushBeforeClose;root.__papersFlushBeforeClose=async()=>{await root.ProximaBlobTasks?.flush();await flush();await previousFlush?.();await root.ProximaWorkspaces.flush();return {ok:true};};
+ // Papers asks every page to save before a reload. A page whose surface Papers already counts as closed cannot
+ // reach Papers to save ("This surface is no longer open"); that must not cancel the reload. Other failures still do.
+ const surfaceGone=error=>/surface is no longer open/i.test(String(error?.message||error));
+ const step=async work=>{try{await work();}catch(error){if(!surfaceGone(error))throw error;}};
+ const previousFlush=root.__papersFlushBeforeClose;root.__papersFlushBeforeClose=async()=>{await step(()=>root.ProximaBlobTasks?.flush());await step(()=>flush());await step(()=>previousFlush?.());await step(()=>root.ProximaWorkspaces.flush());return {ok:true};};
 })(globalThis);
