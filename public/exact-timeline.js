@@ -239,9 +239,13 @@
   function textPoint(event){const x=event.clientX-element.getBoundingClientRect().left,y=event.clientY-tracks.getBoundingClientRect().top+tracks.scrollTop,onPlus=!!event.target.closest?.('[aria-label="Create a new blob"]'),linked=onPlus||Math.abs(x-geometry.position(clockNow(),start,scale))<=10;return {time:linked?clockNow():Math.round(geometry.time(x,start,scale)),index:Math.max(0,Math.min(laneCount,Math.floor((y-11)/ROW))),linked,onPlus};}
   // A new blob goes to the topmost row you can see that has nothing from now on; with no such row it starts
   // a new row at the very top. Rows scrolled out of view are not reused (creator, 2026-11-08).
+  // The free row is picked from every row, not just the ones the current zoom shows, so + lands in the same
+  // place at any zoom. A row out of view takes the slot it will appear in.
   function freeCreationDestination(time){
-   const visible=ordered(),row=firstFreeRow(visible,items(),time,new Set(queues().map(row=>row.id)));
-   return row?{row,index:visible.indexOf(row)}:{row:null,index:0};
+   const visible=ordered(),all=durableOrdered(),row=firstFreeRow(all,items(),time,new Set(queues().map(row=>row.id)));
+   if(!row)return {row:null,index:0};
+   const key=laneId(row),shown=visible.findIndex(x=>laneId(x)===key);if(shown>=0)return {row:visible[shown],index:shown};
+   const rank=new Map(all.map((x,i)=>[laneId(x),i]));return {row,index:visible.filter(x=>(rank.get(laneId(x))??Infinity)<rank.get(key)).length};
   }
   function textDestination(point){const data=items(),rows=ordered(),duration=point.linked?1:Math.max(1,Math.round(160/scale)),end=point.linked?Infinity:point.time+duration;const free=row=>!queues().some(x=>x.id===(row.rowId||row.id))&&!data.some(x=>(x.rowId||x.id)===(row.rowId||row.id)&&point.time<(x.followNow?Infinity:Date.parse(x.end))&&Date.parse(x.start)<end);if(point.onPlus)return freeCreationDestination(point.time);const row=rows[point.index];return {row:row&&free(row)?row:null,index:point.index};}
   async function createFromText(text,point){const name=String(text||'').trim().replace(/\s+/g,' ').slice(0,200);if(!name)return;const target=textDestination(point),now=clockNow(),stamp=point.linked?now:point.time;const result=await store.command({type:'timeline-interval.create',payload:{color:creationColor(),name,rowId:target.row?(target.row.rowId||target.row.id):undefined,beforeId:target.row?undefined:ordered()[target.index]?.id,start:new Date(stamp).toISOString(),end:new Date(point.linked?stamp+1:stamp+Math.max(1,Math.round(160/scale))).toISOString(),followNow:point.linked}});if(!result.ok)error.textContent=result.code;else{refresh();tracks.scrollTop=Math.max(0,20+target.index*ROW-tracks.clientHeight/2);}textPreview.hidden=true;}
