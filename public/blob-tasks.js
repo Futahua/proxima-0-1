@@ -70,11 +70,13 @@
  .blob-task-done{width:54px;height:44px;font-size:30px;line-height:1;color:#e6e9ef;background:transparent;border:0;cursor:pointer;border-radius:8px}
  .blob-task-done:hover:not(:disabled){background:#a8c98d26;color:#a8c98d}.blob-task-done:disabled{opacity:.25;cursor:default}
  .blob-task-history h3{font:500 20px system-ui;margin:0 0 8px}
+ .blob-task-history li{display:grid;grid-template-columns:minmax(0,1fr) 28px;align-items:start}
+ .blob-task-history li>.task-delete{width:28px;height:34px;padding:0;display:grid;place-items:center;align-self:start;color:#a6b0bd;opacity:0;pointer-events:none}.blob-task-history li:hover>.task-delete,.blob-task-history li:focus-within>.task-delete{opacity:1;pointer-events:auto}.blob-task-history li>.task-delete:hover{color:#efaaa6}
  .blob-task-history ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
- .blob-task-history li>button{width:100%;display:flex;gap:12px;align-items:baseline;text-align:left;font:13px system-ui;color:#e6e9ef;background:transparent;border:0;border-radius:6px;padding:7px 8px;cursor:pointer}
+ .blob-task-history li>button{width:100%;display:flex;gap:12px;align-items:center;text-align:left;font:13px/20px system-ui;color:#e6e9ef;background:transparent;border:0;border-radius:6px;padding:7px 8px;cursor:pointer}
  .blob-task-history li>button:hover{background:#ffffff0a}.blob-task-history li>button span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
  .blob-task-history li>button time{color:#a6b0bd;font-size:12px;white-space:nowrap}
- .blob-task-history .proof-view{margin:2px 8px 10px;padding:10px 14px;border-left:2px solid #536272;color:#d4dae2}
+ .blob-task-history .proof-view{grid-column:1/-1;margin:2px 8px 10px;padding:10px 14px;border-left:2px solid #536272;color:#d4dae2}
  .blob-task-history .proof-view .text{white-space:pre-wrap;line-height:1.6;overflow-wrap:anywhere}
  .blob-task-history .proof-view img{display:block;max-width:100%;margin:6px 0;border-radius:4px}
  .blob-task-history .empty{color:#8d97a3;font-size:13px;text-align:left;padding:7px 8px}
@@ -85,15 +87,15 @@
  let view=null; // {node,intervalId,parts,taskId,doc,revision,saving,dirty,timer}
  function build(container){
   const node=el('section','blob-task');node.setAttribute('aria-label','Current task');
-  const title=el('div','blob-task-title'),name=el('input');name.placeholder='Current task';name.maxLength=300;name.setAttribute('aria-label','Task name');const pen=el('span','pen','✎');pen.setAttribute('aria-hidden','true');const stop=el('button',null,'Give up');stop.type='button';stop.title='Drop the running task without recording it';title.append(name,pen,stop);
+  const title=el('div','blob-task-title'),name=el('input');name.placeholder='Current task';name.maxLength=300;name.setAttribute('aria-label','Task name');const stop=el('button',null,'Give up');stop.type='button';stop.title='Drop the running task without recording it';title.append(name,stop);
   const main=el('div','blob-task-main'),ring=el('div','blob-task-ring');const R=108,C=2*Math.PI*R;ring.innerHTML=`<svg viewBox="0 0 240 240"><circle class="track" cx="120" cy="120" r="${R}" fill="none" stroke-width="5"/><circle class="arc" cx="120" cy="120" r="${R}" fill="none" stroke-width="5" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="0"/></svg>`;
   const clock=el('div','blob-task-clock'),time=el('button');time.type='button';time.title='Set the countdown';const note=el('small');clock.append(time,note);ring.append(clock);
   const side=el('div','blob-task-proof-side'),proof=el('div','blob-task-proof');proof.setAttribute('aria-label','Proof of completion');
-  const tools=el('div','blob-task-proof-tools'),saved=el('span'),pick=el('label',null,'Add picture'),file=el('input');file.type='file';file.accept='image/*';file.multiple=true;file.hidden=true;pick.append(file);tools.append(saved,pick);
+  const tools=el('div','blob-task-proof-tools'),saved=el('span'),pick=el('label',null),file=el('input');pick.title='Add picture';pick.setAttribute('aria-label','Add picture');pick.innerHTML='<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M15 3H4a1 1 0 0 0-1 1v16h17V10M16 5h6m-3-3v6M3 17l5-5 4 4 3-3 5 5"/><circle cx="8" cy="7" r="1"/></svg>';pick.tabIndex=0;pick.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();file.click();}};file.type='file';file.accept='image/*';file.multiple=true;file.hidden=true;pick.append(file);tools.append(saved,pick);
   const done=el('button','blob-task-done','✓');done.type='button';done.title='Done: needs some proof first';done.setAttribute('aria-label','Mark task done');side.append(proof,tools,done);
   main.append(ring,side);
   const status=el('p','blob-task-status');status.setAttribute('role','status');
-  const history=el('section','blob-task-history'),heading=el('h3',null,'Task history'),list=el('ol');history.append(heading,list);
+  const history=el('section','blob-task-history'),heading=el('h3',null),list=el('ol');heading.title='Task history';heading.setAttribute('aria-label','Task history');heading.innerHTML='<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 10a9 9 0 1 1 1 7M3 4v6h6m3-4v6l4 2"/></svg>';history.append(heading,list);
   node.append(title,status,main,history);container.append(node);
   return {node,parts:{name,stop,ring,arc:ring.querySelector('.arc'),C,time,note,proof,saved,file,done,status,list}};
  }
@@ -131,7 +133,7 @@
    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();const rest=splitAtCaret(block);const next=textBlock(rest);block.after(next);focusStart(next);changed();}
    else if(e.key==='Backspace'&&caretAtStart(block)){const prev=block.previousElementSibling;if(prev?.classList.contains('text')){e.preventDefault();const at=prev.textContent.length;prev.textContent+=block.textContent;block.remove();focusAt(prev,at);changed();}else if(prev?.tagName==='FIGURE'&&!block.textContent){e.preventDefault();prev.remove();changed();}}});
   proof.addEventListener('input',()=>changed());
-  proof.addEventListener('paste',e=>{const files=[...(e.clipboardData?.files||[])].filter(f=>f.type.startsWith('image/'));if(files.length){e.preventDefault();void addPictures(files,e.target.closest?.('.text'));return;}const text=e.clipboardData?.getData('text/plain');if(text!=null&&e.target.closest?.('.text')){e.preventDefault();document.execCommand('insertText',false,text);}});
+  proof.addEventListener('paste',e=>{e.stopPropagation();const files=[...(e.clipboardData?.files||[])].filter(f=>f.type.startsWith('image/'));if(files.length){e.preventDefault();void addPictures(files,e.target.closest?.('.text'));return;}const text=e.clipboardData?.getData('text/plain');if(text!=null&&e.target.closest?.('.text')){e.preventDefault();document.execCommand('insertText',false,text);}});
   proof.addEventListener('dragover',e=>{if([...e.dataTransfer.types].includes('Files')){e.preventDefault();proof.classList.add('is-dragging');}});
   proof.addEventListener('dragleave',()=>proof.classList.remove('is-dragging'));
   proof.addEventListener('drop',e=>{proof.classList.remove('is-dragging');const files=[...(e.dataTransfer?.files||[])].filter(f=>f.type.startsWith('image/'));if(!files.length)return;e.preventDefault();void addPictures(files,e.target.closest?.('.text'));});
@@ -165,6 +167,7 @@
  function tick(){if(view&&!view.node.hidden)render();}
  function render(force){
   if(!view)return;const p=view.parts,item=blobOf(view.intervalId);if(!item){p.status.textContent='This blob no longer exists.';return;}
+  p.name.placeholder=item.name||'Task';
   const running=runningOf(item),now=Date.now();
   if(running&&view.taskId!==running.id)void loadProof(running.id);
   if(!running&&view.taskId){void flushProof();view.taskId=null;view.doc=null;paintEditor(emptyProof());}
@@ -178,7 +181,7 @@
   if(key===view.lastKey&&!force)return;view.lastKey=key;
   if(!done.length){p.list.replaceChildren(el('li','empty','Finished tasks appear here, newest first.'));return;}
   p.list.replaceChildren(...done.map(t=>{const li=el('li'),b=el('button'),name=el('span',null,t.name),when=el('time',null,timeText(Date.parse(t.startedAt))+'–'+timeText(Date.parse(t.completedAt))+' · '+dayText(Date.parse(t.completedAt)));b.type='button';b.append(name,when);b.setAttribute('aria-expanded',String(view.openHistory.has(t.id)));
-   b.onclick=()=>{if(view.openHistory.has(t.id))view.openHistory.delete(t.id);else view.openHistory.add(t.id);view.lastKey='';render();};li.append(b);
+   b.onclick=()=>{if(view.openHistory.has(t.id))view.openHistory.delete(t.id);else view.openHistory.add(t.id);view.lastKey='';render();};const remove=el('button','task-delete');remove.innerHTML='<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6m4-6v6"/></svg>';remove.type='button';remove.title='Delete task';remove.setAttribute('aria-label','Delete '+t.name);remove.onclick=async()=>{remove.disabled=true;try{const result=await command({action:'delete',taskId:t.id});if(result.ok)view.openHistory.delete(t.id);}finally{remove.disabled=false;}};li.append(b,remove);
    if(view.openHistory.has(t.id)){const box=el('div','proof-view',' ');li.append(box);void readProof(t.id).then(v=>{box.replaceChildren(...v.content.blocks.map(x=>{if(x.type==='image'){const img=el('img');img.src=x.src;img.alt='Proof picture';return img;}return el('div','text',x.text||'');}));if(!hasProof(v.content))box.textContent='No proof has reached this device yet.';}).catch(e=>{box.textContent='Could not open the proof: '+e.message;});}
    return li;}));
  }

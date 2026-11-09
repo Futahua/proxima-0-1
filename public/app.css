@@ -725,7 +725,10 @@ main {width:100%;min-width:0;}
 .exact-inline-name {position:absolute;width:180px;height:42px;box-sizing:border-box;z-index:6;border:1px solid var(--accent);border-radius:3px;background:#a1cc43;color:#17210d;padding:8px 12px;font:inherit;outline:none;}
 .exact-inline-error {position:absolute;bottom:8px;left:8px;z-index:7;color:#f87575;font-size:12px;pointer-events:none;}
 .exact-reordering {opacity:.75;outline:2px solid var(--accent);z-index:5;cursor:grabbing;}
-.exact-follows-now .exact-resize-end {background:#fff8;box-shadow:0 0 6px #fff;}
+.exact-follows-now .exact-resize-end {border-right:0;background:transparent;box-shadow:none;}
+.exact-follows-now .exact-resize-end::after {content:"";position:absolute;right:0;bottom:0;width:2px;height:17px;border-radius:2px;background:linear-gradient(to bottom,transparent,#e5ff9aeb);pointer-events:none;}
+.exact-follows-now .exact-resize-end:hover {border-right:2px solid #e5ff9a;background:#fff8;box-shadow:0 0 6px #fff;}
+.exact-follows-now .exact-resize-end:hover::after {opacity:0;}
 
 .exact-tracks {overflow-x:hidden;overflow-y:auto;min-height:0;}
 .exact-row-extent {width:1px;pointer-events:none;}
@@ -1133,3 +1136,11 @@ html body button.proxima-device-name {background:none;border:0;box-shadow:none;b
 html body button.proxima-device-name:hover,html body button.proxima-device-name:focus-visible {background:none;color:var(--ink);outline:none;}
 
 .exact-queue-notice{position:absolute;left:10px;right:10px;bottom:10px;z-index:90;display:flex;align-items:flex-start;gap:10px;max-width:580px;margin:auto;padding:9px 12px;border:1px solid var(--line,#46545b);border-radius:8px;background:var(--panel,#232b30);color:var(--ink,#e6e9ef);box-shadow:0 4px 18px #0004;font:12px/1.5 system-ui}.exact-queue-notice[hidden]{display:none}.exact-queue-notice button{margin-left:auto;flex:0 0 auto;background:none;border:0;color:inherit;font:20px/1 system-ui;cursor:pointer;padding:0 2px}
+
+/* Underline blobs meet their endpoint without a rounded corner inset. */
+.exact-task-blob{border-radius:0}
+.exact-task-blob>.exact-resize-edge{box-sizing:border-box}
+
+.exact-task-fill{position:absolute;inset:0;width:100%;height:100%;overflow:hidden;pointer-events:none}
+.exact-task-fill[hidden]{display:none}
+.exact-task-blob>.exact-interval-caption{position:relative}

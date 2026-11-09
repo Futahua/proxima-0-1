@@ -106,3 +106,39 @@ test('inward shift extension shrinks either end through the store and refuses an
  const start=await store.command({type:'timeline-queue.extend-selection',payload:{intervalIds:[blob.id],edge:'start',time:iso(base+30000),index:0,reorder:false}});assert.equal(start.ok,true);assert.equal(find().start,iso(base+30000));assert.equal(find().end,iso(base+70000));
  const inverted=await store.command({type:'timeline-queue.extend-selection',payload:{intervalIds:[blob.id],edge:'start',time:iso(base+70000),index:0,reorder:false}});assert.equal(inverted.ok,false);assert.equal(find().start,iso(base+30000));
 });
+
+test('expanded groups compact live members outside the viewed time range',()=>{
+ const stamp=n=>new Date(n).toISOString();
+ const header={id:'group',groupChildren:['early','late'],groupLive:true,start:stamp(0),end:stamp(120)};
+ const early={id:'early',viewRowId:'in:early',groupDepth:1,followNow:true,start:stamp(0),end:stamp(1)};
+ const late={id:'late',viewRowId:'in:late',groupDepth:1,followNow:true,start:stamp(75),end:stamp(76)};
+ const rows=[header,early,late];
+ const project=(from,to)=>Array.from(ctx.ExactTimeline.occupiedLanes(rows,rows,from,to,new Set(),120),row=>row.id);
+ assert.deepEqual(project(20,50),['group','early']);
+ assert.deepEqual(project(80,100),['group','early','late']);
+});
+
+test('Tab preserves the visible current-time fraction across pane geometry changes',()=>{
+ const from=source.indexOf('  let paneTimeAnchor=null;'),to=source.indexOf("  window.addEventListener('proxima:blob-pane-toggle'",from);
+ let viewport={left:0,right:900,width:900},visible=false;
+ const state=vm.createContext({
+  geometry:g,start:550,scale:1,clockNow:()=>1000,animation:0,goal:null,cancelAnimationFrame(){},render(){},
+  element:{getClientRects:()=>[{}]},availableViewport:()=>viewport,document:{querySelector:()=>visible?{}:null}
+ });
+ vm.runInContext(source.slice(from,to),state);
+ state.capturePaneTimeAnchor({detail:{visible:true}});
+ visible=true;viewport={left:100,right:500,width:400};
+ state.paneLayoutChanged();
+ assert.equal(state.start,700);
+ // Move the now line to 75% of the pane's visible width before closing it.
+ state.start=600;
+ state.capturePaneTimeAnchor({detail:{visible:false}});
+ visible=false;viewport={left:0,right:900,width:900};
+ state.paneLayoutChanged();
+ assert.equal(state.start,325);
+ state.start=1100;
+ state.capturePaneTimeAnchor({detail:{visible:true}});
+ visible=true;viewport={left:100,right:500,width:400};
+ state.paneLayoutChanged();
+ assert.equal(state.start,1100);
+});

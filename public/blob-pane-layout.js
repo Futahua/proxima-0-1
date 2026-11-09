@@ -2,7 +2,8 @@
  * Proxima owns template bindings; Papers owns the durable groups, geometry and moves. */
 (function(root){
  'use strict';
- let controller=null,viewport=null,panel=null,enabled=false,loading=null,pane=null;
+ let controller=null,viewport=null,panel=null,taskPanel=null,enabled=false,loading=null,pane=null;
+ const taskTab={id:'blob-task',name:'Task',panel:null};
  const goTab={id:'blob-files',name:'Go',icon:new URL('./template-icons/go.png',location.href).href,panel:null};
  const listeners=new Set();let externalDrag=false,dragTransfer=null,menu=null;
  document.addEventListener('dragstart',event=>{if(enabled&&[...event.dataTransfer.types].some(t=>/application\/x-papers-(native-pane-tab|preview-tab|pane-group|pane-transfer)/.test(t))){externalDrag=event.shiftKey;try{dragTransfer=JSON.parse(event.dataTransfer.getData('application/x-papers-pane-transfer')||'null')?.transferId;}catch{}document.documentElement.classList.add('blob-layout-dragging');}});
@@ -25,21 +26,21 @@
   pane=node;enabled=true;
   if(!controller){
    if(!loading)loading=(async()=>{
-    const {installCoordinatedWindowSlices}=await import('./blob-pane-coordinator.js?v=group-rmb-20261106');
+    const {installCoordinatedWindowSlices}=await import('./blob-pane-coordinator.js?v=responsive-20261108');
     const link=document.createElement('link');link.rel='stylesheet';link.href=new URL('./blob-pane-native.css',location.href).href;document.head.append(link);
     viewport=document.createElement('div');viewport.className='blob-native-viewport';node.parts.body.append(viewport);
-    panel=document.createElement('div');panel.className='blob-native-files';panel.hidden=true;document.body.append(panel);
+    panel=document.createElement('div');panel.className='blob-native-files';panel.hidden=true;document.body.append(panel);taskPanel=document.createElement('div');taskPanel.className='blob-native-task';taskPanel.hidden=true;document.body.append(taskPanel);
     const host={fileCapability:(op,detail)=>root.ProximaWorkspaces.call(op,op==='pane-transfer-overlay'?{...detail,local:!externalDrag}:detail),onPaneLayout:cb=>{listeners.add(cb);return()=>listeners.delete(cb);},
      windowCandidates:detail=>root.ProximaWorkspaces.request('papers:project:window-candidates',detail),
      bindWindowCandidate:candidateId=>root.ProximaWorkspaces.request('papers:project:window-bind-candidate',{candidateId}),
      copyText:text=>root.ProximaWorkspaces.request('papers:project:copy-text',{text}),
      openNewSurface:(url,detail)=>root.ProximaWorkspaces.request('papers:project:open-new-surface',{url,...detail})};
     controller=installCoordinatedWindowSlices({document,host,root:{element:viewport,replaceNativeTabs(){},restoreWindows(){throw Error('Update Papers to use template splits.');}},
-     panels:[Object.assign(goTab,{panel:{element:panel}})],onStatus:status,rootBoundary:true,onTemplatePick:pickTemplates,nativeTabPresentation:tab=>/^AppFlowy(?:$| ·)/i.test(tab.title||'')?{...tab,title:'Flow',icon:new URL('./template-icons/flow.png',location.href).href}:tab,
+     panels:[Object.assign(taskTab,{panel:{element:taskPanel}}),Object.assign(goTab,{panel:{element:panel}})],onStatus:status,rootBoundary:true,onTemplatePick:pickTemplates,nativeTabPresentation:tab=>/^AppFlowy(?:$| ·)/i.test(tab.title||'')?{...tab,title:'Flow',icon:new URL('./template-icons/flow.png',location.href).href}:tab,
      onDragState:active=>{if(!active)finishDrag();},
      onOuterEdge:rect=>{if(!enabled||node.hidden)return;const border=node.getBoundingClientRect().width-viewport.getBoundingClientRect().width;const width=Math.round(rect.width+border);if(Math.abs(node.getBoundingClientRect().width-width)>1){node.classList.remove('blob-pane-full');node.style.width=width+'px';try{localStorage.setItem('proxima.blobPane.width',String(width));localStorage.removeItem('proxima.blobPane.full');}catch{}}},
-     headerActions:tools=>{const task=document.createElement('button');task.type='button';task.textContent='Task';task.title='Current task and task history';task.setAttribute('aria-label','Show current task');task.className='blob-layout-task';task.onclick=()=>root.ProximaBlobWorkspaces.showTask();tools.append(task);const close=document.createElement('button');close.type='button';close.innerHTML='<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 5 7 7-7 7m7-14 7 7-7 7"/></svg>';close.title='Collapse blob workspace';close.setAttribute('aria-label','Collapse blob workspace');close.onclick=()=>root.ProximaBlobWorkspaces.close();tools.append(close);},
-     onSelection:tabId=>{if(String(tabId||'').startsWith('preview:blob-file-'))return;dispatchEvent(new CustomEvent('proxima:blob-template-selected',{detail:{kind:tabId==='preview:blob-files'?'as-you-go':'appflowy'}}));}});
+     headerActions:tools=>{const close=document.createElement('button');close.type='button';close.innerHTML='<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 5 7 7-7 7m7-14 7 7-7 7"/></svg>';close.title='Collapse blob workspace';close.setAttribute('aria-label','Collapse blob workspace');close.onclick=()=>root.ProximaBlobWorkspaces.close();tools.append(close);},
+     onSelection:tabId=>{if(String(tabId||'').startsWith('preview:blob-file-'))return;dispatchEvent(new CustomEvent('proxima:blob-template-selected',{detail:{kind:tabId==='preview:blob-task'?'task':tabId==='preview:blob-files'?'as-you-go':'appflowy',coordinated:true}}));}});
     new MutationObserver(()=>{if(!enabled)return;viewport.hidden=node.hidden;syncOverlay();controller.refresh();}).observe(node,{attributes:true,attributeFilter:['hidden']});
     await controller.restore();
    })().catch(error=>{loading=null;throw error;});
@@ -49,8 +50,8 @@
   // A new iframe must start in a presented panel; Chromium can otherwise leave it blank.
   if(!panel.querySelector('iframe'))await controller.selectPanel('blob-files');return true;
  }
- function disable(){enabled=false;if(viewport)viewport.hidden=true;if(panel)panel.hidden=true;controller?.setOverlay(true);controller?.refresh();pane?.classList.remove('blob-shared-layout');}
- root.ProximaBlobLayout=Object.freeze({ensure,disable,syncOverlay,active:()=>enabled&&!!controller,panel:()=>panel,
+ function disable(){enabled=false;if(viewport)viewport.hidden=true;if(panel)panel.hidden=true;if(taskPanel)taskPanel.hidden=true;controller?.setOverlay(true);controller?.refresh();pane?.classList.remove('blob-shared-layout');}
+ root.ProximaBlobLayout=Object.freeze({ensure,disable,syncOverlay,active:()=>enabled&&!!controller,panel:()=>panel,taskPanel:()=>taskPanel,setTaskName(name){taskTab.name=name||'Task';controller?.refresh();},selectTask:()=>controller.selectPanel('blob-task'),
   setPendingSyncDevices(devices){const name='Go'+devices.map(d=>' '+(d.kind==='phone'?'📱':'💻')+'*').join('');if(goTab.name!==name){goTab.name=name;controller?.refresh();}},
   accept:reply=>{if(reply?.snapshot)controller?.acceptSnapshot(reply.snapshot);},selectFiles:()=>controller.selectPanel('blob-files'),
   async pinPreview(item){
@@ -63,6 +64,7 @@
  .blob-shared-layout,.blob-native-files,.window-slices-region{--surface-raised:var(--panel,#242b33);--surface-soft:#2c343f;--surface:#343f4b;--border-strong:#536272;--border-subtle:#53627280;--text:#e6e9ef;--text-muted:#a6b0bd;--accent:#a8c98d;color:var(--text);font:12px system-ui}
  .blob-layout-dragging .blob-native-files iframe{pointer-events:none}
  .blob-native-viewport{position:absolute;inset:0;pointer-events:none}.blob-native-viewport[hidden]{display:none}
+ .blob-native-task{position:fixed;z-index:1101;box-sizing:border-box;background:var(--panel,#242b33);overflow:hidden;pointer-events:auto}.blob-native-task[hidden]{display:none!important}
  .blob-native-files{position:fixed;z-index:1101;box-sizing:border-box;background:var(--panel,#242b33);overflow:hidden}
  .blob-native-files[hidden]{display:none!important}.blob-native-files iframe{display:block;width:100%;height:100%;border:0}
  .blob-shared-layout>div{position:relative;padding:0}.blob-shared-layout>header{display:none!important}

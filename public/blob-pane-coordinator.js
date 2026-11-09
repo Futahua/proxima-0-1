@@ -3683,6 +3683,15 @@ function dormantWindowDropTarget(group, event) {
   const node = event.target?.closest?.("[data-pane-tab-id]"), id = node?.getAttribute("data-pane-tab-id") || group.selected;
   return group.tabs.find((tab) => tab.id === id && tab.kind === "dormant") || null;
 }
+// A presentation projection only: stored group membership, selections and split tree remain untouched.
+function paneViewportIsMeasurable(element){const r=element.getBoundingClientRect();return !element.hidden&&element.isConnected!==false&&r.width>0&&r.height>0;}
+function paneResponsiveGroups(snapshot) {
+  if (!snapshot.compactGroup) return snapshot.groups;
+  const active = snapshot.groups.find(g => g.id === snapshot.compactGroup) || snapshot.groups[0];
+  if (!active) return [];
+  return [{ ...active, presentation: 'normal', slot: snapshot.viewport,
+    tabs: snapshot.groups.flatMap(g => g.tabs.map(t => ({ ...t, active: t.id === active.selected, sourceGroupId: g.id }))) }];
+}
 function installCoordinatedWindowSlices({ document, host, root, pagePanels = null, panels = null, resolvePreviewDrag = () => null, onSettings = () => {
 }, onPreviews = () => {
 }, onStatus = () => {
@@ -3733,11 +3742,14 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
     viewportMoving = true;
     try {
       while (viewportPending && !disposed) {
+        if(!paneViewportIsMeasurable(root.element)){viewportPending=null;break;}
         const next = viewportPending;
         viewportPending = null;
         const reply = await host.fileCapability("pane-layout-viewport", { rect: next, rootBoundary });
         if (reply?.snapshot) accept(reply.snapshot);
+        if(reply?.ok!==false)onStatus("");
         if (reply?.ok === false) {
+          geometry="";
           if (rootBoundary && snapshot) onOuterEdge(snapshot.viewport);
           if (/Window layout is not mounted/i.test(reply.message || reply.error || "")) {
             mounted = false;
@@ -4007,7 +4019,7 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
       if (operation === "pane-window-select") {
         const tab = snapshot.groups.flatMap((g) => g.tabs).find((t) => t.id === data.tabId);
         if (tab?.kind === "dormant") {
-          await command("select", { groupId: group.id, tabId: data.tabId });
+          await command("select", { groupId: groupFor(data.tabId), tabId: data.tabId });
           if (!tab.canOpen) {
             onStatus("Application unavailable \u2014 the window picker will replace this selected tab.");
             return { ok: true };
@@ -4016,9 +4028,10 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
           if (reply.snapshot) accept(reply.snapshot);
           return reply;
         }
-        return command("select", { groupId: group.id, tabId: data.tabId });
+        return command("select", { groupId: groupFor(data.tabId), tabId: data.tabId });
       }
-      if (operation === "pane-window-reorder") return command("reorder", { groupId: group.id, tabId: data.tabId, beforeId: data.beforeId });
+      if (operation === "pane-window-reorder" && snapshot.compactGroup) return {ok:true};
+      if (operation === "pane-window-reorder") return command("reorder", { groupId: groupFor(data.tabId), tabId: data.tabId, beforeId: data.beforeId });
       if (operation === "pane-window-detach") return command("detach", { tabId: data.tabId });
       if (operation === "pane-window-attach") {
         const current = snapshot.groups.find((g) => g.id === group.id), selected = current?.tabs.find((t) => t.id === current.selected && t.kind === "dormant");
@@ -4076,15 +4089,15 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
   function render() {
     frame = 0;
     if (disposed || !mounted || !snapshot) return;
-    const hidden = root.element.hidden, maximum = snapshot.groups.find((g) => g.presentation === "maximized")?.id;
+    const hidden = root.element.hidden, groups = paneResponsiveGroups(snapshot), maximum = snapshot.compactGroup ? null : snapshot.groups.find((g) => g.presentation === "maximized")?.id;
     region.hidden = hidden;
     region.classList.toggle("slice-page-maximized", Boolean(maximum));
-    for (const [id, view] of views) if (!snapshot.groups.some((g) => g.id === id)) {
+    for (const [id, view] of views) if (!groups.some((g) => g.id === id)) {
       view.native.destroy();
       view.element.remove();
       views.delete(id);
     }
-    const visibleDocuments = new Set(snapshot.groups.filter((g) => !hidden && !overlay && snapshot.presented !== false && g.presentation !== "minimized" && (!maximum || maximum === g.id)).map((g) => g.selected));
+    const visibleDocuments = new Set(groups.filter((g) => !hidden && !overlay && snapshot.presented !== false && g.presentation !== "minimized" && (!maximum || maximum === g.id)).map((g) => g.selected));
     for (const [id, panel] of retainedPreviews) {
       if (!snapshot.groups.some((g) => g.tabs.some((t) => t.id === ref(id)))) {
         panel.destroy();
@@ -4098,7 +4111,7 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
       tab.panel.element.hidden = true;
       tab.panel.setPreviewSuspended?.(true);
     }
-    for (const [index, group] of snapshot.groups.entries()) {
+    for (const [index, group] of groups.entries()) {
       const view = views.get(group.id) || createView(group), box = group.slot;
       view.element.hidden = hidden || Boolean(maximum && maximum !== group.id);
       Object.assign(view.element.style, { left: box.x + "px", top: box.y + "px", width: box.width + "px", height: box.height + "px" });
@@ -4133,7 +4146,7 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
       }
       view.resume.hidden = !group.tabs.some((t) => t.kind === "dormant" && t.canOpen);
       view.close.hidden = snapshot.groups.length < 2 || group.tabs.some((t) => protectedTabs.some((p) => ref(p.id) === t.id));
-      view.handle.disabled = false;
+      view.handle.disabled = false;view.handle.hidden=!!snapshot.compactGroup;view.min.hidden=!!snapshot.compactGroup;view.max.hidden=!!snapshot.compactGroup;if(snapshot.compactGroup)view.close.hidden=true;
       view.railClose.hidden = view.close.hidden;
       view.min.textContent = group.presentation === "minimized" ? "\u2197" : "\u2212";
       view.max.textContent = group.presentation === "maximized" ? "\u2750" : "\u25A1";
@@ -4150,7 +4163,7 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
           protected: Boolean(tab.panel),
           tabStyle: tab.tabStyle,
           onSelect: () => {
-            void (tab.panel || tab.pageKey ? command("select", { groupId: group.id, tabId: t.id }) : selectPreview(tab)).catch(() => {
+            void (tab.panel || tab.pageKey ? command("select", { groupId: groupFor(t.id), tabId: t.id }) : selectPreview(tab)).catch(() => {
             });
           },
           onClose: () => {
@@ -4162,12 +4175,14 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
             });
           },
           onReorder: (beforeId, position) => {
+            if(snapshot.compactGroup)return;
             const before = beforeId ? ref(beforeId) : group.tabs.filter((p) => p.kind === "native")[position?.nativeIndex]?.id || "";
-            void command("reorder", { groupId: group.id, tabId: t.id, beforeId: before }).catch(() => {
+            void command("reorder", { groupId: groupFor(t.id), tabId: t.id, beforeId: before }).catch(() => {
             });
           }
         };
       }).filter(Boolean);
+      if(!view.fitNotice){view.fitNotice=document.createElement('div');view.fitNotice.textContent='Make this pane larger to show this app.';view.fitNotice.style.cssText='position:absolute;inset:40px 10px 10px;color:var(--text-muted,#a6b0bd);font:13px system-ui;pointer-events:none';view.element.append(view.fitNotice);}view.fitNotice.hidden=!snapshot.compactGroup||snapshot.compactFits!==false;
       view.native.setDocumentTabs(docs);
       for (const cb of view.listeners) cb(group.tabs.filter((t) => t.kind === "native" || t.kind === "dormant").map(nativeTabPresentation));
       win.requestAnimationFrame(view.paintContour);
@@ -4188,7 +4203,7 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
         if (!shown) view.preview.element.hidden = true;
         for (const handle of view.preview.element.querySelectorAll(".slice-document-edge")) {
           const edge = handle.className.split("slice-document-").at(-1);
-          handle.hidden = group.presentation !== "normal" || rootBoundary && edge === "left" && group.slot.x <= snapshot.viewport.x + 1 || edge === "right" && group.slot.x + group.slot.width >= snapshot.viewport.x + snapshot.viewport.width - 1 || edge === "top" && group.slot.y <= snapshot.viewport.y + 1 || edge === "bottom" && group.slot.y + group.slot.height >= snapshot.viewport.y + snapshot.viewport.height - 1;
+          handle.hidden = !!snapshot.compactGroup || group.presentation !== "normal" || rootBoundary && edge === "left" && group.slot.x <= snapshot.viewport.x + 1 || edge === "right" && group.slot.x + group.slot.width >= snapshot.viewport.x + snapshot.viewport.width - 1 || edge === "top" && group.slot.y <= snapshot.viewport.y + 1 || edge === "bottom" && group.slot.y + group.slot.height >= snapshot.viewport.y + snapshot.viewport.height - 1;
         }
         if (shown) {
           const r = group.content;
@@ -4198,7 +4213,7 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
       }
     }
     const rect = outer(), next = JSON.stringify(rect);
-    if (next !== geometry) {
+    if (paneViewportIsMeasurable(root.element) && next !== geometry) {
       geometry = next;
       void moveViewport(rect);
     }
@@ -4613,7 +4628,7 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
       if (mounting) return mounting;
       mounting = (async () => {
         let rect = outer();
-        while (!disposed && (rect.width < 240 || rect.height < 192)) {
+        while (!disposed && (!paneViewportIsMeasurable(root.element))) {
           await new Promise((resolve) => win.setTimeout(resolve, 50));
           rect = outer();
         }
@@ -4682,6 +4697,8 @@ function installCoordinatedWindowSlices({ document, host, root, pagePanels = nul
 }
 export {
   GROUP_DRAG_MIME,
+  paneResponsiveGroups,
+  paneViewportIsMeasurable,
   dormantWindowDropTarget,
   installCoordinatedWindowSlices,
   paneSnapshotIsNewer

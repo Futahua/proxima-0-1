@@ -29,3 +29,15 @@ test('changing the countdown keeps the current attempt start; abandon removes th
  assert.deepEqual([...store.timelineIntervals().find(x=>x.id===id).tasks],[]);
  r=await store.command({type:'timeline-interval.task',payload:{intervalId:id,action:'start',name:'x',durationMs:5}});assert.equal(r.code,'PAYLOAD_INVALID');
 });
+
+test('deleting a completed entry preserves other tasks and supports undo',async()=>{
+ const clock={now:T0},store=makeStore(clock),id=await blob(store,clock);
+ const run=payload=>store.command({type:'timeline-interval.task',payload:{intervalId:id,...payload}});
+ const first=(await run({action:'start',name:'First',durationMs:25*MIN})).value.task.id;
+ clock.now+=MIN;await run({action:'complete',taskId:first});
+ const second=(await run({action:'start',name:'Second',durationMs:25*MIN})).value.task.id;
+ const result=await run({action:'delete',taskId:first});assert.equal(result.ok,true);
+ assert.deepEqual(Array.from(store.timelineIntervals().find(x=>x.id===id).tasks,t=>t.id),[second]);
+ const undo=await store.command({type:'timeline.undo',payload:{}});assert.equal(undo.ok,true,undo.code);
+ assert.deepEqual(Array.from(store.timelineIntervals().find(x=>x.id===id).tasks,t=>t.id),[first,second]);
+});

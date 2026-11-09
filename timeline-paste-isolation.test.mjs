@@ -1,0 +1,5 @@
+import test from 'node:test';import assert from 'node:assert/strict';import vm from 'node:vm';import {readFileSync} from 'node:fs';
+const source=readFileSync(new URL('./public/exact-timeline.js',import.meta.url),'utf8');
+const start=source.indexOf("  document.addEventListener('paste',"),end=source.indexOf('\n',start),registration=source.slice(start,end);
+function run({editable=false,prevented=false,readOnly=false}={}){let handler,created=0;const ctx={document:{addEventListener:(k,h)=>handler=h,querySelector:()=>null},element:{getClientRects:()=>[{}]},settings:{readOnly},inlineEditor:null,timeEditor:null,clockNow:()=>0,laneCount:0,createFromText:()=>created++};vm.runInNewContext(registration,ctx);handler({defaultPrevented:prevented,target:{closest:s=>editable&&s.includes('[contenteditable]:not(')},clipboardData:{getData:()=> 'aaa'},preventDefault(){}});return created;}
+test('timeline paste leaves plaintext-only proof editing and already-handled pastes alone',()=>{assert.equal(run({editable:true}),0);assert.equal(run({prevented:true}),0);assert.equal(run({readOnly:true}),0);assert.equal(run(),1);});

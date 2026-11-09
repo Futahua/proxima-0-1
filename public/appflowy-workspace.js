@@ -6,6 +6,7 @@
  'use strict';
  const ORIGIN='https://bop.taild88607.ts.net:8443',desktop=location.protocol==='papers-backpack:',TEMPLATE='appflowy';
  // docked: the native window is placed over this pane and stays running while hidden, so switching back is instant.
+ let suspended=false;
  let surface=null,last=null,openingDocumentId=null,session=null,docked=false,sharedDock=false,nativeUnavailable=false,dockFailure='',generation=0,openGeneration=0,queue=Promise.resolve();
  // Each blob's page as BOP last confirmed it (documentId -> {workspaceId, viewId, url, launchUrl}).
  const CACHE_KEY='proxima.flow.confirmed-pages.v1';
@@ -48,7 +49,7 @@
  // moment native Flow is back, dock it and close the web app, or the web page stays
  // behind the native window and shows around its edges.
  function nativeReturned(snapshot){
-  if(!session||!last||nativeUnavailable)return;
+  if(suspended||!session||!last||nativeUnavailable)return;
   const tabs=(snapshot?.groups||[]).flatMap(group=>group.tabs||[]);
   if(!tabs.some(tab=>tab.kind==='native'&&flowTab(tab)))return;
   const value=last,ticket=generation;
@@ -58,9 +59,22 @@
    if(ticket!==generation||!visible())await release();
   }).catch(()=>{});
  }
- function hide(clear=true){clearTimeout(recoveryTimer);recoveryTimer=null;++generation;if(clear){++openGeneration;last=null;openingDocumentId=null;}return enqueue(release);}
+ function hide(clear=true){suspended=false;clearTimeout(recoveryTimer);recoveryTimer=null;++generation;if(clear){++openGeneration;last=null;openingDocumentId=null;}return enqueue(release);}
+ function suspend(){
+  if(suspended)return queue;
+  suspended=true;
+  clearTimeout(recoveryTimer);recoveryTimer=null;
+  const ticket=++generation;++openGeneration;
+  const browserRect=session&&surface&&!surface.hidden?rect():null;
+  if(surface)surface.hidden=true;
+  return enqueue(async()=>{
+   if(ticket!==generation||!suspended)return;
+   if(docked&&!sharedDock)await call('program-window-visible',{template:TEMPLATE,visible:false}).catch(()=>{});
+   if(session&&browserRect)await call('browser-move',{sessionId:session,rect:{...browserRect,x:-browserRect.width-32}}).catch(()=>{});
+  });
+ }
  function rect(){const r=surface.getBoundingClientRect();return {x:Math.round(r.x),y:Math.round(r.y),width:Math.max(1,Math.round(r.width)),height:Math.max(1,Math.round(r.height))};}
- function visible(){return root.ProximaModalGuard?.blocked()!==true&&last&&surface?.isConnected&&!surface.closest('.blob-workspace-pane')?.hidden&&!document.hidden;}
+ function visible(){return !suspended&&root.ProximaModalGuard?.blocked()!==true&&last&&surface?.isConnected&&!surface.closest('.blob-workspace-pane')?.hidden&&!document.hidden;}
  async function dock(value){
   if(nativeUnavailable||!value.workspaceId)return false;
   // The blob's own page in the home workspace: <workspace>/<page> (or the workspace alone).
@@ -117,6 +131,22 @@
   void Promise.resolve(task).catch(()=>{}).finally(()=>{moving=false;if(movePending)place();});
  }
  async function open(binding,body,name,intervalId){
+  if(suspended&&last?.documentId===binding.documentId&&surface&&(session||docked||surface.querySelector('iframe'))){
+   suspended=false;surface.hidden=false;
+   if(surface.parentElement!==body)body.append(surface);
+   const ticket=++generation;
+   const reused=await enqueue(async()=>{
+    if(ticket!==generation||!visible())return true;
+    if(session)return (await call('browser-move',{sessionId:session,rect:rect()})).ok;
+    if(docked&&!sharedDock)await call('program-window-visible',{template:TEMPLATE,visible:true});
+    place();
+    if(latestNativeSnapshot)recoverNative(latestNativeSnapshot);
+    return true;
+   });
+   if(!reused&&ticket===generation)await present(last);
+   return;
+  }
+  suspended=false;
   if(last?.documentId===binding.documentId&&(session||docked)&&visible()&&!surface.hidden){place();return;}
   await hide();
   const opening=++openGeneration;
@@ -127,7 +157,7 @@
   body.append(surface);
   const pane=body.closest('.blob-workspace-pane');
   openingDocumentId=binding.documentId;
-  if(!pane.__fullAppFlowyObserver){pane.__fullAppFlowyObserver=new MutationObserver(()=>{if(pane.hidden)void hide();});pane.__fullAppFlowyObserver.observe(pane,{attributes:true,attributeFilter:['hidden']});}
+  if(!pane.__fullAppFlowyObserver){pane.__fullAppFlowyObserver=new MutationObserver(()=>{if(pane.hidden)void suspend();});pane.__fullAppFlowyObserver.observe(pane,{attributes:true,attributeFilter:['hidden']});}
   // "Connecting…" only when it actually takes a moment, never on an ordinary tab switch.
   const status=pane.querySelector('[role=status]'),CONNECTING='Connecting to AppFlowy…';
   if(status){status.textContent='';status.hidden=true;}
@@ -177,7 +207,7 @@
   return value;
  }
  function showError(error){const pane=surface?.closest('.blob-workspace-pane'),status=pane?.querySelector('[role=status]');if(status){status.hidden=false;status.textContent='AppFlowy is unavailable. '+error.message;}}
- root.ProximaFullAppFlowy=Object.freeze({open,hide,setModalBlocked(blocked){if(sharedDock)return;if(docked)void call('program-window-visible',{template:TEMPLATE,visible:!blocked&&!!last&&!surface?.closest('.blob-workspace-pane')?.hidden}).catch(showError);else if(blocked&&session)void release();else if(!blocked&&last&&visible())void present(last).catch(showError);}});
+ root.ProximaFullAppFlowy=Object.freeze({open,hide,suspend,setModalBlocked(blocked){if(sharedDock||suspended)return;if(docked)void call('program-window-visible',{template:TEMPLATE,visible:!blocked&&!suspended&&!!last&&!surface?.closest('.blob-workspace-pane')?.hidden}).catch(showError);else if(blocked&&session)void release();else if(!blocked&&!session&&last&&visible())void present(last).catch(showError);}});
  // Leaving the page hands the native window back to the desktop instead of keeping it hidden.
  addEventListener('pagehide',()=>{void hide();if(docked&&!sharedDock){docked=false;void call('program-window-close',{template:TEMPLATE}).catch(()=>{});}});
 })(globalThis);
