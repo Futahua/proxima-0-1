@@ -264,7 +264,7 @@
   for(const type of ['pointerdown','click','dblclick','contextmenu','auxclick'])document.addEventListener(type,farGuard,true);
   // Hovering a header action shows its result on the timeline itself (creator, 2026-11-09): the button's own click
   // logic runs against a preview store, and leaving or pressing the button returns to the real data first.
-  let previewToken=0,glideTimer=0;
+  let previewToken=0,glideTimer=0,previewKept=null;
   function glide(){if(reducedMotion())return;element.classList.add('exact-animating');clearTimeout(glideTimer);glideTimer=setTimeout(()=>element.classList.remove('exact-animating'),320);}
   // During a glide, a blob or label that leaves fades out first instead of vanishing.
   function retire(node){if(!node)return;if(!element.classList.contains('exact-animating')){node.remove();return;}node.classList.add('exact-leaving');setTimeout(()=>node.remove(),300);}
@@ -276,7 +276,7 @@
    let sandbox;try{sandbox=await previewStore(realStore);}catch{return;}
    if(token!==previewToken)return;
    // The action changes view state too (selection, which groups are open, scroll); all of it is put back afterwards.
-   const keptSelection=new Set(selected),keptError=error.textContent,keptExpanded=new Set(expandedGroups),keptScroll=tracks.scrollTop;
+   const keptSelection=new Set(selected),keptError=error.textContent,keptExpanded=new Set(expandedGroups),keptScroll=tracks.scrollTop;previewKept={selection:keptSelection,expanded:keptExpanded};
    previewing=true;store=sandbox;element.classList.add('is-action-preview');glide();
    try{
     if(mode==='create')await sandbox.command({type:'timeline-interval.create',payload:{name:'New blob',color:creationColor(),rowId:target.row?(target.row.rowId||target.row.id):undefined,beforeId:target.row?undefined:before,start:new Date(now).toISOString(),end:new Date(now+1).toISOString(),followNow:true}});
@@ -287,7 +287,7 @@
    if(token!==previewToken)return;
    glide();refresh();
   }
-  function endActionPreview(){previewToken++;if(store===realStore&&!previewing)return;store=realStore;previewing=false;element.classList.remove('is-action-preview');dropPreviewStore();glide();refresh();}
+  function endActionPreview(){previewToken++;if(store===realStore&&!previewing)return;store=realStore;previewing=false;if(previewKept){selected.clear();for(const id of previewKept.selection)selected.add(id);expandedGroups.clear();for(const id of previewKept.expanded)expandedGroups.add(id);previewKept=null;}element.classList.remove('is-action-preview');dropPreviewStore();glide();refresh();}
   for(const button of [addButton,queueButton,deleteButton]){
    button.addEventListener('mouseenter',()=>void previewAction(button));
    button.addEventListener('mouseleave',endActionPreview);
@@ -742,7 +742,7 @@
    return presentedRows;
   }
   function currentSession(row){const sessions=items().filter(x=>(x.rowId||x.id)===(row.rowId||row.id)).sort((a,b)=>Date.parse(a.start)-Date.parse(b.start));return sessions.find(x=>x.followNow)||sessions.filter(x=>Date.parse(x.start)<=clockNow()).at(-1)||sessions[0]||row;}
-  function refresh(){items();renderCrumbs();showQueueNotice();renderSelectionActions();const data=ordered();laneCount=data.length;const ids=new Set(items().map(x=>x.id));for(const id of selected)if(!ids.has(id))selected.delete(id);let maxEnd=-Infinity;layout=items().map(item=>({item,lane:data.findIndex(row=>laneId(row)===laneId(item)),a:Date.parse(item.start),b:item.followNow?Math.max(Date.parse(item.start)+1,clockNow()):Date.parse(item.end)})).sort((x,y)=>x.a-y.a);for(const entry of layout)entry.maxEnd=maxEnd=Math.max(maxEnd,entry.item.followNow?Infinity:entry.b);if(!initialized&&element.clientWidth){initialized=true;if(layout.length){const a=layout[0].a,b=Math.max(...layout.map(x=>x.b));scale=Math.max(1e-10,Math.min(1,(element.clientWidth-80)/(b-a)));start=a-40/scale;}else{scale=element.clientWidth/86400000;start=clockNow()-43200000;}}render();}
+  function refresh(){items();renderCrumbs();showQueueNotice();renderSelectionActions();const data=ordered();laneCount=data.length;const ids=new Set(items().map(x=>x.id));/* a preview shows another state: it must not drop the real selection */if(!previewing)for(const id of selected)if(!ids.has(id))selected.delete(id);let maxEnd=-Infinity;layout=items().map(item=>({item,lane:data.findIndex(row=>laneId(row)===laneId(item)),a:Date.parse(item.start),b:item.followNow?Math.max(Date.parse(item.start)+1,clockNow()):Date.parse(item.end)})).sort((x,y)=>x.a-y.a);for(const entry of layout)entry.maxEnd=maxEnd=Math.max(maxEnd,entry.item.followNow?Infinity:entry.b);if(!initialized&&element.clientWidth){initialized=true;if(layout.length){const a=layout[0].a,b=Math.max(...layout.map(x=>x.b));scale=Math.max(1e-10,Math.min(1,(element.clientWidth-80)/(b-a)));start=a-40/scale;}else{scale=element.clientWidth/86400000;start=clockNow()-43200000;}}render();}
   function addSession(index,t){const row=ordered()[index];open(null,t,index,row.groupChildren?null:row.rowId||row.id);}
   function open(item,t,index=laneCount,rowId=null,followNow=false){if(previewing)return;
    if(inlineEditor){inlineEditor.focus();return;}error.textContent='';
