@@ -325,7 +325,7 @@
    const placements=new Map();for(const span of spans){const home=span.pieces.reduce((best,piece)=>piece.x1-piece.x0>(best?best.x1-best.x0:-1)?piece:best,null)||{top:0,height:1};placements.set(span.child.id,{x0:span.a-left,x1:span.b-left,top:home.top,height:home.height});}
    return {spans,placements};
   }
-  let strandPanStart=null,strandPanScale=null,strandPhase=0;
+  let strandPanStart=null,strandPanScale=null,strandPhase=0,strandEaseFrame=0;
   function advanceStrandPhase(){
    if(strandPanStart!==null&&strandPanScale===scale){
     // One cycle per 360 screen pixels. Vertical scroll and zoom do not advance it.
@@ -352,11 +352,18 @@
    bar.groupPlacements=packed.placements;
    bar.classList.toggle('is-group-open',open);
    const memberOrder=new Map(item.groupLeaves.map((member,index)=>[member.id,index]));
+   // Lanes are shared among the strands on screen, in member order: when a member scrolls out of view the
+   // others spread into its space, easing there over a few frames instead of jumping.
+   const shown=packed.spans.map(span=>memberOrder.get(span.child.id)).sort((x,y)=>x-y),rank=new Map(shown.map((index,i)=>[index,i]));
+   const laneCount=Math.min(Math.max(1,shown.length),10),lanes=bar.strandLanes||(bar.strandLanes=new Map());let easing=false;
    const strands=packed.spans.map(span=>{
     const index=memberOrder.get(span.child.id);
     const a=span.a-left,end=span.b-left,length=end-a;
-    const laneCount=Math.min(item.groupLeaves.length,10);
-    const laneY=21+(index%laneCount-(laneCount-1)/2)*Math.min(3.4,24/Math.max(1,laneCount-1));
+    const target=21+(rank.get(index)%laneCount-(laneCount-1)/2)*Math.min(3.4,24/Math.max(1,laneCount-1));
+    const previous=lanes.get(span.child.id);
+    let laneY=previous===undefined||reducedMotion()?target:previous+(target-previous)*.2;
+    if(Math.abs(target-laneY)<.05)laneY=target;else easing=true;
+    lanes.set(span.child.id,laneY);
     // All lanes share a shallow wave. Their spacing stays constant, even when
     // the viewport clips a member or several members end at the same time.
     const frequency=2*Math.PI/360,phase=reducedMotion()?0:strandPhase;
@@ -373,6 +380,7 @@
     return {d:curve.join(' '),flat:line.join(' '),color:span.child.color||'#a1cc43',a,end,
      taper:Math.min(30,length*.45),fadeStart:span.a>left,fadeEnd:span.b<right};
    });
+   if(easing&&!strandEaseFrame)strandEaseFrame=requestAnimationFrame(()=>{strandEaseFrame=0;render();});
    const signature=JSON.stringify([width,open,strands]);
    const changedMode=layers.wasOpen!==undefined&&layers.wasOpen!==open;
    layers.wasOpen=open;
@@ -731,7 +739,7 @@
   for(const type of ['keydown','keyup'])window.addEventListener(type,event=>{if(!lastMarqueePointer||!marqueeController.isActive(lastMarqueePointer.pointerId)||!['Shift','Control','Meta'].includes(event.key))return;subtract=event.shiftKey;appendMarquee=event.ctrlKey||event.metaKey;marquee.classList.toggle('deselecting',subtract);marqueeController.move(lastMarqueePointer);});
   window.addEventListener('pointerup',event=>{if(marqueeController.isActive(event.pointerId)&&marqueeController.finish(event.pointerId)){suppressContextUntil=performance.now()+400;event.preventDefault();event.stopPropagation();}});
   window.addEventListener('pointercancel',()=>{marqueeController.cancel();selected.clear();for(const id of baseSelection)selected.add(id);refresh();});
-  document.addEventListener('contextmenu',event=>{if(lastMarqueePointer&&marqueeController.isActive(lastMarqueePointer.pointerId)){event.preventDefault();event.stopImmediatePropagation();return;}if(settings.readOnly||!element.getClientRects().length||!selected.size||event.target.closest?.('.exact-color-picker,input,textarea,select,[contenteditable]:not([contenteditable="false"])')||document.querySelector('dialog[open]'))return;event.preventDefault();event.stopImmediatePropagation();if(performance.now()<suppressContextUntil||!marquee.hidden||lastMarqueePointer&&marqueeController.isActive(lastMarqueePointer.pointerId))return;const bar=[...bars.values()].find(node=>selected.has(node.interval.id));if(bar)pickColor(bar,{clientX:event.clientX,clientY:event.clientY,target:element});},true);
+  document.addEventListener('contextmenu',event=>{if(lastMarqueePointer&&marqueeController.isActive(lastMarqueePointer.pointerId)){event.preventDefault();event.stopImmediatePropagation();return;}if(settings.readOnly||!element.getClientRects().length||!selected.size||event.target.closest?.('.exact-color-picker,input,textarea,select,[contenteditable]:not([contenteditable="false"])')||document.querySelector('dialog[open]')||groupGestureOwner(event.target))return;/* right-click on a group always expands/collapses it, selected or not */event.preventDefault();event.stopImmediatePropagation();if(performance.now()<suppressContextUntil||!marquee.hidden||lastMarqueePointer&&marqueeController.isActive(lastMarqueePointer.pointerId))return;const bar=[...bars.values()].find(node=>selected.has(node.interval.id));if(bar)pickColor(bar,{clientX:event.clientX,clientY:event.clientY,target:element});},true);
   element.addEventListener('contextmenu',event=>{if(performance.now()<suppressContextUntil||!marquee.hidden){event.preventDefault();event.stopImmediatePropagation();}},true);
   tracks.addEventListener('click',event=>{if(performance.now()<ignoreClickUntil||event.target.closest?.('.exact-selectable,.exact-outside-name,.exact-resize-edge,.exact-queue-boundary,.exact-deadline-edge,.exact-queue-end,.exact-color-picker,.exact-edge-calendar,.exact-queue-delete,input,button'))return;selected.clear();paintSelection();});
   tracks.addEventListener('dblclick',e=>{if(e.target.closest?.('.exact-interval,.exact-queued-placeholder,input,button,.exact-outside-name,.exact-deadline-edge')||inlineEditor||reordering||resizing||deadlineResize||timeEditor||performance.now()<ignoreClickUntil)return;e.preventDefault();closeColor();const y=e.clientY-tracks.getBoundingClientRect().top+tracks.scrollTop,index=Math.max(0,Math.min(laneCount,Math.floor((y-11)/60)));const t=geometry.time(e.clientX-element.getBoundingClientRect().left,start,scale);if(index<laneCount)addSession(index,t);else open(null,t,index);});
