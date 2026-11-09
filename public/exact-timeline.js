@@ -312,8 +312,7 @@
    button.addEventListener('mouseleave',endActionPreview);
    button.addEventListener('pointerdown',endActionPreview,true);
   }
-  // Task blobs. The clock button opens a name + timer card on hover; starting it creates a task blob where + would
-  // put a blob. Hovering a task blob opens its full timer (with proof) in a card beside it.
+  // The clock starts a task on one eligible selected blob, or creates a standalone task blob.
   const TASK_MINUTES='proxima.timeline.task-blob-minutes';
   function popIn(node){node.getAnimations().forEach(a=>a.cancel());node.hidden=false;if(reducedMotion())return;node.animate([{opacity:0,transform:'translateY(-6px) scale(.96)'},{opacity:1,transform:'none'}],{duration:170,easing:'cubic-bezier(.2,.9,.3,1.2)'});}
   function popOut(node,after){if(node.hidden)return;if(reducedMotion()){node.hidden=true;after?.();return;}node.getAnimations().forEach(a=>a.cancel());const anim=node.animate([{opacity:1,transform:'none'},{opacity:0,transform:'translateY(-6px) scale(.96)'}],{duration:130,easing:'ease-in'});anim.onfinish=()=>{node.hidden=true;after?.();};}
@@ -325,31 +324,71 @@
   timerCard.append(timerName,timerMinutes,timerUnit,timerStart,timerStatus);element.append(timerCard);
   for(const field of [timerName,timerMinutes])field.addEventListener('keydown',event=>{event.stopPropagation();if(event.key==='Enter'){event.preventDefault();void startTaskBlob();}if(event.key==='Escape'){event.preventDefault();closeTimerCard(true);}});
   timerCard.addEventListener('pointerdown',event=>event.stopPropagation());
-  let timerCardClose=0;
-  function openTimerCard(){if(settings.readOnly||far||previewing)return;clearTimeout(timerCardClose);if(!timerCard.hidden)return;let minutes=25;try{const saved=Number(localStorage.getItem(TASK_MINUTES));if(Number.isInteger(saved)&&saved>=1&&saved<=1440)minutes=saved;}catch{}timerMinutes.value=String(minutes);timerStatus.textContent='';popIn(timerCard);const host=element.getBoundingClientRect(),box=timerButton.getBoundingClientRect();timerCard.style.top=(box.bottom-host.top+6)+'px';timerCard.style.right=Math.max(4,host.right-box.right)+'px';}
+  let timerCardClose=0,timerTarget=null;
+  function openTimerCard(){
+   if(settings.readOnly||far||previewing)return;
+   clearTimeout(timerCardClose);
+   if(!timerCard.hidden)return;
+   const item=selected.size===1?allItems().find(item=>selected.has(item.id)):null;
+   timerTarget=item&&!item.groupChildren&&!item.taskBlob&&!item.sourceFollowing&&!item.tasks?.some(task=>!task.completedAt)?item:null;
+   timerName.value=timerTarget?.name||'';
+   let minutes=25;
+   try{const saved=Number(localStorage.getItem(TASK_MINUTES));if(Number.isInteger(saved)&&saved>=1&&saved<=1440)minutes=saved;}catch{}
+   timerMinutes.value=String(minutes);timerStatus.textContent='';popIn(timerCard);
+   const host=element.getBoundingClientRect(),box=timerButton.getBoundingClientRect();
+   timerCard.style.top=(box.bottom-host.top+6)+'px';timerCard.style.right=Math.max(4,host.right-box.right)+'px';
+  }
   function closeTimerCard(now){clearTimeout(timerCardClose);const go=()=>{if(timerCard.contains(document.activeElement)&&!now)return;popOut(timerCard);};if(now)go();else timerCardClose=setTimeout(go,350);}
   timerButton.addEventListener('mouseenter',openTimerCard);timerButton.addEventListener('click',()=>{openTimerCard();timerName.focus();});
   timerButton.addEventListener('mouseleave',()=>closeTimerCard(false));timerCard.addEventListener('mouseenter',()=>clearTimeout(timerCardClose));timerCard.addEventListener('mouseleave',()=>closeTimerCard(false));
   timerName.addEventListener('blur',()=>{if(!timerCard.matches(':hover'))closeTimerCard(false);});
   timerStart.addEventListener('click',()=>void startTaskBlob());
-  async function startTaskBlob(){const name=timerName.value.trim().replace(/s+/g,' '),minutes=Math.round(Number(timerMinutes.value));if(!name){timerStatus.textContent='Name the task first.';timerName.focus();return;}if(!Number.isFinite(minutes)||minutes<1||minutes>1440){timerStatus.textContent='1 to 1440 minutes.';timerMinutes.focus();return;}
-   try{localStorage.setItem(TASK_MINUTES,String(minutes));}catch{}
-   const now=clockNow(),target=freeCreationDestination(now);
-   const result=await store.command({type:'timeline-interval.create',payload:{name,color:creationColor(),rowId:target.row?(target.row.rowId||target.row.id):undefined,beforeId:target.row?undefined:ordered()[target.index]?.id,start:new Date(now).toISOString(),end:new Date(now+1).toISOString(),followNow:true,taskDurationMs:minutes*60000}});
-   if(!result.ok){timerStatus.textContent='Not started: '+result.code;return;}
-   timerName.value='';closeTimerCard(true);refresh();}
+  async function startTaskBlob(){
+   if(timerStart.disabled)return;
+   const name=timerName.value.trim().replace(/\s+/g,' '),minutes=Math.round(Number(timerMinutes.value));
+   if(!name){timerStatus.textContent='Name the task first.';timerName.focus();return;}
+   if(!Number.isFinite(minutes)||minutes<1||minutes>1440){timerStatus.textContent='1 to 1440 minutes.';timerMinutes.focus();return;}
+   const durationMs=minutes*60000;
+   timerStart.disabled=true;
+   try{
+    let result;
+    if(timerTarget){
+     result=await store.command({type:'timeline-interval.task',payload:{intervalId:timerTarget.id,action:'start',name,durationMs}});
+    }else{
+     const now=clockNow(),target=freeCreationDestination(now);
+     result=await store.command({type:'timeline-interval.create',payload:{name,color:creationColor(),rowId:target.row?(target.row.rowId||target.row.id):undefined,beforeId:target.row?undefined:ordered()[target.index]?.id,start:new Date(now).toISOString(),end:new Date(now+1).toISOString(),followNow:true,taskDurationMs:durationMs}});
+    }
+    if(!result.ok){timerStatus.textContent='Not started: '+result.code;return;}
+    try{localStorage.setItem(TASK_MINUTES,String(minutes));}catch{}
+    closeTimerCard(true);refresh();
+   }finally{timerStart.disabled=false;}
+  }
   const taskCard=document.createElement('div');taskCard.className='exact-task-card';taskCard.hidden=true;element.append(taskCard);
   let taskCardFor=null,taskCardPrevious=null,taskCardOpen=0,taskCardClose=0;
   function taskBlobBar(target){const bar=target?.closest?.('.exact-interval,.exact-outside-name');return bar&&bar.interval?.taskBlob&&!bar.interval.groupChildren?bar:null;}
-  function showTaskCard(bar){const tasks=window.ProximaBlobTasks;if(!tasks?.mount||far||previewing)return;clearTimeout(taskCardClose);
+  function showTaskCard(bar){const tasks=window.ProximaBlobTasks;if(!tasks?.mount||far||previewing||!realStore.timelineIntervals().some(item=>item.id===bar.interval.id))return;clearTimeout(taskCardClose);
    if(taskCardFor!==bar.interval.id){if(taskCard.hidden)taskCardPrevious=tasks.current?.()||null;taskCardFor=bar.interval.id;tasks.mount(taskCard,bar.interval.id);}
    const opening=taskCard.hidden||taskCard.getAnimations().length>0;if(opening)popIn(taskCard);const host=element.getBoundingClientRect(),box=bar.getBoundingClientRect(),width=Math.min(560,element.clientWidth-16),height=taskCard.offsetHeight||420;
    let left=Math.min(Math.max(8,box.right-host.left-width),element.clientWidth-width-8),top=box.bottom-host.top+6;if(top+height>element.clientHeight)top=Math.max(8,box.top-host.top-height-6);
    taskCard.style.width=width+'px';taskCard.style.left=left+'px';taskCard.style.top=top+'px';}
-  function hideTaskCard(now){clearTimeout(taskCardOpen);clearTimeout(taskCardClose);const go=()=>{if(taskCard.hidden)return;if(!now&&(taskCard.matches(':hover')||taskCard.contains(document.activeElement)))return;const tasks=window.ProximaBlobTasks,previous=taskCardPrevious;taskCardFor=null;taskCardPrevious=null;popOut(taskCard,()=>{if(taskCardFor)return;if(previous&&!previous.hidden&&previous.container?.isConnected&&previous.container!==taskCard)tasks?.mount(previous.container,previous.intervalId);else tasks?.hide();});};if(now)go();else taskCardClose=setTimeout(go,400);}
+  function hideTaskCard(now){
+   clearTimeout(taskCardOpen);clearTimeout(taskCardClose);
+   const go=()=>{
+    if(taskCard.hidden||!now&&taskCard.matches(':hover'))return;
+    popOut(taskCard,()=>{
+     const tasks=window.ProximaBlobTasks,previous=taskCardPrevious;
+     taskCardFor=null;taskCardPrevious=null;
+     if(previous&&!previous.hidden&&previous.container?.isConnected&&previous.container!==taskCard)tasks?.mount(previous.container,previous.intervalId);
+     else tasks?.hide();
+    });
+   };
+   if(now)go();else taskCardClose=setTimeout(go,120);
+  }
   tracks.addEventListener('pointerover',event=>{const bar=taskBlobBar(event.target);if(!bar)return;clearTimeout(taskCardClose);clearTimeout(taskCardOpen);taskCardOpen=setTimeout(()=>{if(bar.isConnected&&bar.matches(':hover'))showTaskCard(bar);},250);});
   tracks.addEventListener('pointerout',event=>{if(taskBlobBar(event.target)&&!taskBlobBar(event.relatedTarget))hideTaskCard(false);});
-  taskCard.addEventListener('mouseenter',()=>clearTimeout(taskCardClose));taskCard.addEventListener('mouseleave',()=>hideTaskCard(false));
+  taskCard.addEventListener('mouseenter',()=>{clearTimeout(taskCardClose);if(taskCard.getAnimations().length)popIn(taskCard);clearRegionHover();blobName.classList.remove('is-visible');nameLeader.classList.remove('is-visible');});
+  taskCard.addEventListener('mouseleave',()=>hideTaskCard(false));
+  taskCard.addEventListener('pointermove',event=>event.stopPropagation());
   taskCard.addEventListener('pointerdown',event=>event.stopPropagation());taskCard.addEventListener('wheel',event=>event.stopPropagation());
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!taskCard.hidden){hideTaskCard(true);}},true);
   const steps=[1,10,100,1000,5000,15000,60000,300000,900000,3600000,10800000,21600000,43200000,86400000,604800000,2592000000,31536000000];

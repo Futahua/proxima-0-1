@@ -101,7 +101,7 @@
  }
 
  function mount(container,intervalId){
-  if(view&&view.node.parentElement!==container){view.node.remove();clearInterval(view.timer);view=null;}
+  if(view&&view.node.parentElement!==container){void flushProof();view.node.remove();clearInterval(view.timer);view=null;}
   if(!view){view={...build(container),intervalId:null,taskId:null,doc:null,revision:null,dirty:false,saving:null,saveTimer:0,editingTime:false,openHistory:new Set(),lastKey:''};wire();view.timer=setInterval(tick,1000);}
   view.node.hidden=false;
   if(view.intervalId!==intervalId){void flushProof();view.intervalId=intervalId;view.taskId=null;view.doc=null;view.openHistory.clear();view.lastKey='';view.parts.name.value='';}
@@ -151,14 +151,15 @@
  function paintEditor(doc){const proof=view.parts.proof;proof.replaceChildren(...doc.blocks.map(b=>b.type==='image'?figureBlock(b):textBlock(b.text||'')));ensureTrailingText();}
  async function addPictures(files,after){view.parts.saved.textContent='Adding picture…';try{let anchor=after;for(const file of files){const b=await shrinkPicture(file);const fig=figureBlock({type:'image',...b});if(anchor)anchor.after(fig);else{const last=view.parts.proof.lastElementChild;if(last?.classList.contains('text')&&!last.textContent)last.before(fig);else view.parts.proof.append(fig);}anchor=fig;}ensureTrailingText();changed();}catch(e){view.parts.saved.textContent='Could not add the picture: '+e.message;}}
  function changed(){if(!view.taskId)return;view.doc=readEditor();if(JSON.stringify(view.doc).length>DOC_LIMIT){view.parts.saved.textContent='Too much for one proof: remove a picture.';return;}view.dirty=true;view.parts.saved.textContent='Saving…';clearTimeout(view.saveTimer);view.saveTimer=setTimeout(()=>void flushProof(),600);renderDone();}
- function flushProof(){if(!view)return Promise.resolve();clearTimeout(view.saveTimer);const run=async()=>{if(!view.dirty||!view.taskId)return;const taskId=view.taskId,doc=view.doc;view.dirty=false;
-   try{let r=await docs.save(proofId(taskId),doc,view.revision);
+ function flushProof(){const owner=view;if(!owner)return Promise.resolve();clearTimeout(owner.saveTimer);const {taskId,doc,revision}=owner;if(!owner.dirty||!taskId)return owner.saving||Promise.resolve();owner.dirty=false;
+  const run=async()=>{
+   try{let r=await docs.save(proofId(taskId),doc,owner.taskId===taskId?owner.revision:revision);
     // Another device saved this proof meanwhile: it is the same person, so the newest typing wins.
     if(!r.ok&&r.code==='DOCUMENT_CHANGED'&&!(r.conflicts||[]).length)r=await docs.save(proofId(taskId),doc,r.revision??null);
     if(!r.ok)throw Error(r.conflicts?.length?'two devices changed this proof at once':'it changed elsewhere');
-    if(view.taskId===taskId)view.revision=r.revision;if(view.taskId===taskId&&!view.dirty)view.parts.saved.textContent='Saved';}
-   catch(e){if(view.taskId===taskId){view.dirty=true;view.parts.saved.textContent='Not saved: '+e.message;}}};
-  return view.saving=(view.saving||Promise.resolve()).then(run,run);}
+    if(owner.taskId===taskId)owner.revision=r.revision;if(owner.taskId===taskId&&!owner.dirty)owner.parts.saved.textContent='Saved';}
+   catch(e){if(owner.taskId===taskId){if(owner.doc===doc)owner.dirty=true;owner.parts.saved.textContent='Not saved: '+e.message;}}};
+  return owner.saving=(owner.saving||Promise.resolve()).then(run,run);}
 
  async function loadProof(taskId){view.taskId=taskId;view.doc=emptyProof();view.revision=null;view.dirty=false;paintEditor(view.doc);view.parts.saved.textContent='';
   try{const v=await readProof(taskId);if(view.taskId!==taskId||view.dirty)return;view.doc=v.content;view.revision=v.revision;paintEditor(v.content);if(v.conflicts.length)view.parts.saved.textContent='Two devices changed this proof at once; the newest is shown.';}catch(e){view.parts.saved.textContent='Could not open the proof: '+e.message;}renderDone();}
@@ -166,7 +167,9 @@
 
  function tick(){if(view&&!view.node.hidden)render();}
  function render(force){
-  if(!view)return;const p=view.parts,item=blobOf(view.intervalId);if(!item){p.status.textContent='This blob no longer exists.';return;}
+  if(!view)return;const p=view.parts,item=blobOf(view.intervalId);
+  if(!item){p.status.textContent='This blob no longer exists.';view.blobMissing=true;return;}
+  if(view.blobMissing){p.status.textContent='';view.blobMissing=false;}
   p.name.placeholder=item.name||'Task';
   const running=runningOf(item),now=Date.now();
   if(running&&view.taskId!==running.id)void loadProof(running.id);
