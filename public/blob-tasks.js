@@ -22,6 +22,12 @@
  function attempt(task,now=Date.now()){const s=Date.parse(task.startedAt),d=task.durationMs;if(now<=s)return {start:s,end:s+d,index:1};const k=Math.floor((now-s)/d);return {start:s+k*d,end:s+(k+1)*d,index:k+1};}
  /** Filled stretches of a blob: one per completed task, from its attempt start to ✓. */
  function fills(item){return tasksOf(item).filter(t=>t.completedAt&&Number.isFinite(Date.parse(t.completedAt))).map(t=>({start:Date.parse(t.startedAt),end:Date.parse(t.completedAt)})).filter(x=>x.end>x.start);}
+ function runningFill(item,now){
+  const task=runningOf(item);
+  if(!task||now<Date.parse(task.startedAt))return null;
+  const start=item.taskBlob?Date.parse(task.startedAt):attempt(task,now).start;
+  return {start,end:Math.max(start+1,now)};
+ }
  const clockText=ms=>{const total=Math.max(0,Math.ceil(ms/1000)),h=Math.floor(total/3600),m=Math.floor(total%3600/60),s=total%60,two=n=>String(n).padStart(2,'0');return h?h+' : '+two(m)+' : '+two(s):m+' : '+two(s);};
  const timeText=ms=>new Date(ms).toLocaleTimeString('en-GB',{timeZone:ZONE,hour:'2-digit',minute:'2-digit'});
  const dayText=ms=>new Date(ms).toLocaleDateString('en-GB',{timeZone:ZONE,day:'numeric',month:'short'});
@@ -195,5 +201,5 @@
   let owner=t;while(owner&&!owner.taskKey&&!owner.classList?.contains('blob-task'))owner=owner.parentElement;try{owner?.taskKey?.(e);}finally{e.stopImmediatePropagation();}},true);
  addEventListener('proxima:remote-imported',()=>{if(view&&!view.node.hidden)render(true);});
  addEventListener('proxima-sync:local-change',()=>{if(view&&!view.node.hidden)render();});
- root.ProximaBlobTasks=Object.freeze({mount,hide,fills,flush:()=>flushProof(),running:id=>runningOf(blobOf(id)),current:()=>view?{container:view.node.parentElement,intervalId:view.intervalId,hidden:view.node.hidden}:null});
+ root.ProximaBlobTasks=Object.freeze({mount,hide,fills,attempt,runningFill,flush:()=>flushProof(),running:id=>runningOf(blobOf(id)),current:()=>view?{container:view.node.parentElement,intervalId:view.intervalId,hidden:view.node.hidden}:null});
 })(globalThis);

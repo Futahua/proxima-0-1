@@ -66,4 +66,5 @@
 /* Task blobs carry no contents button, checkbox, end handles or arrow; a draining ring (green to red) sits where the arrow would. */
 .exact-interval.is-task-blob .exact-blob-content,.exact-interval.is-task-blob .exact-name-check,.exact-outside-name.is-task-blob .exact-name-check,.exact-interval.is-task-blob .exact-resize-edge,.exact-interval.is-task-blob .exact-deadline-edge{display:none!important}
 .exact-task-ring{display:flex;align-items:center;justify-content:center;color:inherit}.exact-task-ring svg{width:1.25em;height:1.25em;display:block}
+.exact-task-ring.exact-task-ring-beside-arrow{left:calc(var(--exact-end-control-left, 100% + .4em) + 1.6em + 4px)}
 .exact-task-ring:hover{background:#ffffff16;border-radius:999px}.exact-task-ring-arc{transition:stroke .6s linear}

@@ -985,7 +985,7 @@ main {width:100%;min-width:0;}
 .exact-outside-name {display:flex;align-items:center;height:42px;box-sizing:border-box;}
 .exact-name-check {flex:0 0 1em;}
 
-.exact-unlink {position:absolute;left:calc(100% + .4em);top:50%;transform:translateY(-50%);font-size:1em;width:1.6em;height:1.6em;min-width:0;min-height:0;padding:0;border:0;background:transparent;color:var(--ink,#e4e7ec);cursor:pointer;z-index:12;line-height:1;}
+.exact-unlink {position:absolute;left:var(--exact-end-control-left, calc(100% + .4em));top:50%;transform:translateY(-50%);font-size:1em;width:1.6em;height:1.6em;min-width:0;min-height:0;padding:0;border:0;background:transparent;color:var(--ink,#e4e7ec);cursor:pointer;z-index:12;line-height:1;}
 .exact-unlink:hover {background:#ffffff16;border-radius:3px;}
 .exact-interval:has(> .exact-unlink) {overflow:visible;}
 .exact-cursor-strip {position:absolute;top:101px;bottom:0;width:1px;background:#ffffff35;pointer-events:none;z-index:28;}

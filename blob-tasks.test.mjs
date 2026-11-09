@@ -9,6 +9,25 @@ function makeStore(clock){const memory=new Map();const RealDate=Date;class FakeD
  const c=vm.createContext({Date:FakeDate,location:{search:'',protocol:'file:',hostname:'',port:''},localStorage:{getItem:k=>memory.get(k)??null,setItem:(k,v)=>memory.set(k,v),removeItem:k=>memory.delete(k)},URLSearchParams,structuredClone,crypto:webcrypto,console,setTimeout,clearTimeout});
  vm.runInContext(storeCode+'\nglobalThis.store=Store;',c);return c.store;}
 const T0=Date.parse('2026-11-08T10:00:00Z'),MIN=60000;
+test('a running fill grows from the current attempt and becomes a completed fill',async()=>{
+ const code=await readFile(new URL('./public/blob-tasks.js',import.meta.url),'utf8');
+ const context=vm.createContext({addEventListener(){},document:{createElement:()=>({}),head:{append(){}}}});
+ vm.runInContext(code,context);
+ const {runningFill,fills}=context.ProximaBlobTasks;
+ const clock={now:T0},store=makeStore(clock),id=await blob(store,clock);
+ const item=()=>store.timelineIntervals().find(x=>x.id===id);
+ const run=payload=>store.command({type:'timeline-interval.task',payload:{intervalId:id,...payload}});
+ const started=await run({action:'start',name:'Read',durationMs:10*MIN});
+ assert.equal(started.ok,true,started.code);
+ clock.now+=2*MIN;
+ assert.deepEqual({...runningFill(item(),clock.now)},{start:T0,end:clock.now});
+ clock.now+=10*MIN;
+ const span={start:T0+10*MIN,end:clock.now};
+ assert.deepEqual({...runningFill(item(),clock.now)},span);
+ assert.equal((await run({action:'complete',taskId:started.value.task.id})).ok,true);
+ assert.equal(runningFill(item(),clock.now),null);
+ assert.deepEqual(Array.from(fills(item()),fill=>({...fill})),[span]);
+});
 async function blob(store,clock){const r=await store.command({type:'timeline-interval.create',payload:{name:'Blob',start:new Date(T0-3600000).toISOString(),end:new Date(T0+3600000).toISOString()}});assert.equal(r.ok,true,r.code);return r.value.id;}
 test('a task completes from its attempt start, and a missed countdown restarts on its own',async()=>{
  const clock={now:T0};const store=makeStore(clock);const id=await blob(store,clock);
