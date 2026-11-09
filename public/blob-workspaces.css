@@ -21,6 +21,9 @@
 .exact-group-connector{position:absolute;left:0;width:100%;pointer-events:none;overflow:hidden}
 .exact-group-connector path{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;opacity:.8}
 .exact-group-ghost{transition:none!important}
+.exact-timeline .exact-interval,.exact-timeline .exact-queued-placeholder{height:var(--exact-blob-height,42px)}
+.exact-far .exact-outside-name,.exact-far .exact-interval-caption,.exact-far .exact-blob-content,.exact-far .exact-row-nav,.exact-far .exact-unlink,.exact-far .exact-resize-edge,.exact-far .exact-deadline-edge,.exact-far .exact-hover-name{display:none!important}
+.exact-far .exact-interval,.exact-far .exact-queued-placeholder{cursor:zoom-in}
 .exact-group-crumbs{display:inline-flex;align-items:center;gap:2px;min-width:0;max-width:min(60vw,640px);overflow:hidden;font-size:12px;color:var(--dim,#a6b0bd)}
 .exact-group-crumbs[hidden]{display:none}
 .exact-group-crumb{display:inline-flex;align-items:center;gap:4px;max-width:160px;flex:0 1 auto;overflow:hidden;padding:2px 5px;border:0;border-radius:4px;background:transparent;color:inherit;font:inherit;white-space:nowrap;cursor:pointer}
