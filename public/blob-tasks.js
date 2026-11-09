@@ -172,9 +172,10 @@
   if(running&&view.taskId!==running.id)void loadProof(running.id);
   if(!running&&view.taskId){void flushProof();view.taskId=null;view.doc=null;paintEditor(emptyProof());}
   if(document.activeElement!==p.name)p.name.value=running?running.name:p.name.value&&!force?p.name.value:'';
-  p.stop.hidden=!running;p.proof.classList.toggle('is-disabled',!running);if(!running)p.saved.textContent='';
+  p.name.disabled=!!item.taskBlob&&!running;p.stop.hidden=!running;p.proof.classList.toggle('is-disabled',!running);if(!running)p.saved.textContent='';p.list.parentElement.hidden=!!item.taskBlob;
   p.ring.classList.toggle('is-idle',!running);
-  if(running){const a=attempt(running,now),left=a.end-now;p.time.textContent=clockText(left);p.arc.style.strokeDashoffset=String(p.C*(1-left/running.durationMs));p.note.textContent='🔔 '+timeText(a.end)+(a.index>1?' · restarted':'');}
+  if(running){const a=attempt(running,now),left=a.end-now;p.time.textContent=clockText(left);p.arc.style.strokeDashoffset=String(p.C*(1-left/running.durationMs));p.note.textContent='🔔 '+timeText(a.end)+(a.index>1?' · restarted':'');if(item.taskBlob&&a.index>1){p.time.textContent=clockText(0);p.note.textContent='Time is up';}}
+  else if(item.taskBlob){const t=tasksOf(item)[0];p.time.textContent=t?clockText(Date.parse(t.completedAt)-Date.parse(t.startedAt)):'';p.arc.style.strokeDashoffset='0';p.note.textContent=t?'Done '+timeText(Date.parse(t.completedAt)):'';}
   else{const ms=durationOf(item);p.time.textContent=clockText(ms);p.arc.style.strokeDashoffset='0';p.note.textContent='Name a task to start';}
   renderDone();
   const done=tasksOf(item).filter(t=>t.completedAt).sort((a,b)=>Date.parse(b.completedAt)-Date.parse(a.completedAt)),key=JSON.stringify(done.map(t=>[t.id,t.name,t.completedAt]));
@@ -191,5 +192,5 @@
   let owner=t;while(owner&&!owner.taskKey&&!owner.classList?.contains('blob-task'))owner=owner.parentElement;try{owner?.taskKey?.(e);}finally{e.stopImmediatePropagation();}},true);
  addEventListener('proxima:remote-imported',()=>{if(view&&!view.node.hidden)render(true);});
  addEventListener('proxima-sync:local-change',()=>{if(view&&!view.node.hidden)render();});
- root.ProximaBlobTasks=Object.freeze({mount,hide,fills,flush:()=>flushProof(),running:id=>runningOf(blobOf(id))});
+ root.ProximaBlobTasks=Object.freeze({mount,hide,fills,flush:()=>flushProof(),running:id=>runningOf(blobOf(id)),current:()=>view?{container:view.node.parentElement,intervalId:view.intervalId,hidden:view.node.hidden}:null});
 })(globalThis);

@@ -53,3 +53,13 @@
 .exact-group-title>.exact-name-text{position:relative;color:#f3f6fa;-webkit-text-fill-color:#f3f6fa;text-shadow:0 1px 2px #151a20}
 
 .exact-group-title>.exact-name-text::after{content:"";position:absolute;z-index:-1;pointer-events:none;inset:-2px -7px;border-radius:5px;background:color-mix(in srgb,var(--group-title-glow,#758995) 24%,#20262d)}
+/* Task blobs: the clock button card (name + minutes) and the timer card that opens over a task blob. */
+.exact-timer-card{position:absolute;z-index:30;display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px;background:var(--panel,#242b33);border:1px solid #394353;border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.45);color:#e6e9ef;font:13px system-ui}
+.exact-timer-card[hidden],.exact-task-card[hidden]{display:none}
+.exact-timer-card input{background:#1b2027;border:1px solid #394353;color:#e6e9ef;border-radius:4px;padding:4px 6px;font:13px system-ui;outline:none}
+.exact-timer-card input:focus{border-color:var(--accent,#a1cc43)}
+.exact-timer-card input:not([type=number]){width:190px}.exact-timer-card input[type=number]{width:58px}
+.exact-timer-card button{background:transparent;border:1px solid var(--accent,#a1cc43);color:var(--accent,#a1cc43);border-radius:4px;padding:3px 10px;cursor:pointer;font:13px system-ui}
+.exact-timer-card small{flex-basis:100%;color:#e59a8f}.exact-timer-card small:empty{display:none}
+.exact-task-card{position:absolute;z-index:30;height:420px;border:1px solid #394353;border-radius:8px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.5);background:var(--panel,#242b33)}
+.exact-far .exact-timer-card,.exact-far .exact-task-card{display:none!important}
