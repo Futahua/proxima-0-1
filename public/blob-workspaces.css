@@ -63,3 +63,7 @@
 .exact-timer-card small{flex-basis:100%;color:#e59a8f}.exact-timer-card small:empty{display:none}
 .exact-task-card{position:absolute;z-index:30;height:420px;border:1px solid #394353;border-radius:8px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.5);background:var(--panel,#242b33)}
 .exact-far .exact-timer-card,.exact-far .exact-task-card{display:none!important}
+/* Task blobs carry no contents button, checkbox, end handles or arrow; a draining ring (green to red) sits where the arrow would. */
+.exact-interval.is-task-blob .exact-blob-content,.exact-interval.is-task-blob .exact-name-check,.exact-outside-name.is-task-blob .exact-name-check,.exact-interval.is-task-blob .exact-resize-edge,.exact-interval.is-task-blob .exact-deadline-edge{display:none!important}
+.exact-task-ring{display:flex;align-items:center;justify-content:center;color:inherit}.exact-task-ring svg{width:1.25em;height:1.25em;display:block}
+.exact-task-ring:hover{background:#ffffff16;border-radius:999px}.exact-task-ring-arc{transition:stroke .6s linear}
