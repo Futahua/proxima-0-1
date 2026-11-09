@@ -242,9 +242,13 @@
   // The free row is picked from every row, not just the ones the current zoom shows, so + lands in the same
   // place at any zoom. A row out of view takes the slot it will appear in.
   function freeCreationDestination(time){
-   const visible=ordered(),all=durableOrdered(),row=firstFreeRow(all,items(),time,new Set(queues().map(row=>row.id)));
-   if(!row)return {row:null,index:0};
-   const key=laneId(row),shown=visible.findIndex(x=>laneId(x)===key);if(shown>=0)return {row:visible[shown],index:shown};
+   // A group counts as a row too: when the first free row is a group, the new blob takes a new row in its place.
+   const visible=ordered(),all=durableOrdered(),data=items(),queued=new Set(queues().map(row=>row.id));
+   const first=all.find(row=>!row.groupDepth&&!row.queuePlaceholder&&!queued.has(row.rowId||row.id)&&(row.groupChildren?!row.groupLive&&!row.followNow&&Date.parse(row.end)<=time:firstFreeRow([row],data,time,queued)));
+   if(!first)return {row:null,index:0};
+   const row=first.groupChildren?null:first,key=laneId(first);
+   if(!row){const at=visible.findIndex(x=>laneId(x)===key);if(at>=0)return {row:null,index:at};const rank=new Map(all.map((x,i)=>[laneId(x),i]));return {row:null,index:visible.filter(x=>(rank.get(laneId(x))??Infinity)<rank.get(key)).length};}
+   const shown=visible.findIndex(x=>laneId(x)===key);if(shown>=0)return {row:visible[shown],index:shown};
    const rank=new Map(all.map((x,i)=>[laneId(x),i]));return {row,index:visible.filter(x=>(rank.get(laneId(x))??Infinity)<rank.get(key)).length};
   }
   function textDestination(point){const data=items(),rows=ordered(),duration=point.linked?1:Math.max(1,Math.round(160/scale)),end=point.linked?Infinity:point.time+duration;const free=row=>!queues().some(x=>x.id===(row.rowId||row.id))&&!data.some(x=>(x.rowId||x.id)===(row.rowId||row.id)&&point.time<(x.followNow?Infinity:Date.parse(x.end))&&Date.parse(x.start)<end);if(point.onPlus)return freeCreationDestination(point.time);const row=rows[point.index];return {row:row&&free(row)?row:null,index:point.index};}
