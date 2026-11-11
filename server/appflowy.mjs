@@ -13,6 +13,28 @@ const origin='https://bop.taild88607.ts.net:8443',internal='http://127.0.0.1:482
 const HOME_WORKSPACE='This is Minh',HOME_SPACE='Proxima';
 const identity=value=>typeof value==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(value);
 const uuid=value=>typeof value==='string'&&/^[a-f0-9-]{36}$/i.test(value);
+const iconBytesLimit=256*1024;
+async function timelineIcon(icon,workspaceId,headers){
+  if(typeof icon?.value!=='string')return null;
+  if(icon.ty===0&&icon.value.length<=32)return 'emoji:'+icon.value;
+  if(icon.ty!==1||icon.value.length>2048)return null;
+  let url;
+  try{url=new URL(icon.value);}catch{return null;}
+  if(url.protocol!=='https:')return null;
+  if(url.origin!==origin||!url.pathname.startsWith('/api/file_storage/'+workspaceId+'/'))return url.href;
+  const response=await fetch(internal+url.pathname+url.search,{headers,redirect:'error',signal:AbortSignal.timeout(5000)});
+  const type=response.headers.get('content-type')?.split(';')[0];
+  if(!response.ok||!/^image\/(png|jpeg|gif|webp)$/.test(type||'')||!response.body){
+    await response.body?.cancel();return null;
+  }
+  const chunks=[];let total=0;
+  for await(const chunk of response.body){
+    total+=chunk.length;
+    if(total>iconBytesLimit)return null;
+    chunks.push(chunk);
+  }
+  return 'data:'+type+';base64,'+Buffer.concat(chunks).toString('base64');
+}
 export function createAppFlowy(directory){
   const configPath=path.join(directory,'appflowy-private.json'),linksPath=path.join(directory,'appflowy-links.json');
   let tail=Promise.resolve();
@@ -48,29 +70,44 @@ export function createAppFlowy(directory){
     if(links.home?.workspaceId!==workspaceId||links.home?.spaceId!==space.view_id){links.home={workspaceId,spaceId:space.view_id};await persist(links);}
 
     // The blob's page, if it still exists outside the trash.
-    const alive=async viewId=>{
-      try{const page=await json('/api/workspace/'+workspaceId+'/page-view/'+viewId,{headers});if(page.code!==0||!page.data?.view)return false;}
+    const liveView=async viewId=>{
+      let view;
+      try{const page=await json('/api/workspace/'+workspaceId+'/page-view/'+viewId,{headers});if(page.code!==0||!page.data?.view)return null;view=page.data.view;}
       catch(error){if(error.status===404)return false;throw error;}
       // Only the trashed pages' own ids count; their neighbour/parent fields name other pages.
       const trashed=new Set(),collect=view=>{if(!view)return;if(view.view_id)trashed.add(view.view_id);if(view.view?.view_id)trashed.add(view.view.view_id);(view.children||[]).forEach(collect);};
       ((await api('/api/workspace/'+workspaceId+'/trash'))?.views||[]).forEach(collect);
-      return !trashed.has(viewId);
+      return trashed.has(viewId)?null:view;
     };
     let entry=links.items[request.documentId];
     let viewId=entry?.workspaceId===workspaceId&&uuid(entry.viewId)?entry.viewId:null;
-    if(viewId&&!entry.pending&&!await alive(viewId))viewId=null;
+    const view=viewId&&!entry.pending?await liveView(viewId):null;
+    if(viewId&&!entry.pending&&!view)viewId=null;
+    let name=request.name;
     if(!viewId||entry.pending){
       // The page id is chosen before asking AppFlowy, so a retried open can never make two pages.
       const id=viewId&&entry?.pending?viewId:randomUUID();
       links.items[request.documentId]={workspaceId,viewId:id,pending:true};await persist(links);
-      if(!await alive(id).catch(()=>false)){
+      if(!await liveView(id)){
         const created=await api('/api/workspace/'+workspaceId+'/page-view',{method:'POST',body:JSON.stringify({parent_view_id:space.view_id,layout:0,name:request.name,view_id:id,collab_id:id})});
         if(created?.view_id&&created.view_id!==id)throw Error('AppFlowy did not confirm the blob page.');
       }
-      viewId=id;links.items[request.documentId]={workspaceId,viewId};await persist(links);
+      viewId=id;links.items[request.documentId]={workspaceId,viewId,name};await persist(links);
+    }else if(typeof view.name==='string'&&view.name.trim()&&view.name.length<=200){
+      // Compare both names with their last shared value. A Flow rename wins if
+      // both sides changed independently, and the page ID stays the same.
+      const awaitingBlob=entry.previousBlobName!==undefined&&name===entry.previousBlobName;
+      if(view.name===entry.name&&name!==entry.name&&!awaitingBlob){
+        await api('/api/workspace/'+workspaceId+'/page-view/'+viewId+'/update-name',{method:'POST',body:JSON.stringify({name})});
+      }else name=view.name;
+      const previousBlobName=name===request.name?undefined:request.name;
+      if(entry.name!==name||entry.previousBlobName!==previousBlobName){
+        links.items[request.documentId]={workspaceId,viewId,name,previousBlobName};await persist(links);
+      }
     }
+    const iconUrl=await timelineIcon(view?.icon,workspaceId,headers).catch(()=>undefined);
     const url=origin+'/app/'+encodeURIComponent(workspaceId)+'/'+encodeURIComponent(viewId);
-    return {workspaceId,viewId,url,launchUrl:origin+'/papers-launch#'+new URLSearchParams({workspace_id:workspaceId,view_id:viewId,access_token:session.access_token,refresh_token:session.refresh_token,token_type:'bearer',expires_in:String(session.expires_in||3600)})};
+    return {workspaceId,viewId,name,iconUrl,url,launchUrl:origin+'/papers-launch#'+new URLSearchParams({workspace_id:workspaceId,view_id:viewId,access_token:session.access_token,refresh_token:session.refresh_token,token_type:'bearer',expires_in:String(session.expires_in||3600)})};
   }
   return {open:request=>{const work=tail.catch(()=>{}).then(()=>ensure(request));tail=work;return work;}};
 }

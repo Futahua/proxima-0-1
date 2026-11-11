@@ -130,6 +130,15 @@
   const task=session?call('browser-move',{sessionId:session,rect:rect()}):docked?call('program-window-move',{template:TEMPLATE,rect:rect()}):null;
   void Promise.resolve(task).catch(()=>{}).finally(()=>{moving=false;if(movePending)place();});
  }
+ function refreshConfirmedPage(binding,name,intervalId,opening){
+  void ask(binding,name,intervalId).then(value=>{
+   if(opening!==openGeneration||last?.documentId!==binding.documentId)return;
+   const next={url:value.url,launchUrl:value.launchUrl,workspaceId:value.workspaceId,viewId:value.viewId,documentId:binding.documentId};
+   const moved=next.workspaceId!==last.workspaceId||next.viewId!==last.viewId;
+   rememberPage(binding.documentId,next);last=next;
+   if(moved&&visible())void present(last).catch(showError);
+  }).catch(()=>{});
+ }
  async function open(binding,body,name,intervalId){
   if(suspended&&last?.documentId===binding.documentId&&surface&&(session||docked||surface.querySelector('iframe'))){
    suspended=false;surface.hidden=false;
@@ -144,6 +153,7 @@
     return true;
    });
    if(!reused&&ticket===generation)await present(last);
+   if(ticket===generation)refreshConfirmedPage(binding,name,intervalId,openGeneration);
    return;
   }
   suspended=false;
@@ -174,11 +184,7 @@
    if(opening!==openGeneration)return;
    if(docked||!visible()){
     settled();
-    void ask(binding,name,intervalId).then(value=>{
-     if(opening!==openGeneration)return;
-     const next=remember(value);rememberPage(binding.documentId,next);
-     if(next.workspaceId!==last.workspaceId||next.viewId!==last.viewId){last=next;void present(last).catch(showError);}else last=next;
-    }).catch(()=>{});
+    refreshConfirmedPage(binding,name,intervalId,opening);
     return;
    }
   }
@@ -201,7 +207,12 @@
    if(!value||!value.url.startsWith(ORIGIN+'/app/')||!value.launchUrl?.startsWith(ORIGIN+'/papers-launch#'))throw Error('BOP did not confirm the AppFlowy workspace.');
    const item=Store.timelineIntervals().find(item=>item.id===intervalId),current=(item?.templates||[]).find(b=>b.kind==='appflowy');
    if(!current||current.documentId!==binding.documentId)throw Error('This blob template changed while AppFlowy was opening.');
-   if(current.appflowyWorkspaceId!==value.workspaceId||current.appflowyPageId!==value.viewId){const saved=await Store.command({type:'timeline-interval.template',ifRev:item.rev,payload:{intervalId,template:'appflowy',appflowyWorkspaceId:value.workspaceId,appflowyPageId:value.viewId,expectedDocumentId:binding.documentId}});if(!saved.ok)throw Error('This blob changed before its AppFlowy link was saved.');}
+   const iconChanged=value.iconUrl!==undefined&&(current.appflowyIconUrl??null)!==value.iconUrl;
+   if(current.appflowyWorkspaceId!==value.workspaceId||current.appflowyPageId!==value.viewId||iconChanged){const saved=await Store.command({type:'timeline-interval.template',ifRev:item.rev,payload:{intervalId,template:'appflowy',appflowyWorkspaceId:value.workspaceId,appflowyPageId:value.viewId,...(value.iconUrl!==undefined?{appflowyIconUrl:value.iconUrl}:{}),expectedDocumentId:binding.documentId}});if(!saved.ok)throw Error('This blob changed before its AppFlowy link was saved.');}
+   const latest=Store.timelineIntervals().find(item=>item.id===intervalId);
+   if(latest?.name===name&&typeof value.name==='string'&&value.name.trim()&&value.name.length<=200&&value.name!==name){
+    await Store.command({type:'timeline-interval.patch',ifRev:latest.rev,payload:{intervalId,patch:{name:value.name}}});
+   }
   }
   if(!value)throw Error('Open this AppFlowy template in Papers on one of your connected devices first.');
   return value;

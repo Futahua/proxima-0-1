@@ -18,7 +18,7 @@
   syncOverlay();
   const close=()=>{menu?.remove();menu=null;document.removeEventListener('pointerdown',outside,true);document.removeEventListener('keydown',key,true);syncOverlay();};
   const outside=event=>{if(!menu?.contains(event.target))close();},key=event=>{if(event.key==='Escape'){event.preventDefault();close();}};
-  for(const option of pane.parts.select.options){if(!option.value)continue;const button=document.createElement('button');button.type='button';button.setAttribute('role','menuitem');button.textContent=option.textContent;button.onclick=()=>{close();void root.ProximaBlobWorkspaces.chooseTemplate(option.value).catch(status);};menu.append(button);}
+  for(const option of pane.parts.select.options){if(!option.value)continue;const button=document.createElement('button');button.type='button';button.setAttribute('role','menuitem');button.textContent=option.disabled?'Open '+option.textContent:option.textContent;button.onclick=()=>{close();void root.ProximaBlobWorkspaces.chooseTemplate(option.value).catch(status);};menu.append(button);}
   const box=header.getBoundingClientRect();Object.assign(menu.style,{left:box.left+'px',top:box.bottom+'px'});document.body.append(menu);
   setTimeout(()=>{if(menu){document.addEventListener('pointerdown',outside,true);document.addEventListener('keydown',key,true);}},0);
  }

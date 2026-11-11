@@ -736,7 +736,7 @@ const Store = (() => {
    *   { ok: false, ... refusal }
    */
   function ensureTimelineRows(){state.timelineRows=Array.isArray(state.timelineRows)?state.timelineRows:[];state.timelineIntervals.forEach((item,index)=>{item.rowId=item.rowId||item.id;if(!state.timelineRows.some(row=>row.id===item.rowId))state.timelineRows.push({id:item.rowId,name:item.name||'Activity',color:item.color||'#a1cc43',rowOrder:Number.isFinite(item.rowOrder)?item.rowOrder:index});});}
-  function overlapsSession(candidate,exclude){return state.timelineIntervals.some(item=>item.id!==exclude&&item.rowId===candidate.rowId&&Date.parse(candidate.start)<(item.followNow?Infinity:Date.parse(item.end))&&Date.parse(item.start)<(candidate.followNow?Infinity:Date.parse(candidate.end)));}
+  function overlapsSession(candidate,exclude,validatedGroup){return state.timelineIntervals.some(item=>item.id!==exclude&&item.id!==validatedGroup&&item.rowId===candidate.rowId&&Date.parse(candidate.start)<(item.followNow?Infinity:Date.parse(item.end))&&Date.parse(item.start)<(candidate.followNow?Infinity:Date.parse(candidate.end)));}
   // Queue proportions are durable; their current endpoints are a read-time projection.
   function queueForInterval(id){return state.timelineRows.find(row=>row.queue?.ids?.includes(id));}
   function queueProjection(row,now=Date.now(),sessions=state.timelineIntervals){return ProximaRemoteDomain.queueProjection(row,sessions,now);}
@@ -823,7 +823,7 @@ const Store = (() => {
     put('timeline-interval.reorder',{intervalId:key,beforeId:nullable(str)},['intervalId']);
     put('timeline-interval.delete-batch',selection,['intervalIds']);
     put('timeline-interval.reorder-batch',{...selection,beforeId:nullable(str)},['intervalIds']);
-    put('timeline-interval.template',{intervalId:key,template:{enum:['as-you-go','appflowy',null]},removeKind:{enum:['as-you-go','appflowy']},renew:bool,appflowyWorkspaceId:key,appflowyPageId:key,expectedDocumentId:key},['intervalId','template']);
+    put('timeline-interval.template',{intervalId:key,template:{enum:['as-you-go','appflowy',null]},removeKind:{enum:['as-you-go','appflowy']},renew:bool,appflowyWorkspaceId:key,appflowyPageId:key,appflowyIconUrl:nullable(str),expectedDocumentId:key},['intervalId','template']);
     put('timeline-interval.task',{intervalId:key,action:{enum:['start','rename','duration','default-duration','complete','abandon','delete']},taskId:key,name:key,durationMs:integer},['intervalId','action']);
     put('timeline-interval.move-selection',{...selection,rowId:nullable(str),newRow:bool,times:array(object({id:key,start:instant,end:instant},['id','start','end']))},['intervalIds']);
     put('timeline-group.ungroup',{groupId:key,revisions},['groupId']);
@@ -1466,8 +1466,15 @@ const Store = (() => {
       if(payload.appflowyPageId!==undefined){
         if(kind!=='appflowy'||!existing||payload.renew||payload.expectedDocumentId!==existing.documentId||typeof payload.appflowyPageId!=='string'||!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(payload.appflowyPageId)||!payload.appflowyWorkspaceId)return refuse('PAYLOAD_INVALID',{reason:'A confirmed Flow page requires its current document binding and workspace.'});
         next={...next,appflowyPageId:payload.appflowyPageId};
+        if(existing.appflowyPageId!==payload.appflowyPageId)delete next.appflowyIconUrl;
+        if(payload.appflowyIconUrl!==undefined){
+          const value=payload.appflowyIconUrl;
+          if(value!==null&&!ProximaRemoteDomain.validFlowIcon(value))return refuse('PAYLOAD_INVALID',{});
+          if(value===null)delete next.appflowyIconUrl;else next.appflowyIconUrl=value;
+        }
       }
-      if(next&&payload.appflowyWorkspaceId){if(next.appflowyWorkspaceId&&next.appflowyWorkspaceId!==payload.appflowyWorkspaceId&&!payload.appflowyPageId)delete next.appflowyPageId;next={...next,appflowyWorkspaceId:payload.appflowyWorkspaceId};}
+      if(payload.appflowyIconUrl!==undefined&&!payload.appflowyPageId)return refuse('PAYLOAD_INVALID',{});
+      if(next&&payload.appflowyWorkspaceId){if(next.appflowyWorkspaceId&&next.appflowyWorkspaceId!==payload.appflowyWorkspaceId&&!payload.appflowyPageId){delete next.appflowyPageId;delete next.appflowyIconUrl;}next={...next,appflowyWorkspaceId:payload.appflowyWorkspaceId};}
       const templates=bindings.filter(binding=>binding.kind!==kind);if(next)templates.push(next);
       return {ok:true,apply:()=>{if(JSON.stringify(item.templates??bindings)===JSON.stringify(templates))return {changed:false,value:{...item}};const before=structuredClone(item);item.templates=templates;item.template=templates.find(binding=>binding.kind==='as-you-go')??null;return {changed:true,entity:{kind:'timeline-interval',id:item.id},before,after:structuredClone(item),value:{...item}};}};
     },
@@ -1505,16 +1512,25 @@ const Store = (() => {
     'timeline-interval.create'(payload) {
       const parentGroup=payload.parentGroupId&&state.timelineIntervals.find(x=>x.id===payload.parentGroupId&&x.groupChildren);
       if(payload.parentGroupId&&(!parentGroup||payload.parentGroupRev!==parentGroup.rev))return refuse('HISTORY_CONFLICT',{});
-      if(payload.rowId&&state.timelineIntervals.some(x=>x.groupChildren&&x.rowId===payload.rowId))return refuse('GROUP_DERIVED_RANGE',{});
+      const rowGroup=payload.rowId&&state.timelineIntervals.find(x=>x.groupChildren&&x.rowId===payload.rowId);
       if(typeof payload.name!=='string'||!payload.name.trim())return refuse('NAME_REQUIRED',{});
       if(typeof payload.start!=='string'||typeof payload.end!=='string'||!/(Z|[+-]\d\d:\d\d)$/i.test(payload.start)||!/(Z|[+-]\d\d:\d\d)$/i.test(payload.end))return refuse('INTERVAL_TIME_INVALID',{});
       const start=Date.parse(payload.start),end=Date.parse(payload.end);
       if(!Number.isFinite(start)||!Number.isFinite(end)||end<=start)return refuse('INTERVAL_TIME_INVALID',{});
+      if(rowGroup){
+        const byId=new Map(state.timelineIntervals.map(item=>[item.id,item])),seen=new Set();
+        function finishedBefore(item){
+          if(!item||seen.has(item.id))return false;
+          seen.add(item.id);
+          return item.groupChildren?item.groupChildren.length>0&&item.groupChildren.every(id=>finishedBefore(byId.get(id))):!item.followNow&&Date.parse(item.end)<=start;
+        }
+        if(!finishedBefore(rowGroup))return refuse('GROUP_DERIVED_RANGE',{});
+      }
       const rowOrder=intervalRowPosition(payload.beforeId);if(rowOrder===null)return refuse('INTERVAL_NOT_FOUND',{});
       if(payload.rowId&&!state.timelineRows.some(x=>x.id===payload.rowId))return refuse('INTERVAL_NOT_FOUND',{});if(payload.rowId&&state.timelineRows.find(x=>x.id===payload.rowId)?.queue?.ids?.length)return refuse('QUEUE_LINKED_EDGE',{});
       if(payload.color!==undefined&&!/^#[0-9a-f]{6}$/i.test(payload.color))return refuse('PAYLOAD_INVALID',{});const item={...(payload.color?{color:payload.color}:{}),rowId:payload.rowId||null,rowOrder,followNow:payload.followNow===true,id:id('interval'),name:payload.name.trim().slice(0,200),start:new Date(start).toISOString(),end:new Date(end).toISOString(),rev:1,createdAt:new Date().toISOString()};
       if(payload.taskDurationMs!==undefined){const d=payload.taskDurationMs;if(!Number.isSafeInteger(d)||d<60000||d>24*3600000)return refuse('PAYLOAD_INVALID',{reason:'taskDurationMs must be 1 minute to 24 hours'});if(payload.parentGroupId)return refuse('TASK_BLOB_GROUP',{});item.taskBlob=true;item.followNow=true;item.tasks=[{id:id('task'),name:item.name.slice(0,300),startedAt:item.start,durationMs:d,completedAt:null}];}
-      item.rowId=item.rowId||item.id;const previousLive=payload.rowId?state.timelineIntervals.find(x=>x.rowId===item.rowId&&x.followNow&&Date.parse(x.start)<start):null;const now=Date.now();if(previousLive&&start<=now){item.followNow=true;item.end=new Date(Math.max(start+1,now)).toISOString();if(previousLive.deadline)item.deadline=previousLive.deadline;}if(overlapsSession(item,previousLive?.id))return refuse('INTERVAL_OVERLAP',{});
+      item.rowId=item.rowId||item.id;const previousLive=payload.rowId?state.timelineIntervals.find(x=>x.rowId===item.rowId&&x.followNow&&Date.parse(x.start)<start):null;const now=Date.now();if(previousLive&&start<=now){item.followNow=true;item.end=new Date(Math.max(start+1,now)).toISOString();if(previousLive.deadline)item.deadline=previousLive.deadline;}if(overlapsSession(item,previousLive?.id,rowGroup?.id))return refuse('INTERVAL_OVERLAP',{});
       return {ok:true,apply:()=>{if(previousLive){previousLive.followNow=false;previousLive.end=new Date(Math.max(Date.parse(previousLive.start)+1,Math.min(start,now))).toISOString();previousLive.rev++;}state.timelineIntervals.push(item);if(parentGroup){parentGroup.groupChildren.push(item.id);parentGroup.rev++;}return {value:{...item},entity:{kind:'timeline-interval',id:item.id},before:null,after:{...item},changed:true,created:true};}};
     },
     'timeline-interval.patch'(payload,ctx) {

@@ -6,8 +6,9 @@
  'use strict';
  const ROOT='ayg-root',pageQuery=new URL(location.href).searchParams,projectTab=pageQuery.get('blob-project');
  const bindings=item=>item?.templates??(item?.template?[item.template]:[]);
+ let settingUpSharedLayout=0;
  let activeKind=pageQuery.get('blob-template')||null;
- addEventListener('proxima:blob-template-selected',event=>{if(pane?.hidden)return;activeKind=event.detail.kind;if(event.detail.coordinated)void selectSharedTemplate(activeKind);});
+ addEventListener('proxima:blob-template-selected',event=>{if(pane?.hidden||settingUpSharedLayout)return;activeKind=event.detail.kind;if(event.detail.coordinated)void selectSharedTemplate(activeKind);});
  let pane,frame,frameFolder=null,selected,origin,chain=Promise.resolve();const flushes=new Map();
  const folders=new Map(); // folderId -> {exists,binned,name,icon}, from the synced root
  const isV2=item=>item?.template?.kind==='as-you-go'&&item.template.version===2&&typeof item.template.folderId==='string';
@@ -19,13 +20,21 @@
   return null;
  }
  /** For the timeline's blob button: whether the blob has a folder, and the folder's picture. */
- function button(item){return propagated(item)?{propagated:true,icon:imageOf(folders.get(item.template?.folderId)?.icon)}:{propagated:false,icon:null};}
+ function button(item){return propagated(item)?{propagated:true,icon:bindings(item).find(binding=>binding.kind==='appflowy')?.appflowyIconUrl||imageOf(folders.get(item.template?.folderId)?.icon)}:{propagated:false,icon:null};}
  function refreshTimelines(){document.querySelectorAll('.exact-timeline').forEach(node=>root.ExactTimeline?.mount(node,Store)?.refresh());}
  let reading=null;
  function readFolders(){return reading??=(async()=>{try{
-  const next=await root.ProximaWorkspaces.folders(ROOT),before=JSON.stringify([...folders]);
+  const next=await root.ProximaWorkspaces.folders(ROOT),previous=new Map(folders),before=JSON.stringify([...folders]);
   folders.clear();for(const [id,value] of Object.entries(next))folders.set(id,value);
-  if(JSON.stringify([...folders])!==before)refreshTimelines();
+  if(JSON.stringify([...folders])!==before){
+   for(const item of Store.timelineIntervals()){
+    if(!isV2(item))continue;
+    const id=item.template.folderId,old=previous.get(id),folder=folders.get(id);
+    if(!old?.exists||old.binned||!folder?.exists||folder.binned||old.name!==item.name||folder.name===old.name)continue;
+    await Store.command({type:'timeline-interval.patch',ifRev:item.rev,payload:{intervalId:item.id,patch:{name:folder.name}}});
+   }
+   refreshTimelines();
+  }
  }catch{}finally{reading=null;}})();}
  addEventListener('proxima:workspace-changed',()=>void readFolders());
  void readFolders();
@@ -96,11 +105,10 @@
   if(activeKind==='task'){await showTask(item);return;}
   root.ProximaBlobTasks?.hide();
   const shared=location.protocol==='papers-backpack:'&&bindings(item).some(b=>b.kind==='appflowy')&&isV2(item)&&!folders.get(item.template.folderId)?.binned;
-  if(shared){const requestedKind=activeKind;await root.ProximaFullAppFlowy?.suspend();root.ProximaBlobLayout.setTaskName(item.name);await root.ProximaBlobLayout.ensure(pane,await prepareTemplate());activeKind=requestedKind;if(frame&&frame.parentElement!==root.ProximaBlobLayout.panel()){frame.style.visibility='hidden';frameReady=false;root.ProximaBlobLayout.panel().append(frame);}}
+  if(shared){const requestedKind=activeKind;await root.ProximaFullAppFlowy?.suspend();root.ProximaBlobLayout.setTaskName(item.name);settingUpSharedLayout++;try{await root.ProximaBlobLayout.ensure(pane,await prepareTemplate());}finally{settingUpSharedLayout--;}if(request!==openSequence)return;activeKind=requestedKind;if(frame&&frame.parentElement!==root.ProximaBlobLayout.panel()){frame.style.visibility='hidden';frameReady=false;root.ProximaBlobLayout.panel().append(frame);}}
   else {root.ProximaBlobLayout?.disable();if(frame&&frame.parentElement!==pane.parts.body){frame.style.visibility='hidden';frameReady=false;pane.parts.body.append(frame);}}
   renderTemplateTabs(item);
-  if(activeKind==='appflowy'&&bindings(item).some(b=>b.kind==='appflowy'))startEditor(item,request);
-  if(!shared&&activeKind==='appflowy'&&bindings(item).some(b=>b.kind==='appflowy')){cancelNavigation();note('');if(frame)frame.hidden=true;pane.classList.add('has-folder');pane.parts.loading.hidden=true;pane.parts.status.hidden=true;pane.parts.conflicts.hidden=true;return;}
+  if(activeKind==='appflowy'&&bindings(item).some(b=>b.kind==='appflowy')){cancelNavigation();note('');if(frame)frame.hidden=true;pane.classList.add('has-folder');pane.parts.loading.hidden=true;pane.parts.status.hidden=true;pane.parts.conflicts.hidden=true;startEditor(item,request);return;}
   if(!shared)void root.ProximaFullAppFlowy?.hide();
   if(isV2(item)&&!folders.has(item.template.folderId))await readFolders();
   if(request!==openSequence)return;
@@ -150,11 +158,14 @@
    pane.hidden=false;
    root.ProximaBlobLayout?.syncOverlay();
    startEditor(item,++openSequence);
-  }else void open(id,selected===id?activeKind||'task':'task');
+  }else void open(id,selected===id?activeKind:undefined);
   return true;
  }
  function startEditor(item,request){void openEditor(bindings(item).find(b=>b.kind==='appflowy')).catch(error=>{if(request!==openSequence||selected!==item.id||pane.hidden)return;pane.parts.status.hidden=false;pane.parts.status.textContent=error.message;});}
- function open(id,kind='task'){if(kind)activeKind=kind;localStorage.setItem('proxima.blobPane.last',id);const request=++openSequence;cancelNavigation();chain=chain.catch(()=>{}).then(()=>request===openSequence?mount(id,request):undefined).catch(e=>{if(request!==openSequence)return;build();pane.hidden=false;pane.parts.status.hidden=false;pane.parts.status.textContent=e.message;});return chain;}
+ function open(id,kind){
+  const item=Store.timelineIntervals().find(x=>x.id===id);
+  // The native Flow tab must be attached again in each Papers session.
+  activeKind=kind||(location.protocol==='papers-backpack:'&&!pageQuery.has('papers-phone')&&bindings(item).some(binding=>binding.kind==='appflowy')?'appflowy':'task');localStorage.setItem('proxima.blobPane.last',id);const request=++openSequence;cancelNavigation();chain=chain.catch(()=>{}).then(()=>request===openSequence?mount(id,request):undefined).catch(e=>{if(request!==openSequence)return;build();pane.hidden=false;pane.parts.status.hidden=false;pane.parts.status.textContent=e.message;});return chain;}
  // A file pane that is unloading (a blob switch reloads it) closes its hosted previews on the way out;
  // that message arrives with no source any more. Forward just those closes, or the preview stays on screen.
  addEventListener('message',event=>{const v=event.data;if(frame&&event.source===null&&event.origin===origin&&v?.workspaceId===ROOT&&v.type==='proxima:workspace:request'&&v.method==='file'&&/^preview-[a-z]+-close$/.test(v.args?.[0])&&typeof v.args[1]?.sessionId==='string'){void Promise.resolve(root.ProximaWorkspaces.frameCall(ROOT,'file',[v.args[0],{sessionId:v.args[1].sessionId}])).catch(()=>{});}});
@@ -175,8 +186,9 @@
    const result=await command.apply(Store,args),c=args[0];
    if(result?.ok&&c?.type==='timeline-interval.patch'&&typeof c.payload?.patch?.name==='string'){
     const item=Store.timelineIntervals().find(x=>x.id===c.payload.intervalId);
-    if(isV2(item)&&folders.get(item.template.folderId)?.exists)void root.ProximaWorkspaces.ensureFolder(ROOT,item.template.folderId,item.name).then(()=>readFolders()).catch(()=>{});
+    if(isV2(item)&&folders.get(item.template.folderId)?.exists&&folders.get(item.template.folderId).name!==item.name)void root.ProximaWorkspaces.ensureFolder(ROOT,item.template.folderId,item.name).then(()=>readFolders()).catch(()=>{});
    }
+   if(result?.ok&&c?.type==='timeline-interval.template'&&c.payload?.appflowyIconUrl!==undefined)refreshTimelines();
    return result;
   };
  }
@@ -213,13 +225,18 @@
   try{if(location.protocol==='papers-backpack:')await root.ProximaWorkspaces.request('papers:project:open-new-surface',{url:url.href,inlineGroupId:'sibling'});else window.open(url.href,'_blank','noopener');}
   catch(error){build();pane.hidden=false;pane.parts.status.hidden=false;pane.parts.status.textContent=error.message;}
  }
- async function openEditor(binding){
+ let openingFlow=null;
+ function openEditor(binding){
   if(!root.ProximaFullAppFlowy)throw Error('The full AppFlowy app is unavailable. Reload this page.');
-  return root.ProximaFullAppFlowy.open(binding,pane.parts.body,pane.parts.title.textContent,selected);
+  if(openingFlow?.id===binding.documentId)return openingFlow.promise;
+  const request={id:binding.documentId};
+  const body=pane.parts.body,name=pane.parts.title.textContent,id=selected;
+  request.promise=Promise.resolve().then(()=>root.ProximaFullAppFlowy.open(binding,body,name,id)).finally(()=>{if(openingFlow===request)openingFlow=null;});
+  openingFlow=request;return request.promise;
  }
  async function chooseTemplate(kind){const item=Store.timelineIntervals().find(x=>x.id===selected);if(!item)return;if(bindings(item).some(b=>b.kind===kind)){await flush();activeKind=kind;return mount(selected);}pane.parts.select.value=kind;return pane.parts.select.onchange();}
  root.ProximaBlobWorkspaces=Object.freeze({showTask:()=>{if(selected)void open(selected,'task');},open,toggle,lastOpened:()=>selected||localStorage.getItem('proxima.blobPane.last'),close:closePane,openProjectTab,flush,button,prewarm,chooseTemplate});
- if(projectTab){document.documentElement.classList.add('blob-project-page');const start=()=>{const item=Store.timelineIntervals().find(x=>x.id===projectTab);if(item){document.title=item.name;void open(projectTab);}else setTimeout(start,100);};setTimeout(start,0);}
+ if(projectTab){document.documentElement.classList.add('blob-project-page');const start=()=>{const item=Store.timelineIntervals().find(x=>x.id===projectTab);if(item){document.title=item.name;void open(projectTab,pageQuery.get('blob-template'));}else setTimeout(start,100);};setTimeout(start,0);}
  // Papers asks every page to save before a reload. A page whose surface Papers already counts as closed cannot
  // reach Papers to save ("This surface is no longer open"); that must not cancel the reload. Other failures still do.
  const surfaceGone=error=>/surface is no longer open/i.test(String(error?.message||error));

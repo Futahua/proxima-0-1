@@ -54,10 +54,12 @@
  .blob-task-title button{font:12px system-ui;color:#c3ccd6;background:transparent;border:1px solid #536272;border-radius:6px;padding:4px 9px;cursor:pointer}
  .blob-task-main{display:flex;gap:26px;align-items:flex-start;flex-wrap:wrap}
  .blob-task-ring{position:relative;width:240px;height:240px;flex:none}
- .blob-task-ring svg{position:absolute;inset:0;transform:rotate(-90deg)}
- .blob-task-ring .track{stroke:#ffffff10}.blob-task-ring .arc{stroke:#8fb0e0;transition:stroke-dashoffset .9s linear}
+ .blob-task-ring>svg{position:absolute;inset:0;transform:rotate(-90deg)}
+ .blob-task-ring .track{stroke:#ffffff10}.blob-task-ring .arc{stroke:#8fb0e0}
  .blob-task-ring.is-idle .arc{stroke:#8fb0e055}
- .blob-task-clock{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px}
+ .blob-task-dial{max-width:100%;flex:none}
+ .blob-task-clock{position:static;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px}
+ .blob-task-ring>.exact-timer-crank{position:absolute;top:50%;left:50%;width:48%;transform:translate(-50%,-50%)}
  .blob-task-clock button{font:300 44px system-ui;letter-spacing:1px;color:#e6e9ef;background:transparent;border:0;cursor:pointer;padding:0 6px;border-radius:8px}
  .blob-task-clock button:hover{background:#ffffff0c}
  .blob-task-clock input{width:110px;font:300 36px system-ui;text-align:center;color:#e6e9ef;background:#ffffff0c;border:1px solid #536272;border-radius:8px}
@@ -95,25 +97,51 @@
   const node=el('section','blob-task');node.setAttribute('aria-label','Current task');
   const title=el('div','blob-task-title'),name=el('input');name.placeholder='Current task';name.maxLength=300;name.setAttribute('aria-label','Task name');const stop=el('button',null,'Give up');stop.type='button';stop.title='Drop the running task without recording it';title.append(name,stop);
   const main=el('div','blob-task-main'),ring=el('div','blob-task-ring');const R=108,C=2*Math.PI*R;ring.innerHTML=`<svg viewBox="0 0 240 240"><circle class="track" cx="120" cy="120" r="${R}" fill="none" stroke-width="5"/><circle class="arc" cx="120" cy="120" r="${R}" fill="none" stroke-width="5" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="0"/></svg>`;
-  const clock=el('div','blob-task-clock'),time=el('button');time.type='button';time.title='Set the countdown';const note=el('small');clock.append(time,note);ring.append(clock);
+  const clock=el('div','blob-task-clock'),time=el('button');time.type='button';time.title='Set the countdown';const note=el('small');clock.append(time,note);
+  const dial=el('div','blob-task-dial');dial.append(ring,clock);
+  let dragTarget=null;
+  const crank=root.ExactTimeline.createTimerCrank({
+   getMinutes:()=>{const item=blobOf(view?.intervalId);return (runningOf(item)?.durationMs??durationOf(item))/MIN;},
+   onGrab:()=>{dragTarget=view?.intervalId;},
+   getElapsedMinutes:()=>{
+    const item=blobOf(view?.intervalId),running=runningOf(item);
+    if(!running)return 0;
+    const now=Date.now(),current=attempt(running,now);
+    return item.taskBlob&&current.index>1?running.durationMs/MIN:Math.max(0,now-current.start)/MIN;
+   },
+   onTurn:(minutes,elapsed)=>{
+    time.textContent=clockText((minutes-elapsed)*MIN);
+    ring.querySelector('.arc').style.strokeDashoffset=String(C*Math.min(1,elapsed/minutes));
+   },
+   onCommit:async minutes=>{
+    if(!dragTarget||view?.intervalId!==dragTarget)return;
+    const item=blobOf(dragTarget),running=runningOf(item),durationMs=minutes*MIN;
+    if(!item||item.taskBlob&&!running)return;
+    const previous=running?.durationMs??durationOf(item);
+    if(durationMs===previous){render(true);return;}
+    await command(running?{action:'duration',taskId:running.id,durationMs}:{action:'default-duration',durationMs});
+   },
+   onRelease:()=>{dragTarget=null;render();}
+  });
+  ring.append(crank.element);
   const side=el('div','blob-task-proof-side'),proof=el('div','blob-task-proof');proof.setAttribute('aria-label','Proof of completion');
   const tools=el('div','blob-task-proof-tools'),saved=el('span'),pick=el('label',null),file=el('input');pick.title='Add picture';pick.setAttribute('aria-label','Add picture');pick.innerHTML='<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M15 3H4a1 1 0 0 0-1 1v16h17V10M16 5h6m-3-3v6M3 17l5-5 4 4 3-3 5 5"/><circle cx="8" cy="7" r="1"/></svg>';pick.tabIndex=0;pick.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();file.click();}};file.type='file';file.accept='image/*';file.multiple=true;file.hidden=true;pick.append(file);tools.append(saved,pick);
   const done=el('button','blob-task-done','✓');done.type='button';done.title='Done: needs some proof first';done.setAttribute('aria-label','Mark task done');side.append(proof,tools,done);
-  main.append(ring,side);
+  main.append(dial,side);
   const status=el('p','blob-task-status');status.setAttribute('role','status');
   const history=el('section','blob-task-history'),heading=el('h3',null),list=el('ol');heading.title='Task history';heading.setAttribute('aria-label','Task history');heading.innerHTML='<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 10a9 9 0 1 1 1 7M3 4v6h6m3-4v6l4 2"/></svg>';history.append(heading,list);
   node.append(title,status,main,history);container.append(node);
-  return {node,parts:{name,stop,ring,arc:ring.querySelector('.arc'),C,time,note,proof,saved,file,done,status,list}};
+  return {node,parts:{name,stop,ring,crank,arc:ring.querySelector('.arc'),C,time,note,proof,saved,file,done,status,list}};
  }
 
  function mount(container,intervalId){
-  if(view&&view.node.parentElement!==container){void flushProof();view.node.remove();clearInterval(view.timer);view=null;}
+  if(view&&view.node.parentElement!==container){void flushProof();view.node.remove();clearInterval(view.timer);cancelAnimationFrame(view.crankFrame);view=null;}
   if(!view){view={...build(container),intervalId:null,taskId:null,doc:null,revision:null,dirty:false,saving:null,saveTimer:0,editingTime:false,openHistory:new Set(),lastKey:''};wire();view.timer=setInterval(tick,1000);}
   view.node.hidden=false;
   if(view.intervalId!==intervalId){void flushProof();view.intervalId=intervalId;view.taskId=null;view.doc=null;view.openHistory.clear();view.lastKey='';view.parts.name.value='';}
   render(true);
  }
- function hide(){if(!view)return;void flushProof();view.node.hidden=true;}
+ function hide(){if(!view)return;void flushProof();view.node.hidden=true;cancelAnimationFrame(view.crankFrame);view.crankFrame=0;}
 
  async function command(payload){const r=await Store.command({type:'timeline-interval.task',payload:{intervalId:view.intervalId,...payload}});if(!r.ok){view.parts.status.textContent=r.code==='TASK_RUNNING'?'A task is already running on this blob.':'Not saved: '+(r.code||'refused');}else view.parts.status.textContent='';refreshTimelines();render(true);return r;}
  function refreshTimelines(){document.querySelectorAll('.exact-timeline').forEach(node=>root.ExactTimeline?.mount(node,Store)?.refresh());}
@@ -172,18 +200,45 @@
  function renderDone(){const p=view.parts,running=view.taskId&&hasProof(view.doc);p.done.disabled=!running;p.done.title=running?'Done: fill this stretch of the blob':'Done: needs some proof first';}
 
  function tick(){if(view&&!view.node.hidden)render();}
+ function updateLiveCrank(owner,running,standalone){
+  owner.crankTask=running;
+  owner.crankStandalone=standalone;
+  if(!running||owner.node.hidden){
+   cancelAnimationFrame(owner.crankFrame);
+   owner.crankFrame=0;
+   return;
+  }
+  if(owner.crankFrame)return;
+  function frame(){
+   owner.crankFrame=0;
+   const task=owner.crankTask;
+   if(!task||owner.node.hidden||!owner.node.isConnected)return;
+   if(!owner.parts.crank.dragging()){
+    const now=Date.now(),current=attempt(task,now);
+    const left=owner.crankStandalone&&current.index>1?0:current.end-now;
+    owner.parts.crank.paint(left/MIN);
+    owner.parts.arc.style.strokeDashoffset=String(owner.parts.C*(1-left/task.durationMs));
+   }
+   owner.crankFrame=requestAnimationFrame(frame);
+  }
+  owner.crankFrame=requestAnimationFrame(frame);
+ }
  function render(force){
   if(!view)return;const p=view.parts,item=blobOf(view.intervalId);
-  if(!item){p.status.textContent='This blob no longer exists.';view.blobMissing=true;return;}
+  if(p.crank.dragging())return;
+  if(!item){updateLiveCrank(view,null,false);p.status.textContent='This blob no longer exists.';view.blobMissing=true;return;}
   if(view.blobMissing){p.status.textContent='';view.blobMissing=false;}
   p.name.placeholder=item.name||'Task';
   const running=runningOf(item),now=Date.now();
+  updateLiveCrank(view,running,!!item.taskBlob);
+  p.crank.element.hidden=!!item.taskBlob&&!running;
+  if(!running)p.crank.paint(durationOf(item)/MIN);
   if(running&&view.taskId!==running.id)void loadProof(running.id);
   if(!running&&view.taskId){void flushProof();view.taskId=null;view.doc=null;paintEditor(emptyProof());}
   if(document.activeElement!==p.name)p.name.value=running?running.name:p.name.value&&!force?p.name.value:'';
   p.name.disabled=!!item.taskBlob&&!running;p.stop.hidden=!running;p.proof.classList.toggle('is-disabled',!running);if(!running)p.saved.textContent='';p.list.parentElement.hidden=!!item.taskBlob;
   p.ring.classList.toggle('is-idle',!running);
-  if(running){const a=attempt(running,now),left=a.end-now;p.time.textContent=clockText(left);p.arc.style.strokeDashoffset=String(p.C*(1-left/running.durationMs));p.note.textContent='🔔 '+timeText(a.end)+(a.index>1?' · restarted':'');if(item.taskBlob&&a.index>1){p.time.textContent=clockText(0);p.note.textContent='Time is up';}}
+  if(running){const a=attempt(running,now),left=item.taskBlob&&a.index>1?0:a.end-now;p.crank.paint(left/MIN);p.time.textContent=clockText(left);p.arc.style.strokeDashoffset=String(p.C*(1-left/running.durationMs));p.note.textContent='🔔 '+timeText(a.end)+(a.index>1?' · restarted':'');if(item.taskBlob&&a.index>1){p.time.textContent=clockText(0);p.note.textContent='Time is up';}}
   else if(item.taskBlob){const t=tasksOf(item)[0];p.time.textContent=t?clockText(Date.parse(t.completedAt)-Date.parse(t.startedAt)):'';p.arc.style.strokeDashoffset='0';p.note.textContent=t?'Done '+timeText(Date.parse(t.completedAt)):'';}
   else{const ms=durationOf(item);p.time.textContent=clockText(ms);p.arc.style.strokeDashoffset='0';p.note.textContent='Name a task to start';}
   renderDone();

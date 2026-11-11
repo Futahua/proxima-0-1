@@ -90,15 +90,6 @@
   // ── The icon and its menus ──
   const style=document.createElement('style');
   style.textContent=`
-.proxima-copy-icon{position:fixed;z-index:60;width:20px;height:20px;padding:0;border:0;border-radius:50%;background:var(--panel,#1f252b);color:var(--dim,#97a0b0);cursor:pointer;display:grid;place-items:center}
-.proxima-copy-icon:hover{color:var(--ink,#e6e9ef)}
-.proxima-copy-icon svg{width:14px;height:14px;pointer-events:none}
-.proxima-copy-menu{position:fixed;z-index:3100;min-width:220px;max-width:min(320px,calc(100vw - 16px));display:grid;gap:2px;padding:6px;border-radius:10px;background:var(--panel,#1f252b);border:1px solid var(--line,#414d5b);box-shadow:0 10px 30px #0008;font-size:13px}
-.proxima-copy-menu .heading{padding:6px 10px 4px;color:var(--dim,#97a0b0);font-size:11px;letter-spacing:.06em;text-transform:uppercase}
-.proxima-copy-menu button{display:block;width:100%;padding:9px 10px;border:0;border-radius:6px;background:none;color:var(--ink,#e6e9ef);text-align:left;font:inherit;cursor:pointer}
-.proxima-copy-menu button:hover{background:var(--panel-2,#323b46)}
-.proxima-copy-menu small{display:block;color:var(--dim,#97a0b0);font-size:11px;margin-top:2px}
-.proxima-copy-menu hr{border:0;border-top:1px solid var(--line,#414d5b);margin:4px 2px}
 .proxima-copy-confirm{position:fixed;inset:0;z-index:3200;display:grid;place-items:center;background:#0008}
 .proxima-copy-confirm>div{width:min(360px,calc(100vw - 32px));padding:18px;border-radius:12px;background:var(--panel,#1f252b);border:1px solid var(--line,#414d5b);box-shadow:0 20px 50px #000a;color:var(--ink,#e6e9ef);font-size:14px;line-height:1.45}
 .proxima-copy-confirm p{margin:0 0 6px}.proxima-copy-confirm .note{color:var(--dim,#97a0b0);font-size:12px}
@@ -106,10 +97,7 @@
 .proxima-copy-confirm .actions button{padding:8px 14px;border-radius:6px;border:1px solid var(--line,#414d5b);background:none;color:var(--ink,#e6e9ef);font:inherit;cursor:pointer}
 .proxima-copy-confirm .actions .danger{background:#a8463f;border-color:#a8463f;color:#fff}
 .proxima-copy-toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);z-index:3300;max-width:calc(100vw - 32px);padding:10px 14px;border-radius:8px;background:var(--panel-2,#323b46);color:var(--ink,#e6e9ef);font-size:13px;box-shadow:0 8px 24px #0008}`;
-  const icon='<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="8.5" height="8.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 3.2V3a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1v6.5a1 1 0 0 0 1 1h.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
-  let button=null,menu=null;
   function toast(text,ms=5000){const node=document.createElement('div');node.className='proxima-copy-toast';node.setAttribute('role','status');node.textContent=text;document.body.append(node);setTimeout(()=>node.remove(),ms);}
-  const closeMenu=()=>{menu?.remove();menu=null;};
   function confirmBox(lines,action){
     return new Promise(resolve=>{
       const shade=document.createElement('div');shade.className='proxima-copy-confirm';const box=document.createElement('div');shade.append(box);
@@ -123,57 +111,7 @@
       document.body.append(shade);go.focus();
     });
   }
-  const ago=at=>{if(!at)return '';const minutes=Math.round((Date.now()-at)/60000);return minutes<1?'just now':minutes<60?minutes+' min ago':minutes<1440?Math.round(minutes/60)+' h ago':Math.round(minutes/1440)+' d ago';};
-  async function openMenu(){
-    if(menu){closeMenu();return;}
-    menu=document.createElement('div');menu.className='proxima-copy-menu';menu.textContent='Loading devices…';
-    const box=button.getBoundingClientRect();menu.style.left=Math.max(8,Math.min(box.left,innerWidth-240))+'px';menu.style.top=Math.min(box.bottom+6,innerHeight-200)+'px';
-    document.body.append(menu);
-    setTimeout(()=>addEventListener('pointerdown',function away(event){if(menu&&!menu.contains(event.target)&&event.target!==button){closeMenu();removeEventListener('pointerdown',away,true);}else if(!menu)removeEventListener('pointerdown',away,true);},true));
-    let known;try{known=await devices();}catch(error){if(menu)menu.textContent=error.message;return;}
-    if(!menu)return;menu.replaceChildren();
-    const heading=document.createElement('div');heading.className='heading';heading.textContent='Copies data from';menu.append(heading);
-    for(const device of known.others){
-      const item=document.createElement('button');item.type='button';item.textContent=device.name;
-      if(device.kind==='phone'&&!device.native){const note=document.createElement('small');note.textContent='As last shared'+(device.receivedAt?' · '+ago(device.receivedAt):'');item.append(note);}
-      item.addEventListener('click',()=>{closeMenu();void copyFrom(device,known.self);});menu.append(item);
-    }
-    if(!known.others.length){const none=document.createElement('div');none.className='heading';none.textContent='No other device yet';menu.append(none);}
-    menu.append(document.createElement('hr'));
-    const all=document.createElement('button');all.type='button';all.textContent='Overwrite all devices’ Proxima data with '+known.self.name;
-    all.disabled=!known.others.length;all.addEventListener('click',()=>{closeMenu();void overwriteOthers(known);});menu.append(all);
-  }
-  async function copyFrom(device,self){
-    if(!await confirmBox([['Copies data from '+device.name+'.'],['This will overwrite all '+self.name+'’s Proxima data.'],['A backup of the current data is kept on '+self.name+'.','note']],'Overwrite'))return;
-    toast('Copying from '+device.name+'…',60000);
-    try{await replaceAll(await fetchFrom(device),device.name);}
-    catch(error){document.querySelectorAll('.proxima-copy-toast').forEach(node=>node.remove());toast('Nothing was changed: '+error.message,8000);}
-  }
-  async function overwriteOthers(known){
-    const names=known.others.map(device=>device.name).join(' and ');
-    if(!await confirmBox([['Overwrite all devices’ Proxima data with '+known.self.name+'.'],['This will overwrite all '+names+'’s Proxima data.'],['Each device keeps a backup of what it had.','note']],'Overwrite'))return;
-    toast('Copying '+known.self.name+'’s Proxima…',60000);
-    let projection;try{projection=await ownProjection();}catch(error){toast('Nothing was changed: '+error.message,8000);return;}
-    const outcomes=[];
-    for(const device of known.others){try{const result=await pushTo(device,projection);outcomes.push(device.name+': overwritten');}catch(error){outcomes.push(device.name+': not changed ('+error.message+')');}}
-    document.querySelectorAll('.proxima-copy-toast').forEach(node=>node.remove());toast(outcomes.join(' · '),10000);
-  }
-
-  // The icon sits in the time strip, just under the year.
-  function place(){
-    const year=document.querySelector('.exact-current-year');
-    const rect=year?.getClientRects().length?year.getBoundingClientRect():null;
-    if(!rect||!rect.width){button.hidden=true;return;}
-    button.hidden=false;button.style.left=Math.round(rect.left+rect.width/2-10)+'px';button.style.top=Math.round(rect.bottom+2)+'px';
-  }
-  function install(){
-    document.head.append(style);
-    button=document.createElement('button');button.type='button';button.className='proxima-copy-icon';button.title='Copy Proxima between devices';button.setAttribute('aria-label',button.title);button.innerHTML=icon;button.hidden=true;
-    button.addEventListener('click',event=>{event.stopPropagation();void openMenu();});
-    document.body.append(button);place();
-    new ResizeObserver(place).observe(document.documentElement);addEventListener('scroll',place,{capture:true,passive:true});setInterval(place,500);
-  }
-  if(document.readyState==='loading')addEventListener('DOMContentLoaded',install,{once:true});else install();
+  document.head.append(style);
 
   // device-mirror.js (the authoritative-device toggle) reuses these rather than a second transport.
   root.__proximaDeviceCopy={devices,fetchFrom,pushTo,exchange,ownProjection,backup,stateFrom,toast,confirmBox};

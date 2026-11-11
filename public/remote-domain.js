@@ -49,9 +49,16 @@
   function instant(value,label){if(typeof value!=='string'||!/(Z|[+-]\d\d:\d\d)$/i.test(value)||!Number.isFinite(Date.parse(value)))throw Error('Invalid '+label+'.');}
   function number(value,label,minimum=0){if(typeof value!=='number'||!Number.isFinite(value)||value<minimum)throw Error('Invalid '+label+'.');}
   function day(value){if(typeof value!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(value)||new Date(value+'T00:00:00.000Z').toISOString().slice(0,10)!==value)throw Error('Invalid task day.');}
+  function validFlowIcon(value){
+    if(typeof value!=="string")return false;
+    if(value.startsWith("emoji:"))return value.length>6&&value.length<=38;
+    if(value.startsWith("data:"))return value.length<=350000&&/^data:image[/](png|jpeg|gif|webp);base64,[a-z0-9+/]+={0,2}$/i.test(value);
+    return value.length<=2048&&/^https:[/][/][^\s]+$/i.test(value);
+  }
   function template(value){
     if(value==null)return;
-    shape(value,['version','kind','workspaceId','folderId','documentId','appflowyWorkspaceId','appflowyPageId'],'blob template');
+    shape(value,['version','kind','workspaceId','folderId','documentId','appflowyWorkspaceId','appflowyPageId','appflowyIconUrl'],'blob template');
+    if(value.appflowyIconUrl!==undefined&&(!value.appflowyPageId||!validFlowIcon(value.appflowyIconUrl)))throw Error('Invalid AppFlowy icon URL.');
     if(value.appflowyPageId!==undefined&&(value.kind!=='appflowy'||!value.appflowyWorkspaceId||typeof value.appflowyPageId!=='string'||!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(value.appflowyPageId)))throw Error('Invalid AppFlowy page identity.');
     if(value.appflowyWorkspaceId!==undefined&&(value.kind!=='appflowy'||typeof value.appflowyWorkspaceId!=='string'||!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(value.appflowyWorkspaceId)))throw Error('Invalid AppFlowy workspace identity.');
     const ident=v=>typeof v==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(v);
@@ -90,5 +97,5 @@
     const result=new Map();let cursor=now;
     ids.forEach((id,index)=>{const item=sessions.find(x=>x.id===id);if(!index){result.set(id,{start:item.start,end:new Date(Math.max(Date.parse(item.start)+1,now)).toISOString(),followNow:now<end,queueId:row.id,queueIndex:index,queueEnd:row.queue.end});return;}const next=end<=now?cursor+1:index===ids.length-1?Math.max(cursor+1,end):Math.max(cursor+1,cursor+Math.max(0,end-now)*(item.queueWeight||1)/total);result.set(id,{start:new Date(cursor).toISOString(),end:new Date(Math.max(cursor+1,next)).toISOString(),followNow:false,queueId:row.id,queueIndex:index,queueEnd:row.queue.end});cursor=next;});return result;
   }
-  root.ProximaRemoteDomain=Object.freeze({project,qualified,independentCandidate,validateProjection,prepareImport,semantic,mergeOwned,queueProjection,kinds:Object.freeze(Object.keys(fields))});
+  root.ProximaRemoteDomain=Object.freeze({project,qualified,validFlowIcon,independentCandidate,validateProjection,prepareImport,semantic,mergeOwned,queueProjection,kinds:Object.freeze(Object.keys(fields))});
 })(globalThis);

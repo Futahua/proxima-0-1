@@ -1,6 +1,29 @@
 const domainCode=await readFile(new URL('./public/remote-domain.js',import.meta.url),'utf8');async function readStoreCode(){return domainCode+'\n'+await readFile(new URL('./public/store.js',import.meta.url),'utf8');}
 import test from 'node:test';import assert from 'node:assert/strict';import vm from 'node:vm';import {readFile} from 'node:fs/promises';import {webcrypto} from 'node:crypto';
 const source=await readFile(new URL('./public/exact-timeline.js',import.meta.url),'utf8');const ctx=vm.createContext({});vm.runInContext(source,ctx);const g=ctx.ExactTimeline.geometry;
+test('the crank holds its released angle until the duration save settles',async()=>{
+ const events=new Map(),arm={angle:null,setAttribute(_name,value){this.angle=value;}};
+ const grip={addEventListener(name,callback){events.set(name,callback);},setPointerCapture(){}};
+ const dial={getScreenCTM:()=>({inverse:()=>({})})};
+ const scale={};
+ ctx.document={createElement:()=>({firstElementChild:dial,querySelector:selector=>selector==='.crank-arm'?arm:selector==='.crank-grip'?grip:scale})};
+ ctx.DOMPoint=class{constructor(x,y){this.x=x;this.y=y;}matrixTransform(){return this;}};
+ let minutes=30,finishSave;
+ const crank=ctx.ExactTimeline.createTimerCrank({getMinutes:()=>minutes,onTurn(){},onCommit:value=>new Promise(resolve=>{finishSave=()=>{minutes=value;resolve();};})});
+ crank.paint();
+ const event=(x,y)=>({clientX:x,clientY:y,pointerId:1,button:0,preventDefault(){},stopPropagation(){}});
+ events.get('pointerdown')(event(50,76));
+ events.get('pointermove')(event(22,48));
+ const released=arm.angle;
+ const save=events.get('lostpointercapture')(event(22,48));
+ assert.equal(crank.dragging(),true);
+ assert.equal(arm.angle,released);
+ finishSave();
+ await save;
+ assert.equal(crank.dragging(),false);
+ assert.equal(minutes,45);
+ assert.equal(arm.angle,released);
+});
 test('plus searches durable rows including hidden history and rejects future or live occupants',()=>{
  const stamp=n=>new Date(n).toISOString(),rows=[{id:'r0'},{id:'r1'},{id:'r2'},{id:'r3'}],entries=[{rowId:'r0',start:stamp(0),end:stamp(10)},{rowId:'r1',start:stamp(0),end:stamp(20),followNow:true},{rowId:'r2',start:stamp(40),end:stamp(50)}];
  assert.equal(ctx.ExactTimeline.firstFreeRow(rows,entries,20).id,'r0');
@@ -12,6 +35,24 @@ test('plus searches durable rows including hidden history and rejects future or 
 test('plus does not steal a row from an expanded child group or a queue placeholder',()=>{
  const rows=[{id:'group',groupChildren:['child']},{id:'child',rowId:'child-row',groupDepth:1},{id:'queue',queuePlaceholder:true},{id:'free'}];
  assert.equal(ctx.ExactTimeline.firstFreeRow(rows,[],20).id,'free');
+});
+test('plus reuses a finished group row but skips a live group',async()=>{
+ const memory=new Map(),c=vm.createContext({location:{search:'',protocol:'file:',hostname:'',port:''},localStorage:{getItem:k=>memory.get(k)??null,setItem:(k,v)=>memory.set(k,v)},URLSearchParams,structuredClone,crypto:webcrypto,console,setTimeout,clearTimeout});
+ vm.runInContext(await readStoreCode()+'\nglobalThis.store=Store;',c);
+ const store=c.store,stamp=hour=>new Date(Date.UTC(2026,9,11,hour)).toISOString();
+ const create=(name,a,b,rowId)=>store.command({type:'timeline-interval.create',payload:{name,start:stamp(a),end:stamp(b),rowId}});
+ const a=await create('A',0,1),b=await create('B',1,2);
+ const grouped=await store.command({type:'timeline-group.create',payload:{intervalIds:[a.value.id,b.value.id]}});
+ assert.equal(grouped.ok,true,grouped.code);
+ const group=store.timelineIntervals().find(item=>item.id===grouped.value.groupId);
+ const time=Date.parse(stamp(2));
+ assert.equal(ctx.ExactTimeline.firstFreeRow([group],[group],time).id,group.id);
+ assert.equal(ctx.ExactTimeline.firstFreeRow([group],[{...group,groupLive:true}],time),null);
+ assert.equal((await create('Overlap',1,3,group.rowId)).code,'GROUP_DERIVED_RANGE');
+ const next=await create('Next',2,3,group.rowId);
+ assert.equal(next.ok,true,next.code);
+ assert.equal(next.value.rowId,group.rowId);
+ assert.equal(store.timelineRows().filter(row=>row.id===group.rowId).length,1);
 });
 test('visible row compaction preserves durable order and restores rows when panning back',()=>{
  const stamp=n=>new Date(n).toISOString(),old={id:'old',rowId:'a',start:stamp(0),end:stamp(10)},live={id:'live',rowId:'b',start:stamp(0),end:stamp(10),followNow:true},later={id:'later',rowId:'c',start:stamp(30),end:stamp(40)},rows=[old,live,later],before=JSON.stringify(rows);
