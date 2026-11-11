@@ -59,6 +59,7 @@
  .blob-task-ring.is-idle .arc{stroke:#8fb0e055}
  .blob-task-dial{max-width:100%;flex:none}
  .blob-task-clock{position:static;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px}
+ .blob-task-started{position:absolute;top:15%;inset-inline:0;text-align:center;color:#a6b0bd;font-size:12px}
  .blob-task-ring>.exact-timer-crank{position:absolute;top:50%;left:50%;width:48%;transform:translate(-50%,-50%)}
  .blob-task-clock button{font:300 44px system-ui;letter-spacing:1px;color:#e6e9ef;background:transparent;border:0;cursor:pointer;padding:0 6px;border-radius:8px}
  .blob-task-clock button:hover{background:#ffffff0c}
@@ -123,7 +124,7 @@
    },
    onRelease:()=>{dragTarget=null;render();}
   });
-  ring.append(crank.element);
+  const started=el('time','blob-task-started');started.hidden=true;ring.append(started,crank.element);
   const side=el('div','blob-task-proof-side'),proof=el('div','blob-task-proof');proof.setAttribute('aria-label','Proof of completion');
   const tools=el('div','blob-task-proof-tools'),saved=el('span'),pick=el('label',null),file=el('input');pick.title='Add picture';pick.setAttribute('aria-label','Add picture');pick.innerHTML='<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M15 3H4a1 1 0 0 0-1 1v16h17V10M16 5h6m-3-3v6M3 17l5-5 4 4 3-3 5 5"/><circle cx="8" cy="7" r="1"/></svg>';pick.tabIndex=0;pick.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();file.click();}};file.type='file';file.accept='image/*';file.multiple=true;file.hidden=true;pick.append(file);tools.append(saved,pick);
   const done=el('button','blob-task-done','✓');done.type='button';done.title='Done: needs some proof first';done.setAttribute('aria-label','Mark task done');side.append(proof,tools,done);
@@ -131,7 +132,7 @@
   const status=el('p','blob-task-status');status.setAttribute('role','status');
   const history=el('section','blob-task-history'),heading=el('h3',null),list=el('ol');heading.title='Task history';heading.setAttribute('aria-label','Task history');heading.innerHTML='<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 10a9 9 0 1 1 1 7M3 4v6h6m3-4v6l4 2"/></svg>';history.append(heading,list);
   node.append(title,status,main,history);container.append(node);
-  return {node,parts:{name,stop,ring,crank,arc:ring.querySelector('.arc'),C,time,note,proof,saved,file,done,status,list}};
+  return {node,parts:{name,stop,ring,crank,started,arc:ring.querySelector('.arc'),C,time,note,proof,saved,file,done,status,list}};
  }
 
  function mount(container,intervalId){
@@ -231,6 +232,8 @@
   p.name.placeholder=item.name||'Task';
   const running=runningOf(item),now=Date.now();
   updateLiveCrank(view,running,!!item.taskBlob);
+  p.started.hidden=!running;
+  if(running){p.started.dateTime=running.startedAt;p.started.textContent=timeText(Date.parse(running.startedAt));p.started.title="Started at "+p.started.textContent;}
   p.crank.element.hidden=!!item.taskBlob&&!running;
   if(!running)p.crank.paint(durationOf(item)/MIN);
   if(running&&view.taskId!==running.id)void loadProof(running.id);
