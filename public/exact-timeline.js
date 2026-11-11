@@ -10,7 +10,7 @@
   if(time-earliest<=latest-time)return time<Math.min(...spans.map(x=>x.end))?'start':null;return time>Math.max(...spans.map(x=>x.start))?'end':null;}
  // Screen-space silhouettes only. Exact timestamps still own hits, drag and storage.
  function taskFillShape(spans,width){
-  if(width<=0)return {path:'',stretches:[],lobes:[]};
+  if(width<=0)return {path:'',line:'',stretches:[],lobes:[]};
   const lobes=[];
   for(const {x0,x1} of spans){
    if(x1<=0||x0>=width||x1<=x0)continue;
@@ -20,7 +20,7 @@
    if(previous&&left<=previous.right+3)previous.right=Math.max(previous.right,right);
    else lobes.push({left,right});
   }
-  const paths=[],stretches=[];
+  const paths=[],lines=[],stretches=[];
   // Smoothstep gives each transition zero slope at both ends.
   const blend=(from,to,value)=>{
    const t=Math.max(0,Math.min(1,(value-from)/(to-from)));
@@ -42,6 +42,18 @@
   };
   for(const {left,right} of lobes){
    const length=right-left,mid=(left+right)/2;
+   if(length<30){
+    underlineTo(Math.max(0,left));
+    underlineStart=Math.min(width,right);
+    const folds=length<17?1:2,step=length/folds;
+    lines.push('M',left,baseline+.75);
+    for(let i=0;i<folds;i++){
+     const start=left+i*step,crest=start+step*.5,end=start+step;
+     lines.push('C',start+step*.29,baseline+.75,start+step*.18,1,crest,1,
+      'C',start+step*.82,1,end-step*.29,baseline+.75,end,baseline+.75);
+    }
+    continue;
+   }
    const solid=blend(26,52,length);
    const fold=blend(12,21,length)*(1-solid);
    const top=0,rise=baseline-top;
@@ -68,7 +80,7 @@
    }
   }
   if(lobes.length)underlineTo(width);
-  return {path:paths.join(' '),stretches,lobes};
+  return {path:paths.join(' '),line:lines.join(' '),stretches,lobes};
  }
  const taskLineFade=[[0,0],[.38,1],[.60,1],[1,0]];
  let timelineGradientId=0;
@@ -719,9 +731,9 @@
    const lineStops=taskLineFade.map(([offset,opacity])=>
     'color-mix(in srgb, '+color+' '+opacity*100+'%, transparent) '+offset*100+'%'
    );
-   bar.style.background=shape.path?'transparent':
+   bar.style.background=shape.path||shape.line?'transparent':
     'linear-gradient(to right,'+lineStops.join(',')+') '+viewLeft+'px bottom/'+viewWidth+'px 1.5px no-repeat,transparent';
-   if(!shape.path){bar.taskFillLayer?.setAttribute('hidden','');return;}
+   if(!shape.path&&!shape.line){bar.taskFillLayer?.setAttribute('hidden','');return;}
    if(!bar.taskFillLayer){
     const namespace='http://www.w3.org/2000/svg';
     const svg=document.createElementNS(namespace,'svg'),path=document.createElementNS(namespace,'path');
@@ -735,15 +747,21 @@
     svg.classList.add('exact-task-fill');svg.setAttribute('preserveAspectRatio','none');
     svg.setAttribute('aria-hidden','true');
     path.setAttribute('fill-rule','evenodd');
-    svg.append(path);
+    const line=document.createElementNS(namespace,'path');
+    line.setAttribute('fill','none');
+    line.setAttribute('stroke','url(#'+gradient.id+')');
+    line.setAttribute('stroke-width','1.6');
+    line.setAttribute('stroke-linecap','round');
+    svg.append(path,line);
     bar.prepend(svg);
     bar.taskFillLayer=svg;
    }
-   const svg=bar.taskFillLayer,path=svg.lastElementChild;
+   const svg=bar.taskFillLayer,line=svg.lastElementChild,path=line.previousElementSibling;
    svg.removeAttribute('hidden');
    const viewBox='0 0 '+width+' 42';
    if(svg.getAttribute('viewBox')!==viewBox)svg.setAttribute('viewBox',viewBox);
    if(path.getAttribute('d')!==shape.path)path.setAttribute('d',shape.path);
+   if(line.getAttribute('d')!==shape.line)line.setAttribute('d',shape.line);
    const stops=taskLineStops(width,viewLeft,viewWidth,shape.lobes);
    const signature=color+'|'+stops.map(stop=>stop.join(':')).join(',');
    if(bar.taskLineGradient.paintSignature!==signature){
