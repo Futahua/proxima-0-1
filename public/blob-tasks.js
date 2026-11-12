@@ -98,7 +98,7 @@
   const node=el('section','blob-task');node.setAttribute('aria-label','Current task');
   const title=el('div','blob-task-title'),name=el('input');name.placeholder='Current task';name.maxLength=300;name.setAttribute('aria-label','Task name');const stop=el('button',null,'Give up');stop.type='button';stop.title='Drop the running task without recording it';title.append(name,stop);
   const main=el('div','blob-task-main'),ring=el('div','blob-task-ring');const R=108,C=2*Math.PI*R;ring.innerHTML=`<svg viewBox="0 0 240 240"><circle class="track" cx="120" cy="120" r="${R}" fill="none" stroke-width="5"/><circle class="arc" cx="120" cy="120" r="${R}" fill="none" stroke-width="5" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="0"/></svg>`;
-  const clock=el('div','blob-task-clock'),time=el('button');time.type='button';time.title='Set the countdown';const note=el('small');clock.append(time,note);
+  const clock=el('div','blob-task-clock'),time=el('button');time.type='button';time.title='Set the countdown';const note=el('small'),queue=el('button','blob-task-queue');queue.type='button';clock.append(time,note,queue);
   const dial=el('div','blob-task-dial');dial.append(ring,clock);
   let dragTarget=null;
   const crank=root.ExactTimeline.createTimerCrank({
@@ -132,7 +132,7 @@
   const status=el('p','blob-task-status');status.setAttribute('role','status');
   const history=el('section','blob-task-history'),heading=el('h3',null),list=el('ol');heading.title='Task history';heading.setAttribute('aria-label','Task history');heading.innerHTML='<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 10a9 9 0 1 1 1 7M3 4v6h6m3-4v6l4 2"/></svg>';history.append(heading,list);
   node.append(title,status,main,history);container.append(node);
-  return {node,parts:{name,stop,ring,crank,started,arc:ring.querySelector('.arc'),C,time,note,proof,saved,file,done,status,list}};
+  return {node,parts:{name,stop,ring,crank,started,arc:ring.querySelector('.arc'),C,time,note,queue,proof,saved,file,done,status,list}};
  }
 
  function mount(container,intervalId){
@@ -144,17 +144,25 @@
  }
  function hide(){if(!view)return;void flushProof();view.node.hidden=true;cancelAnimationFrame(view.crankFrame);view.crankFrame=0;}
 
- async function command(payload){const r=await Store.command({type:'timeline-interval.task',payload:{intervalId:view.intervalId,...payload}});if(!r.ok){view.parts.status.textContent=r.code==='TASK_RUNNING'?'A task is already running on this blob.':'Not saved: '+(r.code||'refused');}else view.parts.status.textContent='';refreshTimelines();render(true);return r;}
+ async function command(payload){const r=await Store.command({type:'timeline-interval.task',payload:{intervalId:view.intervalId,...payload}});if(!r.ok){view.parts.status.textContent=r.code==='TASK_RUNNING'?finishFirst(Store.liveTimelineTask()):'Not saved: '+(r.code||'refused');}else view.parts.status.textContent='';refreshTimelines();render(true);return r;}
  function refreshTimelines(){document.querySelectorAll('.exact-timeline').forEach(node=>root.ExactTimeline?.mount(node,Store)?.refresh());}
+ const finishFirst=task=>task?'Finish “'+task.name+'” first.':'Finish the running task first.';
  const durationOf=item=>Number.isSafeInteger(item?.taskDurationMs)&&item.taskDurationMs>=MIN?item.taskDurationMs:DEFAULT_MS;
 
  function wire(){
   const p=view.parts;
   const start=async()=>{const value=p.name.value.trim(),item=blobOf(view.intervalId);if(!value||!item)return;const running=runningOf(item);
+   if(!running&&item.queuedTask)return;
    if(running){if(value!==running.name)await command({action:'rename',taskId:running.id,name:value});return;}
    await command({action:'start',name:value,durationMs:durationOf(item)});};
   p.name.taskKey=(e=>{if(e.key==='Enter'){e.preventDefault();p.name.blur();}if(e.key==='Escape'){const r=runningOf(blobOf(view.intervalId));p.name.value=r?.name||'';p.name.blur();}});
   p.name.addEventListener('blur',()=>void start());
+  p.queue.onclick=async()=>{
+   const item=blobOf(view.intervalId);if(!item||p.queue.disabled)return;
+   p.queue.disabled=true;
+   try{await command(item.queuedTask?{action:'start-queued'}:{action:'queue',name:p.name.value.trim()||item.name,durationMs:durationOf(item)});}
+   finally{render(true);}
+  };
   p.stop.onclick=async()=>{const r=runningOf(blobOf(view.intervalId));if(!r)return;await command({action:'abandon',taskId:r.id});p.name.value='';};
   p.time.onclick=()=>{const item=blobOf(view.intervalId);if(!item)return;const r=runningOf(item),current=r?r.durationMs:durationOf(item);const input=el('input');input.type='number';input.min='1';input.max='1440';input.step='1';input.value=String(Math.round(current/MIN));input.title='Minutes';view.editingTime=true;p.time.replaceWith(input);input.focus();input.select();
    let finished=false;const finish=async keep=>{if(finished)return;finished=true;view.editingTime=false;input.replaceWith(p.time);const minutes=Math.round(Number(input.value));if(!keep||!Number.isFinite(minutes)||minutes<1||minutes>1440){render(true);return;}const ms=minutes*MIN,running=runningOf(blobOf(view.intervalId));
@@ -239,11 +247,17 @@
   if(running&&view.taskId!==running.id)void loadProof(running.id);
   if(!running&&view.taskId){void flushProof();view.taskId=null;view.doc=null;paintEditor(emptyProof());}
   if(document.activeElement!==p.name)p.name.value=running?running.name:p.name.value&&!force?p.name.value:'';
-  p.name.disabled=!!item.taskBlob&&!running;p.stop.hidden=!running;p.proof.classList.toggle('is-disabled',!running);if(!running)p.saved.textContent='';p.list.parentElement.hidden=!!item.taskBlob;
+  const blocked=!running&&Store.liveTimelineTask();
+  p.queue.hidden=!!running||!!item.taskBlob;
+  p.queue.disabled=!!item.queuedTask&&!!blocked;
+  p.queue.textContent=item.queuedTask?'▶':'+';
+  const queueLabel=item.queuedTask?(blocked?finishFirst(blocked):'Start queued task '+item.queuedTask.name):'Queue this task';
+  p.queue.title=queueLabel;p.queue.setAttribute('aria-label',queueLabel);
+  p.name.disabled=!!blocked||!running&&!!(item.taskBlob||item.queuedTask);p.name.title=blocked?finishFirst(blocked):'';p.stop.hidden=!running;p.proof.classList.toggle('is-disabled',!running);if(!running)p.saved.textContent='';p.list.parentElement.hidden=!!item.taskBlob;
   p.ring.classList.toggle('is-idle',!running);
   if(running){const a=attempt(running,now),left=item.taskBlob&&a.index>1?0:a.end-now;p.crank.paint(left/MIN);p.time.textContent=clockText(left);p.arc.style.strokeDashoffset=String(p.C*(1-left/running.durationMs));p.note.textContent='🔔 '+timeText(a.end)+(a.index>1?' · restarted':'');if(item.taskBlob&&a.index>1){p.time.textContent=clockText(0);p.note.textContent='Time is up';}}
   else if(item.taskBlob){const t=tasksOf(item)[0];p.time.textContent=t?clockText(Date.parse(t.completedAt)-Date.parse(t.startedAt)):'';p.arc.style.strokeDashoffset='0';p.note.textContent=t?'Done '+timeText(Date.parse(t.completedAt)):'';}
-  else{const ms=durationOf(item);p.time.textContent=clockText(ms);p.arc.style.strokeDashoffset='0';p.note.textContent='Name a task to start';}
+  else{const ms=durationOf(item);p.time.textContent=clockText(ms);p.arc.style.strokeDashoffset='0';p.note.textContent=blocked?finishFirst(blocked):item.queuedTask?'Queued: '+item.queuedTask.name:'Name a task to start';}
   renderDone();
   const done=tasksOf(item).filter(t=>t.completedAt).sort((a,b)=>Date.parse(b.completedAt)-Date.parse(a.completedAt)),key=JSON.stringify(done.map(t=>[t.id,t.name,t.completedAt]));
   if(key===view.lastKey&&!force)return;view.lastKey=key;

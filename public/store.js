@@ -753,6 +753,14 @@ const Store = (() => {
   // while the timer runs and becomes a full blob when done. Giving up or running out of time removes it (no
   // restart, unlike a task inside a blob). It can be renamed and coloured; its times follow its task. Grouping
   // it with one live blob moves the task into that blob for good.
+  function liveTimelineTask(now=Date.now()){
+    for(const interval of state.timelineIntervals){
+      if(taskBlobExpired(interval,now))continue;
+      const task=interval.tasks?.find(task=>!task.completedAt);
+      if(task)return {intervalId:interval.id,taskId:task.id,name:task.name};
+    }
+    return null;
+  }
   function taskBlobExpired(item,now=Date.now()){if(!item?.taskBlob)return false;const t=Array.isArray(item.tasks)?item.tasks[0]:null;return !t||!t.completedAt&&now>=Date.parse(t.startedAt)+t.durationMs;}
   function pruneEmptyRows(){state.timelineRows=state.timelineRows.filter(row=>row.queue||state.timelineIntervals.some(x=>x.rowId===row.id));}
   function groupTaskBlobs(chosen,revisions){
@@ -824,7 +832,7 @@ const Store = (() => {
     put('timeline-interval.delete-batch',selection,['intervalIds']);
     put('timeline-interval.reorder-batch',{...selection,beforeId:nullable(str)},['intervalIds']);
     put('timeline-interval.template',{intervalId:key,template:{enum:['as-you-go','appflowy',null]},removeKind:{enum:['as-you-go','appflowy']},renew:bool,appflowyWorkspaceId:key,appflowyPageId:key,appflowyIconUrl:nullable(str),expectedDocumentId:key},['intervalId','template']);
-    put('timeline-interval.task',{intervalId:key,action:{enum:['start','rename','duration','default-duration','complete','abandon','delete']},taskId:key,name:key,durationMs:integer},['intervalId','action']);
+    put('timeline-interval.task',{intervalId:key,action:{enum:['start','queue','unqueue','start-queued','rename','duration','default-duration','complete','abandon','delete']},taskId:key,name:key,durationMs:integer},['intervalId','action']);
     put('timeline-interval.move-selection',{...selection,rowId:nullable(str),newRow:bool,times:array(object({id:key,start:instant,end:instant},['id','start','end']))},['intervalIds']);
     put('timeline-group.ungroup',{groupId:key,revisions},['groupId']);
     put('timeline-group.add',{...selection,groupId:key},['groupId','intervalIds']);
@@ -1485,18 +1493,37 @@ const Store = (() => {
     'timeline-interval.task'(payload) {
       const item=state.timelineIntervals.find(x=>x.id===payload.intervalId);if(!item)return refuse('INTERVAL_NOT_FOUND',{});
       if(item.groupChildren)return refuse('GROUP_HAS_CHILDREN',{});
-      const tasks=Array.isArray(item.tasks)?structuredClone(item.tasks):[],now=Date.now(),running=tasks.find(t=>!t.completedAt);
+      const tasks=Array.isArray(item.tasks)?structuredClone(item.tasks):[],now=Date.now();
       const minute=60000,validDuration=v=>Number.isSafeInteger(v)&&v>=minute&&v<=24*60*minute,cleanName=v=>typeof v==='string'&&v.trim()?v.trim().slice(0,300):null;
       const attemptStart=t=>{const s=Date.parse(t.startedAt),d=t.durationMs;return now<=s?s:s+Math.floor((now-s)/d)*d;};
       const target=payload.taskId?tasks.find(t=>t.id===payload.taskId):null;
       let extra={};
       if(item.taskBlob){
+        if(payload.action==='queue'||payload.action==='start-queued')return refuse('TASK_BLOB_QUEUE',{});
         if(payload.action==='start')return refuse('TASK_RUNNING',{taskId:tasks[0]?.id});
         if(payload.action==='abandon'||payload.action==='delete'){if(!target)return refuse('TASK_NOT_FOUND',{});if(payload.action==='abandon'&&target.completedAt)return refuse('TASK_NOT_FOUND',{});return {ok:true,apply:()=>{const before=structuredClone(item);state.timelineIntervals=state.timelineIntervals.filter(x=>x.id!==item.id);for(const group of state.timelineIntervals)if(group.groupChildren?.includes(item.id))group.groupChildren=group.groupChildren.filter(id=>id!==item.id);pruneEmptyRows();return {changed:true,entity:{kind:'timeline-interval',id:item.id},before,after:null,value:{id:item.id,removed:true}};}};}
         if(taskBlobExpired(item,now))return refuse('TASK_NOT_FOUND',{});
       }
       switch(payload.action){
-        case 'start':{if(running)return refuse('TASK_RUNNING',{taskId:running.id});const name=cleanName(payload.name);if(!name)return refuse('NAME_REQUIRED',{});if(!validDuration(payload.durationMs))return refuse('PAYLOAD_INVALID',{reason:'durationMs must be 1 minute to 24 hours'});tasks.push({id:id('task'),name,startedAt:new Date(now).toISOString(),durationMs:payload.durationMs,completedAt:null});extra={taskDurationMs:payload.durationMs};break;}
+        case 'queue':{
+          if(item.queuedTask)return refuse('TASK_ALREADY_QUEUED',{});
+          if(tasks.some(task=>!task.completedAt))return refuse('TASK_RUNNING',{});
+          const name=cleanName(payload.name??item.name);
+          if(!name||!validDuration(payload.durationMs))return refuse('PAYLOAD_INVALID',{});
+          extra={queuedTask:{name,durationMs:payload.durationMs}};break;
+        }
+        case 'unqueue':{if(!item.queuedTask)return refuse('TASK_NOT_QUEUED',{});extra={queuedTask:null};break;}
+        case 'start':
+        case 'start-queued':{
+          const running=liveTimelineTask(now);if(running)return refuse('TASK_RUNNING',running);
+          const queued=payload.action==='start-queued'?item.queuedTask:null;
+          if(payload.action==='start-queued'&&!queued)return refuse('TASK_NOT_QUEUED',{});
+          const name=cleanName(queued?.name??payload.name),durationMs=queued?.durationMs??payload.durationMs;
+          if(!name)return refuse('NAME_REQUIRED',{});
+          if(!validDuration(durationMs))return refuse('PAYLOAD_INVALID',{reason:'durationMs must be 1 minute to 24 hours'});
+          tasks.push({id:id('task'),name,startedAt:new Date(now).toISOString(),durationMs,completedAt:null});
+          extra={taskDurationMs:durationMs,queuedTask:null};break;
+        }
         case 'rename':{if(!target)return refuse('TASK_NOT_FOUND',{});const name=cleanName(payload.name);if(!name)return refuse('NAME_REQUIRED',{});target.name=name;break;}
         case 'duration':{if(!target||target.completedAt)return refuse('TASK_NOT_FOUND',{});if(!validDuration(payload.durationMs))return refuse('PAYLOAD_INVALID',{});target.startedAt=new Date(attemptStart(target)).toISOString();target.durationMs=payload.durationMs;extra={taskDurationMs:payload.durationMs};break;}
         case 'default-duration':{if(!validDuration(payload.durationMs))return refuse('PAYLOAD_INVALID',{});extra={taskDurationMs:payload.durationMs};break;}
@@ -1507,7 +1534,7 @@ const Store = (() => {
       }
       if(item.taskBlob&&payload.action==='complete'){extra.followNow=false;extra.end=target.completedAt;}
       if(item.taskBlob&&payload.action==='rename')extra.name=target.name.slice(0,200);
-      return {ok:true,apply:()=>{const before=structuredClone(item);item.tasks=tasks;Object.assign(item,extra);const task=tasks.find(t=>t.id===payload.taskId)||(payload.action==='start'?tasks[tasks.length-1]:null);return {changed:true,entity:{kind:'timeline-interval',id:item.id},before,after:structuredClone(item),value:{...item,task:task?{...task}:null}};}};
+      return {ok:true,apply:()=>{const before=structuredClone(item);item.tasks=tasks;Object.assign(item,extra);const task=tasks.find(t=>t.id===payload.taskId)||(['start','start-queued'].includes(payload.action)?tasks[tasks.length-1]:null);return {changed:true,entity:{kind:'timeline-interval',id:item.id},before,after:structuredClone(item),value:{...item,task:task?{...task}:null}};}};
     },
     'timeline-interval.create'(payload) {
       const parentGroup=payload.parentGroupId&&state.timelineIntervals.find(x=>x.id===payload.parentGroupId&&x.groupChildren);
@@ -1529,7 +1556,7 @@ const Store = (() => {
       const rowOrder=intervalRowPosition(payload.beforeId);if(rowOrder===null)return refuse('INTERVAL_NOT_FOUND',{});
       if(payload.rowId&&!state.timelineRows.some(x=>x.id===payload.rowId))return refuse('INTERVAL_NOT_FOUND',{});if(payload.rowId&&state.timelineRows.find(x=>x.id===payload.rowId)?.queue?.ids?.length)return refuse('QUEUE_LINKED_EDGE',{});
       if(payload.color!==undefined&&!/^#[0-9a-f]{6}$/i.test(payload.color))return refuse('PAYLOAD_INVALID',{});const item={...(payload.color?{color:payload.color}:{}),rowId:payload.rowId||null,rowOrder,followNow:payload.followNow===true,id:id('interval'),name:payload.name.trim().slice(0,200),start:new Date(start).toISOString(),end:new Date(end).toISOString(),rev:1,createdAt:new Date().toISOString()};
-      if(payload.taskDurationMs!==undefined){const d=payload.taskDurationMs;if(!Number.isSafeInteger(d)||d<60000||d>24*3600000)return refuse('PAYLOAD_INVALID',{reason:'taskDurationMs must be 1 minute to 24 hours'});if(payload.parentGroupId)return refuse('TASK_BLOB_GROUP',{});item.taskBlob=true;item.followNow=true;item.tasks=[{id:id('task'),name:item.name.slice(0,300),startedAt:item.start,durationMs:d,completedAt:null}];}
+      if(payload.taskDurationMs!==undefined){const d=payload.taskDurationMs;if(!Number.isSafeInteger(d)||d<60000||d>24*3600000)return refuse('PAYLOAD_INVALID',{reason:'taskDurationMs must be 1 minute to 24 hours'});if(payload.parentGroupId)return refuse('TASK_BLOB_GROUP',{});const running=liveTimelineTask();if(running)return refuse('TASK_RUNNING',running);item.taskBlob=true;item.followNow=true;item.tasks=[{id:id('task'),name:item.name.slice(0,300),startedAt:item.start,durationMs:d,completedAt:null}];}
       item.rowId=item.rowId||item.id;const previousLive=payload.rowId?state.timelineIntervals.find(x=>x.rowId===item.rowId&&x.followNow&&Date.parse(x.start)<start):null;const now=Date.now();if(previousLive&&start<=now){item.followNow=true;item.end=new Date(Math.max(start+1,now)).toISOString();if(previousLive.deadline)item.deadline=previousLive.deadline;}if(overlapsSession(item,previousLive?.id,rowGroup?.id))return refuse('INTERVAL_OVERLAP',{});
       return {ok:true,apply:()=>{if(previousLive){previousLive.followNow=false;previousLive.end=new Date(Math.max(Date.parse(previousLive.start)+1,Math.min(start,now))).toISOString();previousLive.rev++;}state.timelineIntervals.push(item);if(parentGroup){parentGroup.groupChildren.push(item.id);parentGroup.rev++;}return {value:{...item},entity:{kind:'timeline-interval',id:item.id},before:null,after:{...item},changed:true,created:true};}};
     },
@@ -1896,6 +1923,10 @@ if (ctx.actor !== 'agent-connector') return refuse('ACTOR_NOT_AUTHORIZED', {});
     follows:()=>structuredClone((state.remoteImports||[]).filter(receipt=>receipt.follow?.enabled).map(receipt=>({id:receipt.id,label:receipt.label,source:receipt.value.source,follow:receipt.follow,expected:fingerprint('follow-conflicts',receipt.follow.conflicts||[])}))),
     observeFollow(importId,projection,online){if(!online&&projection){const validated=ProximaRemoteDomain.validateProjection(projection),receipt=(state.remoteImports||[]).find(item=>item.id===importId);if(receipt?.follow?.enabled&&validated.source.ownerId===receipt.value.source.ownerId&&validated.source.backpackId===receipt.value.source.backpackId&&validated.source.seq>=receipt.follow.sourceSeq&&!followObservations.has(importId))followObservations.set(importId,{projection:validated,online:false,receivedAt:Date.now()});}if(!online){const existing=followObservations.get(importId);if(existing?.online){const now=Date.now(),frozen=structuredClone(existing.projection);frozen.source.observedAt=new Date(Date.parse(frozen.source.observedAt)+Math.max(0,now-existing.receivedAt)).toISOString();followObservations.set(importId,{projection:frozen,online:false,receivedAt:now});}return;}const validated=ProximaRemoteDomain.validateProjection(projection),receipt=(state.remoteImports||[]).find(item=>item.id===importId);if(!receipt?.follow?.enabled||validated.source.ownerId!==receipt.value.source.ownerId||validated.source.backpackId!==receipt.value.source.backpackId||validated.source.seq<receipt.follow.sourceSeq)return;followObservations.set(importId,{projection:validated,online:true,receivedAt:Date.now()});},
     flushCommands:()=>commandQueue,
+    refreshPersistedState(){
+      const read=async()=>{const latest=await globalThis.ProximaPersistence?.read();if(latest){state=normalise(latest).state;ensureTimelineRows();}};
+      const next=commandQueue.then(read);commandQueue=next.catch(()=>{});return next;
+    },
     refreshReadSnapshot(){const read=async()=>{if(!globalThis.ProximaPersistence?.device)throw Error('Only a device view uses a remote read snapshot.');const latest=await ProximaPersistence.read();if(latest){state=normalise(latest).state;ensureTimelineRows();}};const next=commandQueue.then(read);commandQueue=next.catch(()=>{});return next;},
     /** One read checkpoint through this owner; never exports raw persistence or cockpit state. */
     remoteProjection(source,selection=null,includeViewLayout=false){
@@ -1922,6 +1953,7 @@ if (ctx.actor !== 'agent-connector') return refuse('ACTOR_NOT_AUTHORIZED', {});
     task: (taskId) => state.tasks.find((t) => t.id === taskId) ?? null,
 
     timelineIntervals:()=>timelineRead(),
+    liveTimelineTask,
     timelineRows:()=>state.timelineRows.map(x=>({...x})),
     scheduleEvents: () => state.scheduleEvents.map((event) => ({ ...event, recurrence: event.recurrence ? { ...event.recurrence } : null, exceptions: Array.isArray(event.exceptions) ? event.exceptions.map((exception) => ({ ...exception })) : [] })),
 

@@ -3579,8 +3579,18 @@
     widget.className='exact-timeline';
     document.body.append(widget);
     ExactTimeline.mount(widget,Store,{taskWidget:true});
+    const refreshWidget=()=>void Store.refreshPersistedState().catch(error=>console.warn('Could not refresh task widget',error));
+    ProximaPersistence.onWrite?.(refreshWidget);
+    window.addEventListener('focus',refreshWidget);
+    refreshWidget();
     return;
   }
+  ProximaPersistence.onWrite?.(()=>{
+    void Store.refreshPersistedState().then(()=>{
+      const timeline=$('#exactTimeline');
+      if(timeline?.getClientRects().length)ExactTimeline.mount(timeline,Store).refresh();
+    }).catch(error=>console.warn('Could not refresh task state',error));
+  });
   const LAST_VIEW_KEY = 'proxima.last-view';
   try {
     if (!location.hash || location.hash === '#/') {

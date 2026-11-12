@@ -375,15 +375,27 @@
   const rulerDate=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Ho_Chi_Minh',day:'numeric',month:'short'});
   function rulerStamp(time){return (86400000*scale<120?rulerDate.format(time).toLowerCase():rulerTime.format(time));}
   function positionTimeLabels(){const hour=((clockNow()+7*3600000)%86400000)/3600000,stops=[[0,[133,131,209]],[6,[192,91,84]],[12,[255,239,55]],[18,[133,131,209]],[24,[133,131,209]]];let index=0;while(index<stops.length-2&&hour>stops[index+1][0])index++;const fraction=(hour-stops[index][0])/(stops[index+1][0]-stops[index][0]),activeColor='rgb('+stops[index][1].map((value,n)=>Math.round(value+(stops[index+1][1][n]-value)*fraction)).join(',')+')';element.style.setProperty('--day-active-color',activeColor);const width=element.clientWidth,nowX=geometry.position(clockNow(),start,scale);nowTime.hidden=nowX<0||nowX>width;nowTime.textContent=rulerStamp(clockNow());const clamp=x=>Math.max(0,Math.min(Math.max(0,width-100),x-22));nowTime.style.left=clamp(nowX)+'px';if(cursorX!==null){cursorStrip.hidden=false;cursorTime.hidden=false;const visualX=visualCursorX??cursorX;let fusedX=visualX;const dayPixels=86400000*scale,midnight=Math.floor((start+7*3600000)/86400000)*86400000-7*3600000,firstBoundary=geometry.position(midnight,start,scale),nearest=firstBoundary+Math.round((visualX-firstBoundary)/dayPixels)*dayPixels,distance=Math.abs(visualX-nearest),reach=32;if(dayPixels>60&&nearest>=0&&nearest<=width&&distance<reach){const strength=1-distance/reach,pull=Math.pow(strength,3),direction=Math.sign(visualX-nearest);fusedX=nearest+(visualX-nearest)*(1-pull);const gap=Math.abs(fusedX-nearest),padding=3+strength*3;boundaryFusion.hidden=false;boundaryFusion.style.left=(Math.min(fusedX,nearest)-padding)+'px';boundaryFusion.style.width=(gap+padding*2)+'px';boundaryFusion.style.opacity=String(strength*.4);boundaryFusion.style.setProperty('--fusion-strength',String(strength));cursorStrip.style.boxShadow='0 0 '+(1+strength*4)+'px '+(strength)+'px #8ddcff40';cursorStrip.style.background='rgba(177,226,255,'+(.2+strength*.35)+')';}else{boundaryFusion.hidden=true;cursorStrip.style.boxShadow='';cursorStrip.style.background='';}cursorStrip.style.left=fusedX+'px';cursorTime.textContent=rulerStamp(geometry.time(cursorX,start,scale));let left=clamp(cursorX);if(!nowTime.hidden&&Math.abs(left-clamp(nowX))<52)left=clamp(nowX)+(cursorX>=nowX?54:-54);cursorTime.style.left=Math.max(0,Math.min(width-148,left))+'px';}}
-  element.addEventListener('pointermove',event=>{cursorX=Math.max(0,Math.min(element.clientWidth,event.clientX-element.getBoundingClientRect().left));visualCursorX=cursorX;positionTimeLabels();});element.addEventListener('pointerleave',()=>{cursorX=null;visualCursorX=null;cancelAnimationFrame(cursorMotionFrame);cursorMotionFrame=0;boundaryFusion.hidden=true;cursorStrip.hidden=true;cursorTime.hidden=true;});
+  function hideTimelineCursor(){cursorX=null;visualCursorX=null;cancelAnimationFrame(cursorMotionFrame);cursorMotionFrame=0;boundaryFusion.hidden=true;cursorStrip.hidden=true;cursorTime.hidden=true;}
+  element.addEventListener('pointermove',event=>{if(event.target.closest?.('.exact-timer-card'))return;cursorX=Math.max(0,Math.min(element.clientWidth,event.clientX-element.getBoundingClientRect().left));visualCursorX=cursorX;positionTimeLabels();});
+  element.addEventListener('pointerleave',hideTimelineCursor);
   function renderTaskRing(bar,item){
    const task=item.groupChildren?null:item.tasks?.find(task=>!task.completedAt);let ring=bar.querySelector('.exact-task-ring');
-   if(!task||settings.remoteReadOnly){ring?.remove();return;}
+   const queued=!item.groupChildren&&!task&&item.queuedTask;
+   if((!task&&!queued)||settings.remoteReadOnly){ring?.remove();return;}
    if(!ring){ring=document.createElement('button');ring.type='button';ring.className='exact-unlink exact-task-ring';
-    ring.setAttribute('aria-label',tapOnly()?'Open running task':item.taskBlob?'Settle this task':'Preview running task');
     ring.innerHTML='<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="#ffffff22" stroke-width="2.5"/><circle class="exact-task-ring-arc" cx="10" cy="10" r="7.5" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="47.12" transform="rotate(-90 10 10)"/></svg>';
     ring.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();});
     ring.addEventListener('click',async event=>{event.preventDefault();event.stopPropagation();const current=bar.interval;
+     if(ring.classList.contains('is-queued-task')){
+      if(previewing||settings.readOnly||ring.disabled)return;
+      ring.disabled=true;
+      try{
+       const result=await store.command({type:'timeline-interval.task',payload:{intervalId:current.id,action:'start-queued'}});
+       if(!result.ok){const live=realStore.liveTimelineTask?.();error.textContent=result.code==='TASK_RUNNING'&&live?'Finish “'+live.name+'” first.':result.code;}
+       refresh();
+      }finally{ring.disabled=false;}
+      return;
+     }
      if(tapOnly()){
       if(previewing)return;
       hideTaskCard(true);
@@ -397,10 +409,20 @@
     });
     bar.append(ring);}
    ring.classList.toggle('exact-task-ring-beside-arrow',!item.taskBlob&&item.followNow);
-   updateTaskRing(ring,item,task);
+   ring.classList.toggle('is-queued-task',!!queued);
+   ring.setAttribute('aria-label',queued?'Start queued task '+queued.name:tapOnly()?'Open running task':item.taskBlob?'Settle this task':'Preview running task');
+   if(queued){
+    ring.title='Queued: '+queued.name;
+    const arc=ring.querySelector('.exact-task-ring-arc');
+    arc.style.strokeDashoffset='0';arc.style.stroke='#89929d';
+   }else{
+    ring.removeAttribute('title');
+    updateTaskRing(ring,item,task);
+   }
   }
+  const taskEnd=(item,task,now)=>item.taskBlob?Date.parse(task.startedAt)+task.durationMs:window.ProximaBlobTasks?.attempt(task,now).end;
   function updateTaskRing(ring,item,task){
-   const now=clockNow(),end=item.taskBlob?Date.parse(task.startedAt)+task.durationMs:window.ProximaBlobTasks?.attempt(task,now).end;
+   const now=clockNow(),end=taskEnd(item,task,now);
    if(!Number.isFinite(end))return;
    const left=Math.max(0,Math.min(1,(end-now)/task.durationMs)),hue=Math.round(120*left);
    const arc=ring.querySelector('.exact-task-ring-arc');arc.style.strokeDashoffset=String(47.12*(1-left));arc.style.stroke='hsl('+hue+' 70% 52%)';
@@ -514,21 +536,218 @@
   });
   const {element:crank,paint:paintCrank}=timerCrank;
   timerMinutes.addEventListener('input',()=>paintCrank());
-  timerCard.append(timerName,timerStart,timerMinutes,timerUnit,crank,timerStatus);element.append(timerCard);
+  const queueControls=document.createElement('div');queueControls.className='exact-task-queue-controls';
+  const queueTask=document.createElement('button'),randomTask=document.createElement('button');
+  queueTask.type=randomTask.type='button';queueTask.textContent='+';
+  queueTask.title='Queue selected blob';queueTask.setAttribute('aria-label',queueTask.title);
+  randomTask.title='Randomly start a queued task';randomTask.setAttribute('aria-label',randomTask.title);
+  randomTask.innerHTML='<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 6h3c5 0 7 12 12 12h3m-4-4 4 4-4 4M3 18h3c5 0 7-12 12-12h3m-4-4 4 4-4 4"/></svg>';
+  const wheelWrap=document.createElement('div'),wheel=document.createElement('div');
+  wheelWrap.className='exact-task-wheel';wheelWrap.hidden=true;wheelWrap.append(wheel);
+  queueControls.append(queueTask,randomTask);
+  const timerInline=document.createElement('div');timerInline.className='exact-timer-inline';
+  timerInline.append(timerUnit,queueControls);
+  timerCard.append(timerName,timerStart,timerMinutes,timerInline,crank,wheelWrap,timerStatus);element.append(timerCard);
+  let spinning=false,queueBusy=false;
+  const queuedTasks=()=>realStore.timelineIntervals().filter(item=>item.queuedTask&&!item.groupChildren&&!item.taskBlob&&!item.sourceFollowing);
+  const widgetQueue=document.createElement('section'),widgetQueueList=document.createElement('div');
+  const queuePicker=document.createElement('div'),queueSearch=document.createElement('input');
+  const queueMatches=document.createElement('div'),queueAdd=document.createElement('button'),queueClose=document.createElement('button');
+  queuePicker.className='exact-widget-queue-picker';
+  queueSearch.type='search';queueSearch.placeholder='Search live blobs';queueSearch.setAttribute('aria-label','Search live blobs');
+  queueMatches.className='exact-widget-queue-matches';
+  queueClose.type='button';queueClose.textContent='×';queueClose.setAttribute('aria-label','Close blob picker');
+  queueClose.onclick=()=>{queuePicker.hidden=true;queueAdd.setAttribute('aria-expanded','false');queueAdd.focus();};
+  const queueNameForm=document.createElement('form'),queueName=document.createElement('input'),queueConfirm=document.createElement('button');
+  queueNameForm.className='exact-widget-queue-name';queueNameForm.hidden=true;
+  queueName.type='text';queueName.maxLength=300;queueName.required=true;queueName.setAttribute('aria-label','Queued task name');
+  queueConfirm.type='submit';queueConfirm.textContent='Queue';
+  queueNameForm.append(queueName,queueConfirm);
+  queuePicker.append(queueSearch,queueClose,queueMatches,queueNameForm);
+  widgetQueue.className='exact-widget-queue';widgetQueue.hidden=true;
+  queueAdd.type='button';queueAdd.textContent='+';queueAdd.title='Select a blob to queue';queueAdd.setAttribute('aria-label',queueAdd.title);
+  queuePicker.hidden=true;queuePicker.setAttribute('aria-label','Select a blob to queue');
+  const widgetQueueStatus=document.createElement('small');widgetQueueStatus.setAttribute('role','status');
+  widgetQueue.append(widgetQueueList,queueAdd,widgetQueueStatus);
+  let widgetQueueKey='',queueBlobId=null;
+  for(const list of [widgetQueueList,queueMatches]){
+   let origin=null,speed=0,frame=0;
+   const stop=()=>{origin=null;speed=0;cancelAnimationFrame(frame);frame=0;list.classList.remove('is-autoscrolling');};
+   const scroll=()=>{list.scrollTop+=speed;frame=requestAnimationFrame(scroll);};
+   list.addEventListener('mousedown',event=>{
+    if(event.button!==1){if(origin!==null)stop();return;}
+    if(origin===null&&list.scrollHeight<=list.clientHeight)return;
+    event.preventDefault();event.stopPropagation();
+    if(origin!==null){stop();return;}
+    origin=event.clientY;list.classList.add('is-autoscrolling');frame=requestAnimationFrame(scroll);
+   });
+   list.addEventListener('wheel',event=>{event.stopPropagation();if(origin!==null)stop();},{passive:true});
+   list.addEventListener('auxclick',event=>{if(event.button===1)event.preventDefault();});
+   window.addEventListener('mousemove',event=>{
+    if(origin===null)return;
+    if(!list.getClientRects().length){stop();return;}
+    const offset=event.clientY-origin;
+    speed=Math.sign(offset)*Math.min(25,Math.max(0,Math.abs(offset)-8)/5);
+   });
+   window.addEventListener('mousedown',event=>{if(origin!==null&&!list.contains(event.target))stop();});
+   window.addEventListener('blur',stop);
+  }
+  function selectQueueBlob(item){
+   queueBlobId=item.id;
+   queueName.value=item.name;
+   queueSearch.hidden=queueMatches.hidden=true;queueNameForm.hidden=false;
+   queueName.focus();queueName.select();
+  }
+  queueNameForm.onsubmit=event=>{event.preventDefault();if(queueBlobId)void assignQueueBlob(queueBlobId);};
+  queueName.addEventListener('keydown',event=>event.stopPropagation());
+  function updateWidgetQueue(){
+   if(!taskWidget)return;
+   widgetQueue.hidden=spinning;
+   const entries=queuedTasks(),key=JSON.stringify(entries.map(item=>[item.id,item.queuedTask.name]));
+   if(key===widgetQueueKey)return;
+   widgetQueueKey=key;
+   widgetQueueList.replaceChildren(...entries.map(item=>{
+    const row=document.createElement('div'),name=document.createElement('button'),remove=document.createElement('button');
+    row.className='exact-widget-queue-entry';
+    name.type='button';name.className='exact-widget-queue-start';name.textContent=item.queuedTask.name;
+    name.setAttribute('aria-label','Start queued task '+item.queuedTask.name);
+    name.onclick=async()=>{
+     if(name.disabled)return;
+     name.disabled=true;
+     try{
+      const result=await realStore.command({type:'timeline-interval.task',payload:{intervalId:item.id,action:'start-queued'}});
+      if(!result.ok){
+       const live=realStore.liveTimelineTask?.();
+       widgetQueueStatus.textContent=result.code==='TASK_RUNNING'&&live?'Finish “'+live.name+'” first.':'Could not start: '+result.code;
+      }else{
+       widgetQueueStatus.textContent='';
+       updateTaskWidget();
+      }
+     }finally{name.disabled=false;updateQueueControls();}
+    };
+    remove.type='button';remove.textContent='−';remove.title='Remove '+item.queuedTask.name+' from queue';remove.setAttribute('aria-label',remove.title);
+    remove.onclick=async()=>{
+     remove.disabled=true;
+     try{const result=await realStore.command({type:'timeline-interval.task',payload:{intervalId:item.id,action:'unqueue'}});
+      if(!result.ok)remove.title='Could not remove: '+result.code;
+     }finally{remove.disabled=false;updateQueueControls();}
+    };
+    row.append(name,remove);return row;
+   }));
+  }
+  const eligibleQueueBlobs=()=>realStore.timelineIntervals().filter(item=>item.followNow&&!item.queuedTask&&!item.groupChildren&&!item.taskBlob&&!item.sourceFollowing&&!item.tasks?.some(task=>!task.completedAt));
+  const foldQueueName=value=>value.normalize('NFD').replace(/\p{M}/gu,'').toLocaleLowerCase().replace(/đ/g,'d');
+  const matchingQueueBlobs=()=>{const query=foldQueueName(queueSearch.value.trim());return eligibleQueueBlobs().filter(item=>foldQueueName(item.name).includes(query));};
+  async function assignQueueBlob(id){
+   if(queueConfirm.disabled||!queueName.value.trim())return;
+   const item=eligibleQueueBlobs().find(item=>item.id===id);if(!item){renderQueueMatches();return;}
+   const minutes=Math.round(Number(timerMinutes.value));
+   const durationMs=Number.isFinite(minutes)&&minutes>=1&&minutes<=1440?minutes*60000:item.taskDurationMs||25*60000;
+   queueConfirm.disabled=true;
+   try{
+    const result=await realStore.command({type:'timeline-interval.task',payload:{intervalId:item.id,action:'queue',name:queueName.value.trim(),durationMs}});
+    if(result.ok){queuePicker.hidden=true;queueAdd.setAttribute('aria-expanded','false');queueAdd.focus();}
+    else queueAdd.title='Could not queue: '+result.code;
+   }finally{queueConfirm.disabled=false;renderQueueMatches();updateQueueControls();}
+  }
+  function renderQueueMatches(){
+   const matches=matchingQueueBlobs();
+   if(!matches.length){queueMatches.textContent='No matching live blobs';return;}
+   queueMatches.replaceChildren(...matches.map(item=>{
+    const button=document.createElement('button');button.type='button';button.textContent=item.name;
+    button.onclick=()=>selectQueueBlob(item);return button;
+   }));
+  }
+  queueSearch.oninput=renderQueueMatches;
+  queueSearch.onkeydown=event=>{
+   event.stopPropagation();
+   if(event.key==='Enter'&&!event.isComposing){event.preventDefault();const first=matchingQueueBlobs()[0];if(first)selectQueueBlob(first);}
+   if(event.key==='ArrowDown'){event.preventDefault();queueMatches.querySelector('button')?.focus();}
+  };
+  queueAdd.setAttribute('aria-expanded','false');
+  queueAdd.onclick=()=>{
+   queuePicker.hidden=!queuePicker.hidden;
+   queueAdd.setAttribute('aria-expanded',String(!queuePicker.hidden));
+   if(!queuePicker.hidden){queueBlobId=null;queueNameForm.hidden=true;queueSearch.hidden=queueMatches.hidden=false;queueSearch.value='';renderQueueMatches();queueSearch.focus();}
+  };
+  function updateQueueControls(){
+   const running=realStore.liveTimelineTask?.();
+   const target=timerTarget&&realStore.timelineIntervals().find(item=>item.id===timerTarget.id);
+   const queued=target?.queuedTask;
+   timerName.disabled=timerMinutes.disabled=!!queued;
+   crank.inert=!!queued;
+   if(queued){
+    timerName.value=queued.name;
+    timerMinutes.value=String(Math.round(queued.durationMs/60000));
+    paintCrank();
+   }
+   queueTask.hidden=taskWidget||!target||selected.size!==1||!selected.has(target.id)||!!target.queuedTask||!!target.tasks?.some(task=>!task.completedAt);
+   queueTask.disabled=queueBusy||spinning;
+   randomTask.hidden=queuedTasks().length<2;
+   randomTask.disabled=spinning||!!running;
+   timerStart.disabled=spinning||!!running||queueBusy||!!queued;
+   queueControls.hidden=!taskWidget&&queueTask.hidden&&randomTask.hidden;
+   updateWidgetQueue();
+  }
+  queueTask.addEventListener('click',async()=>{
+   if(queueTask.disabled||queueTask.hidden||!timerTarget)return;
+   const minutes=Math.round(Number(timerMinutes.value)),target=timerTarget;
+   if(!Number.isFinite(minutes)||minutes<1||minutes>1440){timerStatus.textContent='1 to 1440 minutes.';return;}
+   queueBusy=true;updateQueueControls();
+   try{
+    const result=await store.command({type:'timeline-interval.task',payload:{intervalId:target.id,action:'queue',name:timerName.value.trim()||target.name,durationMs:minutes*60000}});
+    timerStatus.textContent=result.ok?'Queued '+result.value.queuedTask.name:'Could not queue: '+result.code;
+   }finally{queueBusy=false;updateQueueControls();refresh();}
+  });
+  randomTask.addEventListener('click',async()=>{
+   if(randomTask.disabled)return;
+   const entries=queuedTasks();if(entries.length<2)return;
+   const winner=Math.floor(Math.random()*entries.length),step=360/entries.length;
+   wheel.style.background='conic-gradient('+entries.map((_,index)=>'hsl('+Math.round(index*137.508%360)+' 50% 42%) '+index*step+'deg '+(index+1)*step+'deg').join(',')+')';
+   wheel.replaceChildren(...entries.map((entry,index)=>{
+    const label=document.createElement('span'),angle=(index+.5)*step*Math.PI/180;
+    label.textContent=entry.queuedTask.name;label.title=entry.queuedTask.name;
+    label.style.left=(50+30*Math.sin(angle))+'%';label.style.top=(50-30*Math.cos(angle))+'%';
+    const degrees=(index+.5)*step;
+    label.style.rotate=(degrees>180?degrees-270:degrees-90)+'deg';
+    return label;
+   }));
+   spinning=true;wheelWrap.hidden=false;updateQueueControls();
+   timerStatus.textContent='';
+   try{
+    await wheel.animate([{transform:'rotate(0deg)'},{transform:'rotate('+(2160-(winner+.5)*step)+'deg)'}],{duration:3000,easing:'cubic-bezier(.12,.7,.12,1)',fill:'forwards'}).finished;
+    const chosen=entries[winner];
+    const result=await store.command({type:'timeline-interval.task',payload:{intervalId:chosen.id,action:'start-queued'}});
+    timerStatus.textContent=result.ok?'Started '+chosen.queuedTask.name:(updateTimerHint()||'Could not start: '+result.code);
+   }finally{spinning=false;wheelWrap.hidden=true;wheel.getAnimations().forEach(animation=>animation.cancel());updateQueueControls();refresh();if(taskWidget)updateTaskWidget();}
+  });
   for(const field of [timerName,timerMinutes])field.addEventListener('keydown',event=>{event.stopPropagation();if(event.key==='Enter'){event.preventDefault();void startTaskBlob();}if(event.key==='Escape'){event.preventDefault();closeTimerCard(true);}});
+  timerCard.addEventListener('wheel',event=>event.stopPropagation(),{passive:true});
   timerCard.addEventListener('pointerdown',event=>event.stopPropagation());
+  timerCard.addEventListener('pointerenter',hideTimelineCursor);
+  timerCard.addEventListener('pointermove',event=>{hideTimelineCursor();event.stopPropagation();});
   const taskWidget=options.taskWidget===true;
   let timerCardClose=0,timerTarget=null;
+  function updateTimerHint(){
+   const running=realStore.liveTimelineTask?.();
+   const hint=running?'Finish “'+running.name+'” first.':'Start a task';
+   timerButton.title=hint;timerButton.setAttribute('aria-label',hint);
+   return running?hint:'';
+  }
   function openTimerCard(){
    if(!taskWidget&&(settings.readOnly||far||previewing))return;
    clearTimeout(timerCardClose);
    if(!timerCard.hidden)return;
    const item=!taskWidget&&selected.size===1?allItems().find(item=>selected.has(item.id)):null;
    timerTarget=item&&!item.groupChildren&&!item.taskBlob&&!item.sourceFollowing&&!item.tasks?.some(task=>!task.completedAt)?item:null;
-   timerName.value=timerTarget?.name||'';
+   const hint=taskWidget?'':updateTimerHint();
+   updateQueueControls();
+   if(hint&&queueControls.hidden&&!timerName.disabled)return;
+   if(!timerName.disabled)timerName.value=timerTarget?.name||'';
    let minutes=25;
    try{const saved=Number(localStorage.getItem(TASK_MINUTES));if(Number.isInteger(saved)&&saved>=1&&saved<=1440)minutes=saved;}catch{}
-   timerMinutes.value=String(minutes);paintCrank();timerStatus.textContent='';popIn(timerCard);
+   if(!timerMinutes.disabled)timerMinutes.value=String(minutes);
+   paintCrank();timerStatus.textContent=hint;popIn(timerCard);
    placeTimerCard();
   }
   function placeTimerCard(){
@@ -540,11 +759,14 @@
    timerCard.style.top=(box.bottom-host.top+6)+'px';
    timerCard.style.left=Math.max(view.left+6,Math.min(box.right-host.left-width,view.right-width-6))+'px';
   }
-  function closeTimerCard(now){if(taskWidget)return;if(!now&&(tapOnly()||timerCrank.dragging()))return;clearTimeout(timerCardClose);if(tapOnly()){timerCard.getAnimations().forEach(animation=>animation.cancel());timerCard.hidden=true;return;}const go=()=>{if(timerCard.contains(document.activeElement)&&!now)return;popOut(timerCard);};if(now)go();else timerCardClose=setTimeout(go,350);}
+  function closeTimerCard(now){if(taskWidget||spinning)return;if(!now&&(tapOnly()||timerCrank.dragging()))return;clearTimeout(timerCardClose);if(tapOnly()){timerCard.getAnimations().forEach(animation=>animation.cancel());timerCard.hidden=true;return;}const go=()=>{if(timerCard.contains(document.activeElement)&&!now)return;popOut(timerCard);};if(now)go();else timerCardClose=setTimeout(go,350);}
   timerButton.addEventListener('pointerenter',event=>{if(!tapOnly()&&event.pointerType!=='touch')openTimerCard();});
+  timerButton.addEventListener('focus',updateTimerHint);
   timerButton.addEventListener('click',()=>{
    if(tapOnly()&&!timerCard.hidden){closeTimerCard(true);return;}
-   openTimerCard();if(!tapOnly()&&!timerCard.hidden)timerName.focus();
+   openTimerCard();
+   if(timerCard.hidden){const hint=updateTimerHint();if(hint)error.textContent=hint;}
+   else if(!tapOnly())timerName.focus();
   });
   timerButton.addEventListener('mouseleave',()=>closeTimerCard(false));timerCard.addEventListener('mouseenter',()=>clearTimeout(timerCardClose));timerCard.addEventListener('mouseleave',()=>closeTimerCard(false));
   timerName.addEventListener('blur',()=>{if(!timerCard.matches(':hover'))closeTimerCard(false);});
@@ -564,7 +786,7 @@
      const now=clockNow(),target=freeCreationDestination(now);
      result=await store.command({type:'timeline-interval.create',payload:{name,color:creationColor(),rowId:target.row?(target.row.rowId||target.row.id):undefined,beforeId:target.row?undefined:ordered()[target.index]?.id,start:new Date(now).toISOString(),end:new Date(now+1).toISOString(),followNow:true,taskDurationMs:durationMs}});
     }
-    if(!result.ok){timerStatus.textContent='Not started: '+result.code;return;}
+    if(!result.ok){timerStatus.textContent=result.code==='TASK_RUNNING'?updateTimerHint():'Not started: '+result.code;return;}
     try{localStorage.setItem(TASK_MINUTES,String(minutes));}catch{}
     closeTimerCard(true);refresh();if(taskWidget)updateTaskWidget();
    }finally{timerStart.disabled=false;}
@@ -575,16 +797,29 @@
    const tasks=window.ProximaBlobTasks;
    const running=tasks&&realStore.timelineIntervals().find(item=>tasks.running(item.id));
    if(running){
+    if(widgetQueue.parentElement!==taskCard)taskCard.append(widgetQueue);
+    if(queueAdd.parentElement!==widgetQueue)widgetQueue.append(queueAdd);
     timerCard.hidden=true;
     if(taskCardFor!==running.id){taskCardFor=running.id;tasks.mount(taskCard,running.id);}
     taskCard.hidden=false;
    }else{
     if(taskCardFor!==null){tasks?.hide();taskCardFor=null;}
     taskCard.hidden=true;
+    if(widgetQueue.parentElement!==timerCard)timerCard.insertBefore(widgetQueue,wheelWrap);
+    if(queueAdd.parentElement!==queueControls)queueControls.append(queueAdd);
+    const opening=timerCard.hidden;
     openTimerCard();
+    if(opening&&document.hasFocus())timerName.focus({preventScroll:true});
    }
+   updateWidgetQueue();
   }
   if(taskWidget){
+   element.append(queuePicker);
+   window.addEventListener('focus',()=>{
+    if(!timerCard.hidden&&(!document.activeElement||document.activeElement===document.body)){
+     timerName.focus({preventScroll:true});
+    }
+   });
    document.body.classList.add('papers-task-widget');
    element.classList.add('papers-task-widget-timeline');
    const style=document.createElement('style');
@@ -598,7 +833,7 @@
     .papers-task-widget-timeline > .exact-task-card:not([hidden]){display:block!important}
     /* drag the widget by its card; anything you click or type into stays usable */
     .papers-task-widget-timeline > :is(.exact-task-card,.exact-timer-card){-webkit-app-region:drag}
-    .papers-task-widget-timeline :is(input,textarea,select,button,a,label,[contenteditable],.exact-timer-crank,.blob-task-ring,.blob-task-proof,.blob-task-history,.blob-task-done){-webkit-app-region:no-drag}
+    .papers-task-widget-timeline :is(input,textarea,select,button,a,label,[contenteditable],.exact-timer-crank,.blob-task-ring,.blob-task-proof,.blob-task-history,.blob-task-done,.exact-widget-queue,.exact-widget-queue *, .exact-widget-queue-picker,.exact-widget-queue-picker *){-webkit-app-region:no-drag}
     .papers-task-widget-timeline > :is(.exact-task-card,.exact-timer-card){position:absolute!important;inset:8px 8px auto!important;width:auto!important;max-width:none!important;max-height:calc(100vh - 16px)!important;overflow:auto}
    `;
    document.head.append(style);
@@ -746,8 +981,40 @@
    if(running)fills.push(running);
    return fills;
   }
+  function paintTaskEndPreview(bar,item,paintLeft,viewStart,viewScale,exposed){
+   const now=clockNow(),tasks=window.ProximaBlobTasks;
+   const running=!item.groupChildren&&!(item.queueId&&item.queueIndex>0)&&tasks?.runningFill(item,now);
+   const task=running&&item.tasks.find(task=>!task.completedAt);
+   const end=task?taskEnd(item,task,now):NaN;
+   const right=Math.min(exposed.right,geometry.position(end,viewStart,viewScale));
+   const origin=running?geometry.position(running.start,viewStart,viewScale):NaN;
+   const left=Math.max(exposed.left,origin);
+   const width=right-left;
+   if(!(end>now&&width>0)){
+    bar.taskEndPreview?.remove();bar.taskEndPreview=null;return;
+   }
+   if(!bar.taskEndPreview){
+    const ns='http://www.w3.org/2000/svg';
+    const svg=document.createElementNS(ns,'svg'),fill=document.createElementNS(ns,'path'),line=document.createElementNS(ns,'path');
+    svg.setAttribute('preserveAspectRatio','none');svg.setAttribute('aria-hidden','true');
+    svg.classList.add('exact-task-end-preview');
+    fill.setAttribute('fill','currentColor');fill.setAttribute('fill-rule','evenodd');
+    line.setAttribute('fill','none');line.setAttribute('stroke','currentColor');
+    line.setAttribute('stroke-width','1.6');line.setAttribute('stroke-linecap','round');
+    svg.append(fill,line);bar.prepend(svg);bar.taskEndPreview=svg;
+   }
+   const svg=bar.taskEndPreview;
+   const shape=taskFillShape([{x0:origin-left,x1:geometry.position(end,viewStart,viewScale)-left}],width);
+   svg.setAttribute('viewBox','0 0 '+width+' 42');
+   svg.firstElementChild.setAttribute('d',shape.path);
+   svg.lastElementChild.setAttribute('d',shape.line);
+   svg.style.left=(left-paintLeft)+'px';
+   svg.style.width=width+'px';
+   svg.style.color=item.color||'#a1cc43';
+  }
   // The underline stays fixed while task attempts rise out of it.
   function paintTaskFills(bar,item,paintLeft,paintRight,viewStart,viewScale,exposed){
+   paintTaskEndPreview(bar,item,paintLeft,viewStart,viewScale,exposed);
    if(item.groupChildren||(item.queueId&&item.queueIndex>0)){
     bar.fillStretches=null;
     bar.taskFillLayer?.remove();
@@ -789,7 +1056,7 @@
     line.setAttribute('stroke-width','1.6');
     line.setAttribute('stroke-linecap','round');
     svg.append(path,line);
-    bar.prepend(svg);
+    bar.insertBefore(svg,bar.taskEndPreview?.nextSibling??bar.firstChild);
     bar.taskFillLayer=svg;
    }
    const svg=bar.taskFillLayer,line=svg.lastElementChild,path=line.previousElementSibling;
@@ -1053,6 +1320,8 @@
   function selectionPayload(){const all=allItems();return {intervalIds:[...selected],revisions:Object.fromEntries(all.map(x=>[x.id,x.rev]))};}
   function enterGroup(id){const group=allItems().find(x=>x.id===id&&x.groupChildren);if(!group)return;groupReturnViews.push({start,scale,scrollTop:tracks.scrollTop});groupTrail.push(id);const a=Date.parse(group.start),b=Date.parse(group.end);scale=Math.max(1e-10,Math.min(1,(element.clientWidth-60)/Math.max(1,b-a)));start=a-30/scale;selected.clear();refresh();tracks.scrollTop=0;}
   function render(){
+   if(!taskWidget)updateTimerHint();
+   if(!timerCard.hidden)updateQueueControls();
    placeTimerCard();
    if(document.querySelector('.blob-workspace-pane:not([hidden])')&&(remainingLabel.classList.contains('is-elapsed')||blobName.dataset.elapsedPopup))hideRemaining();
    {const day=86400000*scale,t=Math.max(0,Math.min(1,(day-3)/15));ROW=Math.round(14+46*t);const next=ROW<40;if(next!==far){far=next;element.classList.toggle('exact-far',far);}element.style.setProperty('--exact-blob-height',Math.min(42,ROW-4)+'px');}

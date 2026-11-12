@@ -14,5 +14,40 @@ test('rename and colour work; times are refused',async()=>{const h=fixture();con
 test('grouping with one live blob moves the task in for good; anything else is refused',async()=>{const h=fixture();const live=(await h.store.command({type:'timeline-interval.create',payload:{name:'Live',start:iso(base-60*M),end:iso(base),followNow:true}})).value.id;const ended=(await h.store.command({type:'timeline-interval.create',payload:{name:'Old',start:iso(base-300*M),end:iso(base-200*M)}})).value.id;const t=(await startTask(h,'Read',25)).value.id;
  assert.equal((await h.store.command({type:'timeline-group.create',payload:{intervalIds:[t,ended]}})).code,'TASK_BLOB_GROUP');
  const r=await h.store.command({type:'timeline-group.create',payload:{intervalIds:[t,live]}});assert.equal(r.ok,true,r.code);assert.equal(get(h,t),undefined);assert.equal(get(h,live).tasks.length,1);assert.equal(get(h,live).tasks[0].name,'Read');});
-test('grouping refuses two running tasks in one blob',async()=>{const h=fixture();const live=(await h.store.command({type:'timeline-interval.create',payload:{name:'Live',start:iso(base-60*M),end:iso(base),followNow:true}})).value.id;await h.store.command({type:'timeline-interval.task',payload:{intervalId:live,action:'start',name:'Own',durationMs:25*M}});const t=(await startTask(h,'Read',25)).value.id;assert.equal((await h.store.command({type:'timeline-group.create',payload:{intervalIds:[t,live]}})).code,'TASK_RUNNING');
- h.clock(base+5*M);await task(h,t,'complete');const r=await h.store.command({type:'timeline-group.create',payload:{intervalIds:[t,live]}});assert.equal(r.ok,true,r.code);assert.equal(get(h,live).tasks.length,2);});
+test('only one timeline task can run across different blobs and start controls',async()=>{
+ const h=fixture();
+ const makeBlob=async name=>(await h.store.command({type:'timeline-interval.create',payload:{name,start:iso(base-60*M),end:iso(base),followNow:true}})).value.id;
+ const first=await makeBlob('First'),second=await makeBlob('Second');
+ const begin=id=>task(h,id,'start',{name:'Attached',durationMs:25*M});
+ assert.equal((await begin(first)).ok,true);
+ assert.equal((await begin(second)).code,'TASK_RUNNING');
+ assert.equal((await startTask(h,'Standalone',25)).code,'TASK_RUNNING');
+ assert.equal((await task(h,first,'complete')).ok,true);
+ const standalone=await startTask(h,'Standalone',25);
+ assert.equal(standalone.ok,true);
+ assert.equal((await begin(second)).code,'TASK_RUNNING');
+ h.clock(base+26*M);
+ assert.equal((await begin(second)).ok,true);
+});
+
+test('each blob queues once and a blocked queued start preserves its entry',async()=>{
+ const h=fixture();
+ const first=await startTask(h,'Running',25);
+ const blob=await h.store.command({type:'timeline-interval.create',payload:{name:'Queued blob',start:iso(base-60*M),end:iso(base)}});
+ const id=blob.value.id;
+ const queued=await task(h,id,'queue',{durationMs:15*M});
+ assert.equal(queued.ok,true);
+ assert.equal(get(h,id).queuedTask.name,'Queued blob');
+ assert.equal((await task(h,id,'queue',{durationMs:30*M})).code,'TASK_ALREADY_QUEUED');
+ assert.equal((await task(h,id,'start-queued')).code,'TASK_RUNNING');
+ assert.equal(get(h,id).queuedTask.durationMs,15*M);
+ assert.equal((await task(h,id,'unqueue')).ok,true);
+ assert.equal(get(h,id).queuedTask,null);
+ assert.equal((await task(h,id,'start-queued')).code,'TASK_RUNNING');
+ assert.equal((await task(h,id,'queue',{durationMs:15*M})).ok,true);
+ assert.equal((await task(h,first.value.id,'complete')).ok,true);
+ const started=await task(h,id,'start-queued');
+ assert.equal(started.ok,true);
+ assert.equal(started.value.task.durationMs,15*M);
+ assert.equal(get(h,id).queuedTask,null);
+});
