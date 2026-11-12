@@ -517,12 +517,13 @@
   timerCard.append(timerName,timerStart,timerMinutes,timerUnit,crank,timerStatus);element.append(timerCard);
   for(const field of [timerName,timerMinutes])field.addEventListener('keydown',event=>{event.stopPropagation();if(event.key==='Enter'){event.preventDefault();void startTaskBlob();}if(event.key==='Escape'){event.preventDefault();closeTimerCard(true);}});
   timerCard.addEventListener('pointerdown',event=>event.stopPropagation());
+  const taskWidget=options.taskWidget===true;
   let timerCardClose=0,timerTarget=null;
   function openTimerCard(){
-   if(settings.readOnly||far||previewing)return;
+   if(!taskWidget&&(settings.readOnly||far||previewing))return;
    clearTimeout(timerCardClose);
    if(!timerCard.hidden)return;
-   const item=selected.size===1?allItems().find(item=>selected.has(item.id)):null;
+   const item=!taskWidget&&selected.size===1?allItems().find(item=>selected.has(item.id)):null;
    timerTarget=item&&!item.groupChildren&&!item.taskBlob&&!item.sourceFollowing&&!item.tasks?.some(task=>!task.completedAt)?item:null;
    timerName.value=timerTarget?.name||'';
    let minutes=25;
@@ -531,7 +532,7 @@
    placeTimerCard();
   }
   function placeTimerCard(){
-   if(timerCard.hidden)return;
+   if(timerCard.hidden||taskWidget)return;
    const host=element.getBoundingClientRect(),box=timerButton.getBoundingClientRect(),view=availableViewport();
    const width=Math.max(0,Math.min(358,view.width-12));
    timerCard.classList.toggle('is-wrapped',width<350);
@@ -539,7 +540,7 @@
    timerCard.style.top=(box.bottom-host.top+6)+'px';
    timerCard.style.left=Math.max(view.left+6,Math.min(box.right-host.left-width,view.right-width-6))+'px';
   }
-  function closeTimerCard(now){if(!now&&(tapOnly()||timerCrank.dragging()))return;clearTimeout(timerCardClose);if(tapOnly()){timerCard.getAnimations().forEach(animation=>animation.cancel());timerCard.hidden=true;return;}const go=()=>{if(timerCard.contains(document.activeElement)&&!now)return;popOut(timerCard);};if(now)go();else timerCardClose=setTimeout(go,350);}
+  function closeTimerCard(now){if(taskWidget)return;if(!now&&(tapOnly()||timerCrank.dragging()))return;clearTimeout(timerCardClose);if(tapOnly()){timerCard.getAnimations().forEach(animation=>animation.cancel());timerCard.hidden=true;return;}const go=()=>{if(timerCard.contains(document.activeElement)&&!now)return;popOut(timerCard);};if(now)go();else timerCardClose=setTimeout(go,350);}
   timerButton.addEventListener('pointerenter',event=>{if(!tapOnly()&&event.pointerType!=='touch')openTimerCard();});
   timerButton.addEventListener('click',()=>{
    if(tapOnly()&&!timerCard.hidden){closeTimerCard(true);return;}
@@ -565,11 +566,43 @@
     }
     if(!result.ok){timerStatus.textContent='Not started: '+result.code;return;}
     try{localStorage.setItem(TASK_MINUTES,String(minutes));}catch{}
-    closeTimerCard(true);refresh();
+    closeTimerCard(true);refresh();if(taskWidget)updateTaskWidget();
    }finally{timerStart.disabled=false;}
   }
   const taskCard=document.createElement('div');taskCard.className='exact-task-card';taskCard.hidden=true;element.append(taskCard);
   let taskCardFor=null,taskCardPrevious=null,taskCardOpen=0,taskCardClose=0;
+  function updateTaskWidget(){
+   const tasks=window.ProximaBlobTasks;
+   const running=tasks&&realStore.timelineIntervals().find(item=>tasks.running(item.id));
+   if(running){
+    timerCard.hidden=true;
+    if(taskCardFor!==running.id){taskCardFor=running.id;tasks.mount(taskCard,running.id);}
+    taskCard.hidden=false;
+   }else{
+    if(taskCardFor!==null){tasks?.hide();taskCardFor=null;}
+    taskCard.hidden=true;
+    openTimerCard();
+   }
+  }
+  if(taskWidget){
+   document.body.classList.add('papers-task-widget');
+   element.classList.add('papers-task-widget-timeline');
+   const style=document.createElement('style');
+   style.textContent=`
+    body.papers-task-widget *{visibility:hidden}
+    .papers-task-widget .papers-task-widget-timeline{position:fixed!important;inset:0!important;width:auto!important;height:auto!important;z-index:2147483647;overflow:auto}
+    .papers-task-widget-timeline > :is(.exact-task-card,.exact-timer-card):not([hidden]),
+    .papers-task-widget-timeline > :is(.exact-task-card,.exact-timer-card):not([hidden]) *{visibility:visible}
+    /* the narrow widget is in far zoom, which hides these cards on the timeline; here they are the whole view */
+    .papers-task-widget-timeline > .exact-timer-card:not([hidden]){display:grid!important}
+    .papers-task-widget-timeline > .exact-task-card:not([hidden]){display:block!important}
+    .papers-task-widget-timeline > :is(.exact-task-card,.exact-timer-card){position:absolute!important;inset:8px 8px auto!important;width:auto!important;max-width:none!important;max-height:calc(100vh - 16px)!important;overflow:auto}
+   `;
+   document.head.append(style);
+   requestAnimationFrame(updateTaskWidget);
+   setInterval(updateTaskWidget,500);
+  }
+
   function taskPreviewAnchor(target){
    const bar=target?.closest?.('.exact-interval,.exact-outside-name');
    if(!bar?.interval||bar.interval.groupChildren)return null;
@@ -584,7 +617,7 @@
    const width=Math.max(0,Math.min(560,view.width-16)),height=taskCard.offsetHeight||420;
    let left=Math.max(view.left+8,Math.min(box.right-host.left-width,view.right-width-8)),top=box.bottom-host.top+6;if(top+height>element.clientHeight)top=Math.max(8,box.top-host.top-height-6);
    taskCard.style.width=width+'px';taskCard.style.left=left+'px';taskCard.style.top=top+'px';}
-  function hideTaskCard(now){
+  function hideTaskCard(now){if(taskWidget)return;
    if(tapOnly()&&!now)return;
    clearTimeout(taskCardOpen);clearTimeout(taskCardClose);
    const go=()=>{

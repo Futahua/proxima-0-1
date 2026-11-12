@@ -3574,6 +3574,13 @@
   // Remember the last entered view like Papers remembers its workspace: on a
   // fresh launch with no address, reopen where the reader left off. Best
   // effort only — a dead or missing route falls through to Daily below.
+  if(new URLSearchParams(location.search).has('papers-task-widget')){
+    const widget=document.createElement('div');
+    widget.className='exact-timeline';
+    document.body.append(widget);
+    ExactTimeline.mount(widget,Store,{taskWidget:true});
+    return;
+  }
   const LAST_VIEW_KEY = 'proxima.last-view';
   try {
     if (!location.hash || location.hash === '#/') {

@@ -2,7 +2,7 @@
  try{
   await ProximaPersistence.ready;
   for(const name of ['schedule-fixture','remote-domain','schedule-projection','remote-follow','store','schedule-zoom','life-clock','date-strip','marquee-controller','exact-timeline','appflowy-workspace','blob-pane-layout','blob-tasks','blob-workspaces','blob-pane-controls','app','phone-back','native-modal-guard','flow-space-follow','flow-embed-bridge']){
-   await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src=name+'.js?v=calendar-native-peek-v249';script.onload=resolve;script.onerror=reject;document.body.append(script);});
+   await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src=name+'.js?v=calendar-native-peek-v250';script.onload=resolve;script.onerror=reject;document.body.append(script);});
    if(name==='store'&&globalThis.__proximaDevice)Store.command=globalThis.__proximaDevice.command;
    if(name==='store'){
     globalThis.__papersFlushBeforeClose=()=>Store.flushCommands();
