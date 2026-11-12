@@ -596,6 +596,9 @@
     /* the narrow widget is in far zoom, which hides these cards on the timeline; here they are the whole view */
     .papers-task-widget-timeline > .exact-timer-card:not([hidden]){display:grid!important}
     .papers-task-widget-timeline > .exact-task-card:not([hidden]){display:block!important}
+    /* drag the widget by its card; anything you click or type into stays usable */
+    .papers-task-widget-timeline > :is(.exact-task-card,.exact-timer-card){-webkit-app-region:drag}
+    .papers-task-widget-timeline :is(input,textarea,select,button,a,label,[contenteditable],.exact-timer-crank,.blob-task-ring,.blob-task-proof,.blob-task-history,.blob-task-done){-webkit-app-region:no-drag}
     .papers-task-widget-timeline > :is(.exact-task-card,.exact-timer-card){position:absolute!important;inset:8px 8px auto!important;width:auto!important;max-width:none!important;max-height:calc(100vh - 16px)!important;overflow:auto}
    `;
    document.head.append(style);
