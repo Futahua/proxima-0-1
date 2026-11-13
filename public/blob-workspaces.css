@@ -135,7 +135,7 @@
 .papers-task-widget .exact-widget-queue-picker:not([hidden]){visibility:visible;position:absolute;inset:8px;z-index:100;display:grid;grid-template-columns:minmax(0,1fr) 28px;grid-template-rows:auto minmax(0,1fr);gap:6px;overflow:hidden;padding:8px;background:#1b2027;border:1px solid #536272;border-radius:5px;-webkit-app-region:no-drag}
 .papers-task-widget .exact-widget-queue-picker:not([hidden]) *{visibility:visible}
 .exact-widget-queue-picker input,.exact-widget-queue-picker button{min-width:0;background:#252d36;color:#e6e9ef;border:1px solid #536272;border-radius:4px;padding:4px 6px}
-.exact-widget-queue-picker .exact-widget-queue-matches{grid-column:1/-1;align-content:start;max-height:none}
+.exact-widget-queue-picker .exact-widget-queue-matches{grid-column:1/-1;align-content:start;min-height:0;max-height:none;grid-auto-rows:minmax(28px,max-content);overflow-y:auto;overscroll-behavior:contain}
 .exact-widget-queue-matches{display:grid;gap:2px;max-height:140px;overflow:auto;color:#aeb9c6;font:13px system-ui}
 .exact-timer-card .exact-widget-queue-matches button,.exact-widget-queue-matches button{display:block;width:100%;height:auto;padding:4px 6px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .exact-widget-queue-matches button:hover,.exact-widget-queue-matches button:focus-visible{background:#394553}
@@ -169,3 +169,8 @@
 .exact-widget-queue .exact-widget-queue-start{display:block;flex:1;width:auto;min-width:0;min-height:28px;border:0;background:transparent;padding:0;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .exact-widget-queue .exact-widget-queue-start:hover,.exact-widget-queue .exact-widget-queue-start:focus-visible{color:var(--accent,#a1cc43)}
 .exact-widget-queue>small:empty{display:none}
+
+.exact-widget-queue-picker>.exact-widget-queue-name:not([hidden]){display:grid;grid-template-columns:64px minmax(0,1fr) auto;align-items:center;overflow:auto;max-height:100%}
+.exact-widget-queue-name>input[type=text]{grid-column:1/3}
+.exact-widget-queue-name>input[type=number]{width:100%;box-sizing:border-box}
+.exact-widget-queue-name>.exact-widget-queue-crank{grid-column:3;grid-row:2/4;width:88px;max-width:100%}

@@ -562,7 +562,16 @@
   queueNameForm.className='exact-widget-queue-name';queueNameForm.hidden=true;
   queueName.type='text';queueName.maxLength=300;queueName.required=true;queueName.setAttribute('aria-label','Queued task name');
   queueConfirm.type='submit';queueConfirm.textContent='Queue';
-  queueNameForm.append(queueName,queueConfirm);
+  const queueDuration=document.createElement('input'),queueUnits=document.createElement('span');
+  queueDuration.type='number';queueDuration.min='1';queueDuration.max='1440';queueDuration.step='1';queueDuration.required=true;
+  queueDuration.setAttribute('aria-label','Queued task duration in minutes');queueUnits.textContent='min';
+  const queueCrank=createTimerCrank({
+   getMinutes:()=>Number(queueDuration.value),
+   onTurn:minutes=>{queueDuration.value=String(Math.round(minutes));}
+  });
+  queueCrank.element.classList.add('exact-widget-queue-crank');
+  queueDuration.addEventListener('input',()=>queueCrank.paint());
+  queueNameForm.append(queueName,queueConfirm,queueDuration,queueUnits,queueCrank.element);
   queuePicker.append(queueSearch,queueClose,queueMatches,queueNameForm);
   widgetQueue.className='exact-widget-queue';widgetQueue.hidden=true;
   queueAdd.type='button';queueAdd.textContent='+';queueAdd.title='Select a blob to queue';queueAdd.setAttribute('aria-label',queueAdd.title);
@@ -595,6 +604,8 @@
   function selectQueueBlob(item){
    queueBlobId=item.id;
    queueName.value=item.name;
+   queueDuration.value=String(Math.round((item.taskDurationMs??((Number(timerMinutes.value)||25)*60000))/60000));
+   queueCrank.paint();
    queueSearch.hidden=queueMatches.hidden=true;queueNameForm.hidden=false;
    queueName.focus();queueName.select();
   }
@@ -641,8 +652,9 @@
   async function assignQueueBlob(id){
    if(queueConfirm.disabled||!queueName.value.trim())return;
    const item=eligibleQueueBlobs().find(item=>item.id===id);if(!item){renderQueueMatches();return;}
-   const minutes=Math.round(Number(timerMinutes.value));
-   const durationMs=Number.isFinite(minutes)&&minutes>=1&&minutes<=1440?minutes*60000:item.taskDurationMs||25*60000;
+   const minutes=Number(queueDuration.value);
+   if(!Number.isInteger(minutes)||minutes<1||minutes>1440){queueDuration.reportValidity();return;}
+   const durationMs=minutes*60000;
    queueConfirm.disabled=true;
    try{
     const result=await realStore.command({type:'timeline-interval.task',payload:{intervalId:item.id,action:'queue',name:queueName.value.trim(),durationMs}});

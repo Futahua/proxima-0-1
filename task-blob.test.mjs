@@ -46,8 +46,10 @@ test('each blob queues once and a blocked queued start preserves its entry',asyn
  assert.equal((await task(h,id,'start-queued')).code,'TASK_RUNNING');
  assert.equal((await task(h,id,'queue',{durationMs:15*M})).ok,true);
  assert.equal((await task(h,first.value.id,'complete')).ok,true);
+ assert.equal((await task(h,id,'default-duration',{durationMs:120*M})).ok,true);
+ assert.equal(get(h,id).queuedTask.durationMs,120*M);
  const started=await task(h,id,'start-queued');
  assert.equal(started.ok,true);
- assert.equal(started.value.task.durationMs,15*M);
+ assert.equal(started.value.task.durationMs,120*M);
  assert.equal(get(h,id).queuedTask,null);
 });

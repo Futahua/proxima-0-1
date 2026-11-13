@@ -147,15 +147,15 @@
  async function command(payload){const r=await Store.command({type:'timeline-interval.task',payload:{intervalId:view.intervalId,...payload}});if(!r.ok){view.parts.status.textContent=r.code==='TASK_RUNNING'?finishFirst(Store.liveTimelineTask()):'Not saved: '+(r.code||'refused');}else view.parts.status.textContent='';refreshTimelines();render(true);return r;}
  function refreshTimelines(){document.querySelectorAll('.exact-timeline').forEach(node=>root.ExactTimeline?.mount(node,Store)?.refresh());}
  const finishFirst=task=>task?'Finish “'+task.name+'” first.':'Finish the running task first.';
- const durationOf=item=>Number.isSafeInteger(item?.taskDurationMs)&&item.taskDurationMs>=MIN?item.taskDurationMs:DEFAULT_MS;
+ const durationOf=item=>{const duration=item?.queuedTask?.durationMs??item?.taskDurationMs;return Number.isSafeInteger(duration)&&duration>=MIN?duration:DEFAULT_MS;};
 
  function wire(){
   const p=view.parts;
   const start=async()=>{const value=p.name.value.trim(),item=blobOf(view.intervalId);if(!value||!item)return;const running=runningOf(item);
-   if(!running&&item.queuedTask)return;
+   if(!running&&item.queuedTask){if(value!==item.queuedTask.name)await command({action:'rename-queued',name:value});return;}
    if(running){if(value!==running.name)await command({action:'rename',taskId:running.id,name:value});return;}
    await command({action:'start',name:value,durationMs:durationOf(item)});};
-  p.name.taskKey=(e=>{if(e.key==='Enter'){e.preventDefault();p.name.blur();}if(e.key==='Escape'){const r=runningOf(blobOf(view.intervalId));p.name.value=r?.name||'';p.name.blur();}});
+  p.name.taskKey=(e=>{if(e.key==='Enter'){e.preventDefault();p.name.blur();}if(e.key==='Escape'){const r=runningOf(blobOf(view.intervalId));p.name.value=r?.name||blobOf(view.intervalId)?.queuedTask?.name||'';p.name.blur();}});
   p.name.addEventListener('blur',()=>void start());
   p.queue.onclick=async()=>{
    const item=blobOf(view.intervalId);if(!item||p.queue.disabled)return;
@@ -246,18 +246,18 @@
   if(!running)p.crank.paint((item.queuedTask?.durationMs??durationOf(item))/MIN);
   if(running&&view.taskId!==running.id)void loadProof(running.id);
   if(!running&&view.taskId){void flushProof();view.taskId=null;view.doc=null;paintEditor(emptyProof());}
-  if(document.activeElement!==p.name)p.name.value=running?running.name:p.name.value&&!force?p.name.value:'';
+  if(document.activeElement!==p.name)p.name.value=running?running.name:item.queuedTask?.name??(p.name.value&&!force?p.name.value:'');
   const blocked=!running&&Store.liveTimelineTask();
   p.queue.hidden=!!running||!!item.taskBlob;
   p.queue.disabled=!!item.queuedTask&&!!blocked;
   p.queue.textContent=item.queuedTask?'▶':'+';
   const queueLabel=item.queuedTask?(blocked?finishFirst(blocked):'Start queued task '+item.queuedTask.name):'Queue this task';
   p.queue.title=queueLabel;p.queue.setAttribute('aria-label',queueLabel);
-  p.name.disabled=!!blocked||!running&&!!(item.taskBlob||item.queuedTask);p.name.title=blocked?finishFirst(blocked):'';p.stop.hidden=!running;p.proof.classList.toggle('is-disabled',!running);if(!running)p.saved.textContent='';p.list.parentElement.hidden=!!item.taskBlob;
+  p.name.disabled=!item.queuedTask&&(!!blocked||!running&&!!item.taskBlob);p.name.title=item.queuedTask?'Rename queued task':blocked?finishFirst(blocked):'';p.stop.hidden=!running;p.proof.classList.toggle('is-disabled',!running);if(!running)p.saved.textContent='';p.list.parentElement.hidden=!!item.taskBlob||!!view.node.closest('.exact-task-card');
   p.ring.classList.toggle('is-idle',!running);
   if(running){const a=attempt(running,now),left=item.taskBlob&&a.index>1?0:a.end-now;p.crank.paint(left/MIN);p.time.textContent=clockText(left);p.arc.style.strokeDashoffset=String(p.C*(1-left/running.durationMs));p.note.textContent='🔔 '+timeText(a.end)+(a.index>1?' · restarted':'');if(item.taskBlob&&a.index>1){p.time.textContent=clockText(0);p.note.textContent='Time is up';}}
   else if(item.taskBlob){const t=tasksOf(item)[0];p.time.textContent=t?clockText(Date.parse(t.completedAt)-Date.parse(t.startedAt)):'';p.arc.style.strokeDashoffset='0';p.note.textContent=t?'Done '+timeText(Date.parse(t.completedAt)):'';}
-  else{const ms=item.queuedTask?.durationMs??durationOf(item);p.time.textContent=clockText(ms);p.arc.style.strokeDashoffset='0';p.note.textContent=blocked?finishFirst(blocked):item.queuedTask?'Queued: '+item.queuedTask.name:'Name a task to start';}
+  else{const ms=item.queuedTask?.durationMs??durationOf(item);p.time.textContent=clockText(ms);p.arc.style.strokeDashoffset='0';p.note.textContent=blocked?finishFirst(blocked):item.queuedTask?'':'Name a task to start';}
   renderDone();
   const done=tasksOf(item).filter(t=>t.completedAt).sort((a,b)=>Date.parse(b.completedAt)-Date.parse(a.completedAt)),key=JSON.stringify(done.map(t=>[t.id,t.name,t.completedAt]));
   if(key===view.lastKey&&!force)return;view.lastKey=key;

@@ -832,7 +832,7 @@ const Store = (() => {
     put('timeline-interval.delete-batch',selection,['intervalIds']);
     put('timeline-interval.reorder-batch',{...selection,beforeId:nullable(str)},['intervalIds']);
     put('timeline-interval.template',{intervalId:key,template:{enum:['as-you-go','appflowy',null]},removeKind:{enum:['as-you-go','appflowy']},renew:bool,appflowyWorkspaceId:key,appflowyPageId:key,appflowyIconUrl:nullable(str),expectedDocumentId:key},['intervalId','template']);
-    put('timeline-interval.task',{intervalId:key,action:{enum:['start','queue','unqueue','start-queued','rename','duration','default-duration','complete','abandon','delete']},taskId:key,name:key,durationMs:integer},['intervalId','action']);
+    put('timeline-interval.task',{intervalId:key,action:{enum:['start','queue','unqueue','rename-queued','start-queued','rename','duration','default-duration','complete','abandon','delete']},taskId:key,name:key,durationMs:integer},['intervalId','action']);
     put('timeline-interval.move-selection',{...selection,rowId:nullable(str),newRow:bool,times:array(object({id:key,start:instant,end:instant},['id','start','end']))},['intervalIds']);
     put('timeline-group.ungroup',{groupId:key,revisions},['groupId']);
     put('timeline-group.add',{...selection,groupId:key},['groupId','intervalIds']);
@@ -1512,6 +1512,7 @@ const Store = (() => {
           if(!name||!validDuration(payload.durationMs))return refuse('PAYLOAD_INVALID',{});
           extra={queuedTask:{name,durationMs:payload.durationMs}};break;
         }
+        case 'rename-queued':{if(!item.queuedTask)return refuse('TASK_NOT_QUEUED',{});const name=cleanName(payload.name);if(!name)return refuse('NAME_REQUIRED',{});extra={queuedTask:{...item.queuedTask,name}};break;}
         case 'unqueue':{if(!item.queuedTask)return refuse('TASK_NOT_QUEUED',{});extra={queuedTask:null};break;}
         case 'start':
         case 'start-queued':{
@@ -1526,7 +1527,7 @@ const Store = (() => {
         }
         case 'rename':{if(!target)return refuse('TASK_NOT_FOUND',{});const name=cleanName(payload.name);if(!name)return refuse('NAME_REQUIRED',{});target.name=name;break;}
         case 'duration':{if(!target||target.completedAt)return refuse('TASK_NOT_FOUND',{});if(!validDuration(payload.durationMs))return refuse('PAYLOAD_INVALID',{});target.startedAt=new Date(attemptStart(target)).toISOString();target.durationMs=payload.durationMs;extra={taskDurationMs:payload.durationMs};break;}
-        case 'default-duration':{if(!validDuration(payload.durationMs))return refuse('PAYLOAD_INVALID',{});extra={taskDurationMs:payload.durationMs};break;}
+        case 'default-duration':{if(!validDuration(payload.durationMs))return refuse('PAYLOAD_INVALID',{});extra={taskDurationMs:payload.durationMs,...(item.queuedTask?{queuedTask:{...item.queuedTask,durationMs:payload.durationMs}}:{})};break;}
         case 'complete':{if(!target||target.completedAt)return refuse('TASK_NOT_FOUND',{});target.startedAt=new Date(attemptStart(target)).toISOString();target.completedAt=new Date(Math.max(now,Date.parse(target.startedAt)+1)).toISOString();break;}
         case 'abandon':{if(!target||target.completedAt)return refuse('TASK_NOT_FOUND',{});tasks.splice(tasks.indexOf(target),1);break;}
         case 'delete':{if(!target)return refuse('TASK_NOT_FOUND',{});tasks.splice(tasks.indexOf(target),1);break;}
