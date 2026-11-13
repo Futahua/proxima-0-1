@@ -237,13 +237,13 @@
   if(p.crank.dragging())return;
   if(!item){updateLiveCrank(view,null,false);p.status.textContent='This blob no longer exists.';view.blobMissing=true;return;}
   if(view.blobMissing){p.status.textContent='';view.blobMissing=false;}
-  p.name.placeholder=item.name||'Task';
+  p.name.placeholder=item.queuedTask?.name||item.name||'Task';
   const running=runningOf(item),now=Date.now();
   updateLiveCrank(view,running,!!item.taskBlob);
   p.started.hidden=!running;
   if(running){p.started.dateTime=running.startedAt;p.started.textContent=timeText(Date.parse(running.startedAt));p.started.title="Started at "+p.started.textContent;}
   p.crank.element.hidden=!!item.taskBlob&&!running;
-  if(!running)p.crank.paint(durationOf(item)/MIN);
+  if(!running)p.crank.paint((item.queuedTask?.durationMs??durationOf(item))/MIN);
   if(running&&view.taskId!==running.id)void loadProof(running.id);
   if(!running&&view.taskId){void flushProof();view.taskId=null;view.doc=null;paintEditor(emptyProof());}
   if(document.activeElement!==p.name)p.name.value=running?running.name:p.name.value&&!force?p.name.value:'';
@@ -257,7 +257,7 @@
   p.ring.classList.toggle('is-idle',!running);
   if(running){const a=attempt(running,now),left=item.taskBlob&&a.index>1?0:a.end-now;p.crank.paint(left/MIN);p.time.textContent=clockText(left);p.arc.style.strokeDashoffset=String(p.C*(1-left/running.durationMs));p.note.textContent='🔔 '+timeText(a.end)+(a.index>1?' · restarted':'');if(item.taskBlob&&a.index>1){p.time.textContent=clockText(0);p.note.textContent='Time is up';}}
   else if(item.taskBlob){const t=tasksOf(item)[0];p.time.textContent=t?clockText(Date.parse(t.completedAt)-Date.parse(t.startedAt)):'';p.arc.style.strokeDashoffset='0';p.note.textContent=t?'Done '+timeText(Date.parse(t.completedAt)):'';}
-  else{const ms=durationOf(item);p.time.textContent=clockText(ms);p.arc.style.strokeDashoffset='0';p.note.textContent=blocked?finishFirst(blocked):item.queuedTask?'Queued: '+item.queuedTask.name:'Name a task to start';}
+  else{const ms=item.queuedTask?.durationMs??durationOf(item);p.time.textContent=clockText(ms);p.arc.style.strokeDashoffset='0';p.note.textContent=blocked?finishFirst(blocked):item.queuedTask?'Queued: '+item.queuedTask.name:'Name a task to start';}
   renderDone();
   const done=tasksOf(item).filter(t=>t.completedAt).sort((a,b)=>Date.parse(b.completedAt)-Date.parse(a.completedAt)),key=JSON.stringify(done.map(t=>[t.id,t.name,t.completedAt]));
   if(key===view.lastKey&&!force)return;view.lastKey=key;
