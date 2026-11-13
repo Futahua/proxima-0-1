@@ -693,7 +693,7 @@
     timerMinutes.value=String(Math.round(queued.durationMs/60000));
     paintCrank();
    }
-   queueTask.hidden=taskWidget||!target||selected.size!==1||!selected.has(target.id)||!!target.queuedTask||!!target.tasks?.some(task=>!task.completedAt);
+   queueTask.hidden=taskWidget||!target||(!timerDrop&&(selected.size!==1||!selected.has(target.id)))||!!target.queuedTask||!!target.tasks?.some(task=>!task.completedAt);
    queueTask.disabled=queueBusy||spinning;
    randomTask.hidden=queuedTasks().length<2;
    randomTask.disabled=spinning||!!running;
@@ -739,18 +739,18 @@
   timerCard.addEventListener('pointerenter',hideTimelineCursor);
   timerCard.addEventListener('pointermove',event=>{hideTimelineCursor();event.stopPropagation();});
   const taskWidget=options.taskWidget===true;
-  let timerCardClose=0,timerTarget=null;
+  let timerCardClose=0,timerTarget=null,timerDrop=null,clockDrag=null,ignoreClockClick=false;
   function updateTimerHint(){
    const running=realStore.liveTimelineTask?.();
    const hint=running?'Finish “'+running.name+'” first.':'Start a task';
    timerButton.title=hint;timerButton.setAttribute('aria-label',hint);
    return running?hint:'';
   }
-  function openTimerCard(){
+  function openTimerCard(droppedItem=null){
    if(!taskWidget&&(settings.readOnly||far||previewing))return;
    clearTimeout(timerCardClose);
    if(!timerCard.hidden)return;
-   const item=!taskWidget&&selected.size===1?allItems().find(item=>selected.has(item.id)):null;
+   const item=droppedItem??(!taskWidget&&selected.size===1?allItems().find(item=>selected.has(item.id)):null);
    timerTarget=item&&!item.groupChildren&&!item.taskBlob&&!item.sourceFollowing&&!item.tasks?.some(task=>!task.completedAt)?item:null;
    const hint=taskWidget?'':updateTimerHint();
    updateQueueControls();
@@ -768,13 +768,85 @@
    const width=Math.max(0,Math.min(358,view.width-12));
    timerCard.classList.toggle('is-wrapped',width<350);
    timerCard.style.width=width+'px';
+   if(timerDrop){
+    const row=bars.get(timerTarget?.id)?.getBoundingClientRect();
+    if(row){
+     const below=row.bottom-host.top+6,above=row.top-host.top-timerCard.offsetHeight-6;
+     timerCard.style.top=Math.max(0,below+timerCard.offsetHeight<=host.height?below:above)+'px';
+     timerCard.style.left=Math.max(view.left+6,Math.min(timerDrop.x,view.right-width-6))+'px';
+     return;
+    }
+   }
    timerCard.style.top=(box.bottom-host.top+6)+'px';
    timerCard.style.left=Math.max(view.left+6,Math.min(box.right-host.left-width,view.right-width-6))+'px';
   }
-  function closeTimerCard(now){if(taskWidget||spinning)return;if(!now&&(tapOnly()||timerCrank.dragging()))return;clearTimeout(timerCardClose);if(tapOnly()){timerCard.getAnimations().forEach(animation=>animation.cancel());timerCard.hidden=true;return;}const go=()=>{if(timerCard.contains(document.activeElement)&&!now)return;popOut(timerCard);};if(now)go();else timerCardClose=setTimeout(go,350);}
+  function closeTimerCard(now){if(taskWidget||spinning)return;if(!now&&(timerDrop||tapOnly()||timerCrank.dragging()))return;if(now)timerDrop=null;clearTimeout(timerCardClose);if(tapOnly()){timerCard.getAnimations().forEach(animation=>animation.cancel());timerCard.hidden=true;return;}const go=()=>{if(timerCard.contains(document.activeElement)&&!now)return;popOut(timerCard);};if(now)go();else timerCardClose=setTimeout(go,350);}
+  function dismissDroppedTimer(){
+   if(!timerDrop||timerCard.hidden)return false;
+   clearTimeout(timerCardClose);
+   timerDrop=null;
+   timerCard.getAnimations().forEach(animation=>animation.cancel());
+   timerCard.hidden=true;
+   return true;
+  }
+  window.addEventListener('keydown',event=>{
+   if(event.key==='Escape'&&dismissDroppedTimer()){event.preventDefault();event.stopImmediatePropagation();}
+  },true);
+  function dismissTimerOutside(event){
+   if(!timerCard.contains(event.target)&&!timerButton.contains(event.target))dismissDroppedTimer();
+  }
+  window.addEventListener('pointerdown',dismissTimerOutside,true);
+  window.addEventListener('click',dismissTimerOutside,true);
+  const clockPill=document.createElement('div');
+  clockPill.className='exact-clock-drag-pill';clockPill.hidden=true;
+  clockPill.setAttribute('aria-hidden','true');clockPill.append(timerButton.firstElementChild.cloneNode(true));
+  element.append(clockPill);
+  const clockDropPreview=document.createElement('div');
+  clockDropPreview.className='exact-clock-drop-preview';tracks.append(clockDropPreview);
+  function previewClockDrop(bar){
+   clockDropPreview.classList.toggle('is-visible',!!bar);
+   if(bar)clockDropPreview.style.top=bar.style.top;
+  }
+  timerButton.addEventListener('pointerdown',event=>{
+   if(event.button!==0||taskWidget||settings.readOnly||far||previewing)return;
+   clockDrag={id:event.pointerId,x:event.clientX,y:event.clientY,moved:false,bar:null};
+   timerButton.setPointerCapture(event.pointerId);
+  });
+  timerButton.addEventListener('pointermove',event=>{
+   if(!clockDrag||clockDrag.id!==event.pointerId)return;
+   if(!clockDrag.moved){
+    if(Math.hypot(event.clientX-clockDrag.x,event.clientY-clockDrag.y)<6)return;
+    clockDrag.moved=true;closeTimerCard(true);
+   }
+   const box=tracks.getBoundingClientRect(),view=availableViewport(),host=element.getBoundingClientRect();
+   const x=event.clientX-host.left,y=event.clientY-box.top+tracks.scrollTop;
+   const eligible=bar=>{const item=bar.interval;return item&&!item.groupChildren&&!item.taskBlob&&!item.sourceFollowing&&!item.tasks?.some(task=>!task.completedAt);};
+   const direct=document.elementFromPoint(event.clientX,event.clientY)?.closest('.exact-interval,.exact-outside-name');
+   const hit=direct&&bars.get(direct.interval?.id);
+   const candidates=[...bars.values()].filter(bar=>eligible(bar)&&Math.abs(y-parseFloat(bar.style.top)-ROW/2)<ROW/2);
+   clockPill.hidden=false;
+   clockPill.style.left=x+'px';clockPill.style.top=(event.clientY-host.top)+'px';
+   clockDrag.bar=event.clientY>=box.top&&event.clientY<box.bottom&&x>=view.left&&x<=view.right
+    ?hit&&eligible(hit)?hit:candidates.length===1?candidates[0]:null:null;
+   previewClockDrop(clockDrag.bar);
+  });
+  function finishClockDrag(event){
+   if(!clockDrag||clockDrag.id!==event.pointerId)return;
+   const {moved,bar}=clockDrag;clockDrag=null;clockPill.hidden=true;previewClockDrop(null);
+   if(!moved)return;
+   ignoreClockClick=true;setTimeout(()=>{ignoreClockClick=false;},0);
+   if(event.type!=='pointerup'||!bar?.isConnected)return;
+   timerCard.getAnimations().forEach(animation=>animation.cancel());
+   timerCard.hidden=true;
+   timerDrop={x:event.clientX-element.getBoundingClientRect().left};
+   openTimerCard(bar.interval);
+   if(timerCard.hidden)timerDrop=null;else if(!timerName.disabled)timerName.focus({preventScroll:true});
+  }
+  for(const type of ['pointerup','pointercancel','lostpointercapture'])timerButton.addEventListener(type,finishClockDrag);
   timerButton.addEventListener('pointerenter',event=>{if(!tapOnly()&&event.pointerType!=='touch')openTimerCard();});
   timerButton.addEventListener('focus',updateTimerHint);
   timerButton.addEventListener('click',()=>{
+   if(ignoreClockClick)return;
    if(tapOnly()&&!timerCard.hidden){closeTimerCard(true);return;}
    openTimerCard();
    if(timerCard.hidden){const hint=updateTimerHint();if(hint)error.textContent=hint;}
@@ -1002,19 +1074,21 @@
   queueForecastPath.setAttribute('stroke-opacity','.45');
   queueForecastPath.setAttribute('stroke-width','1.5');
   queueForecast.append(queueForecastPath);tracks.append(queueForecast);
-  function paintQueueForecast(exposed){
+  let queueForecastFrame=0;
+  function paintQueueForecast(exposed,followMotion=false){
+   const rowY=id=>{const bar=bars.get(id);if(!bar)return NaN;return (followMotion?bar.getBoundingClientRect().top-tracks.getBoundingClientRect().top+tracks.scrollTop:parseFloat(bar.style.top))+(followMotion?bar.getBoundingClientRect().height:bar.offsetHeight)-.75;};
    const entries=queuedTasks(),now=clockNow(),live=realStore.liveTimelineTask?.();
    const owner=live&&realStore.timelineIntervals().find(item=>item.id===live.intervalId);
    const task=owner?.tasks?.find(item=>item.id===live.taskId);
    let time=task?Math.max(now,taskEnd(owner,task,now)):now;
-   let previousY=task?parseFloat(bars.get(owner.id)?.style.top)+ROW/2:NaN;
+   let previousY=task?rowY(owner.id):NaN;
    const path=[];
    queueForecast.replaceChildren(queueForecastPath);
    for(const item of entries){
     const x0=geometry.position(time,start,scale);
     time+=item.queuedTask.durationMs;
     const x1=geometry.position(time,start,scale);
-    const y=parseFloat(bars.get(item.id)?.style.top)+ROW/2;
+    const y=rowY(item.id);
     if(!Number.isFinite(y)){previousY=NaN;continue;}
     if(x0>exposed.right)break;
     if(x0>=exposed.left&&Number.isFinite(previousY)&&previousY!==y){
@@ -1352,7 +1426,17 @@
    if(reducedMotion()){apply();saveGroupExpansion();refresh();return;}
    const before=barRects(),beforeNames=nameRects(),{group,pieces}=groupPieceRects(groupId);
    const shown=new Map([...bars].map(([id,bar])=>[id,{bar,item:bar.interval}]));
+   cancelAnimationFrame(queueForecastFrame);
+   const outgoing=queueForecast.cloneNode(true);
+   if(queueForecast.children.length>1){
+    tracks.append(outgoing);
+    const fade=outgoing.animate([{opacity:1},{opacity:0}],MOTION);
+    fade.onfinish=fade.oncancel=()=>outgoing.remove();
+   }
    apply();saveGroupExpansion();refresh();
+   const started=performance.now();
+   const follow=()=>{paintQueueForecast(availableViewport(),true);if(performance.now()-started<MOTION.duration+120)queueForecastFrame=requestAnimationFrame(follow);else paintQueueForecast(availableViewport());};
+   queueForecastFrame=requestAnimationFrame(follow);
    if(opening){let index=0;for(const [id,bar] of bars)if(!before.has(id))arrive(bar,memberRect(bar.interval,pieces,group),{delay:Math.min(120,index++*14)});fadeIn([...outsideNames].filter(([id,node])=>!beforeNames.has(id)&&!node.hidden).map(([,node])=>node),MOTION.duration*.7);slide(before,beforeNames);return;}
    const target=groupPieceRects(groupId);
    for(const [id,entry] of shown)if(!bars.has(id))depart(entry.bar,before.get(id),memberRect(entry.item,target.pieces,target.group),{collapsing:true});
